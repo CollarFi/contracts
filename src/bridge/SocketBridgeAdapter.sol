@@ -20,13 +20,13 @@ contract SocketBridgeAdapter is IBridgeAdapter {
     }
 
     BridgeType public immutable bridgeType;
-    ISocketBridge public immutable bridge;
+    ISocketBridge public immutable socketBridge;
     ISocketVault public immutable socketVault;
 
     constructor(BridgeType bridgeType_, address bridge_, address socketVault_) {
         if (bridgeType_ == BridgeType.NONE) revert("SBA:invalid-type");
         bridgeType = bridgeType_;
-        bridge = ISocketBridge(bridge_);
+        socketBridge = ISocketBridge(bridge_);
         socketVault = ISocketVault(socketVault_);
     }
 
@@ -37,7 +37,7 @@ contract SocketBridgeAdapter is IBridgeAdapter {
         returns (uint256)
     {
         if (bridgeType == BridgeType.NEW) {
-            return ISocketBridgeWithFees(address(bridge)).getMinFees(connector, msgGasLimit, payloadSize);
+            return ISocketBridgeWithFees(address(socketBridge)).getMinFees(connector, msgGasLimit, payloadSize);
         }
         return socketVault.getMinFees(connector, msgGasLimit);
     }
@@ -51,7 +51,7 @@ contract SocketBridgeAdapter is IBridgeAdapter {
         bytes calldata options
     ) external payable override {
         if (bridgeType == BridgeType.NEW) {
-            bridge.bridge{value: msg.value}(receiver, amount, msgGasLimit, connector, extraData, options);
+            socketBridge.bridge{value: msg.value}(receiver, amount, msgGasLimit, connector, extraData, options);
         } else {
             socketVault.depositToAppChain{value: msg.value}(receiver, amount, msgGasLimit, connector);
         }
