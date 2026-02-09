@@ -74,7 +74,7 @@ contract CollarVaultTest is Test {
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
 
         vault.setCollateralConfig(address(wbtc), true, 1e8);
-        vault.setSocketBridgeConfigNew(
+        vault.setSocketVaultConfigNew(
             address(wbtc),
             ISocketBridge(address(bridge)),
             ISocketConnector(address(connector)),

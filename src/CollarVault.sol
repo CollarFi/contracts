@@ -874,7 +874,7 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     }
 
     /// @notice Configure Socket bridge settings for an asset using the new bridge controller.
-    function setSocketBridgeConfigNew(
+    function setSocketVaultConfigNew(
         address asset,
         ISocketBridge bridge,
         ISocketConnector connector,
@@ -910,7 +910,7 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     }
 
     /// @notice Configure Socket bridge settings for an asset using the legacy Socket vault.
-    function setSocketBridgeConfigOld(
+    function setSocketVaultConfigOld(
         address asset,
         ISocketVault socketVault,
         ISocketConnector connector,
