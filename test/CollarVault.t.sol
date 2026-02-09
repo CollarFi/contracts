@@ -8,8 +8,6 @@ import {CollarVault, ILiquidityVault} from "../src/CollarVault.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
-import {ISocketBridge} from "../src/interfaces/ISocketBridge.sol";
-import {ISocketConnector} from "../src/interfaces/ISocketConnector.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 
 import {
@@ -22,7 +20,6 @@ import {DeployPermit2} from "permit2/test/utils/DeployPermit2.sol";
 import {Permit2ECDSASigner} from "../lib/euler-earn/lib/euler-vault-kit/test/mocks/Permit2ECDSASigner.sol";
 
 import {MockBridge} from "./mocks/MockBridge.sol";
-import {MockConnector} from "./mocks/MockConnector.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockEulerAdapter} from "./mocks/MockEulerAdapter.sol";
 import {MockBridgeAdapter} from "./mocks/MockBridgeAdapter.sol";
@@ -36,7 +33,6 @@ contract CollarVaultTest is Test {
     CollarLiquidityVault internal liquidityVault;
     MockBridge internal bridge;
     MockBridgeAdapter internal adapter;
-    MockConnector internal connector;
     MockEulerAdapter internal eulerAdapter;
     CollarVault internal vault;
     MockLZMessenger internal messenger;
@@ -55,7 +51,6 @@ contract CollarVaultTest is Test {
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         bridge = new MockBridge(wbtc);
         adapter = new MockBridgeAdapter();
-        connector = new MockConnector(0);
         eulerAdapter = new MockEulerAdapter();
         messenger = new MockLZMessenger();
         borrower = vm.addr(borrowerKey);
@@ -78,15 +73,7 @@ contract CollarVaultTest is Test {
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
 
         vault.setCollateralConfig(address(wbtc), true, 1e8);
-        vault.setSocketVaultConfig(
-            address(wbtc),
-            IBridgeAdapter(address(adapter)),
-            ISocketConnector(address(connector)),
-            200_000,
-            161,
-            "",
-            ""
-        );
+        vault.setSocketVaultConfig(address(wbtc), IBridgeAdapter(address(adapter)));
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);
         vault.setRfqSigner(rfqSigner, true);
