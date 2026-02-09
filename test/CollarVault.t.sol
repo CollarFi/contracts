@@ -74,8 +74,14 @@ contract CollarVaultTest is Test {
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
 
         vault.setCollateralConfig(address(wbtc), true, 1e8);
-        vault.setSocketBridgeConfig(
-            address(wbtc), ISocketBridge(address(bridge)), ISocketConnector(address(connector)), 200_000, "", ""
+        vault.setSocketBridgeConfigNew(
+            address(wbtc),
+            ISocketBridge(address(bridge)),
+            ISocketConnector(address(connector)),
+            200_000,
+            161,
+            "",
+            ""
         );
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);

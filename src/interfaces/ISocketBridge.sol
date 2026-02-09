@@ -11,3 +11,10 @@ interface ISocketBridge {
         bytes calldata options_
     ) external payable;
 }
+
+interface ISocketBridgeWithFees is ISocketBridge {
+    function getMinFees(address connector_, uint256 msgGasLimit_, uint256 payloadSize_)
+        external
+        view
+        returns (uint256 totalFees);
+}
