@@ -9,6 +9,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
+import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
 import {EulerAdapterMock} from "../src/mocks/EulerAdapterMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
@@ -37,6 +38,12 @@ interface IERC4626Like {
 /// - LZ_ENDPOINT (address)      (if omitted, deploys a placeholder mock endpoint)
 /// - L2_EID (uint32)            (default: 0)
 /// - VAULT_OWNER (address)      (defaults to ADMIN)
+/// - WETH_ASSET (address)       (collateral asset to enable)
+/// - WETH_SOCKET_VAULT (address)    (legacy Socket vault)
+/// - WETH_SOCKET_BRIDGE (address)   (new bridge controller)
+/// - WETH_SOCKET_CONNECTOR (address)
+/// - WETH_MSG_GAS_LIMIT (uint256)   (default: 100_000)
+/// - WETH_PAYLOAD_SIZE (uint256)    (default: 161)
 contract DeployL1 is Script {
     function run() external {
         address admin = vm.envAddress("ADMIN");
@@ -61,6 +68,14 @@ contract DeployL1 is Script {
         // LayerZero endpoint can be mocked for fork dev (keeper doesn't rely on sendMessage)
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
         uint32 l2Eid = uint32(vm.envOr("L2_EID", uint256(0)));
+
+        // Optional Socket adapter inputs (WETH only for now)
+        address wethAsset = vm.envOr("WETH_ASSET", address(0));
+        address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
+        address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
+        address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
+        uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
 
         vm.startBroadcast();
 
@@ -94,6 +109,34 @@ contract DeployL1 is Script {
         // Wire the messenger into the vault
         vault.setLZMessenger(CollarVault.ICollarVaultMessenger(address(messenger)));
 
+        // Optional: deploy Socket adapter + set WETH config (legacy vault or new bridge)
+        address wethAdapter = address(0);
+        if (wethAsset != address(0) && wethSocketConnector != address(0)) {
+            SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
+            if (wethSocketVault != address(0)) {
+                bridgeType = SocketBridgeAdapter.BridgeType.OLD;
+            } else if (wethSocketBridge != address(0)) {
+                bridgeType = SocketBridgeAdapter.BridgeType.NEW;
+            }
+
+            if (bridgeType != SocketBridgeAdapter.BridgeType.NONE) {
+                SocketBridgeAdapter adapter = new SocketBridgeAdapter(
+                    bridgeType,
+                    wethSocketBridge,
+                    wethSocketVault,
+                    wethSocketConnector,
+                    wethMsgGasLimit,
+                    wethPayloadSize,
+                    "",
+                    ""
+                );
+                wethAdapter = address(adapter);
+                vault.setSocketVaultConfig(wethAsset, CollarVault.IBridgeAdapter(wethAdapter));
+
+                // TODO: setCollateralConfig + strikeScale for WETH (await Euler + asset config)
+            }
+        }
+
         vm.stopBroadcast();
 
         string memory outPath = vm.envString("OUTPUT_JSON");
@@ -105,6 +148,7 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1EulerAdapter", eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", permit2);
         json = vm.serializeAddress("addrs", "l1EulerEarnUsdc", eulerEarnUsdc);
+        json = vm.serializeAddress("addrs", "l1WethAdapter", wethAdapter);
         vm.writeJson(json, outPath);
 
         console2.log("L1 vault", address(vault));
@@ -113,6 +157,9 @@ contract DeployL1 is Script {
         console2.log("L1 eulerAdapter", eulerAdapter);
         console2.log("L1 permit2", permit2);
         console2.log("L1 EulerEarn USDC", eulerEarnUsdc);
+        if (wethAdapter != address(0)) {
+            console2.log("L1 WETH adapter", wethAdapter);
+        }
         console2.log("Wrote", outPath);
     }
 }
