@@ -78,7 +78,13 @@ json_get_harness() {
   python3 - "$1" <<'PY'
 import json,sys
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    print(json.load(f)['addrs']['lzHarness'])
+    data=json.load(f)
+if isinstance(data, dict) and 'lzHarness' in data:
+    print(data['lzHarness'])
+elif isinstance(data, dict) and isinstance(data.get('addrs'), dict) and 'lzHarness' in data['addrs']:
+    print(data['addrs']['lzHarness'])
+else:
+    raise KeyError("Could not find lzHarness in deployment json")
 PY
 }
 
