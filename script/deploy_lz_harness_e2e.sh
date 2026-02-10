@@ -78,6 +78,11 @@ print(data['addrs']['lzHarness'])
 PY
 }
 
+resolve_account_address() {
+  local account_name="$1"
+  cast wallet address --account "$account_name"
+}
+
 deploy_one_side() {
   local side="$1" # L1 or L2
   local rpc_url_var="${side}_RPC_URL"
@@ -90,18 +95,23 @@ deploy_one_side() {
   must_have "$rpc_url_var"
   must_have "$account_var"
   must_have "$out_var"
-  must_have "$admin_var"
   must_have "$remote_eid_var"
+
+  local admin_address="${!admin_var:-}"
+  if [[ -z "$admin_address" ]]; then
+    admin_address="$(resolve_account_address "${!account_var}")"
+  fi
 
   local output_json="${!out_var}"
   [[ "$output_json" = /* ]] || output_json="$ROOT_DIR/$output_json"
   mkdir -p "$(dirname "$output_json")"
 
   echo "[info] deploying $side harness..."
+  echo "[info] $side admin: $admin_address"
 
   (
     cd "$ROOT_DIR"
-    export ADMIN="${!admin_var}"
+    export ADMIN="$admin_address"
     export REMOTE_EID="${!remote_eid_var}"
     export OUTPUT_JSON="$output_json"
     if [[ -n "${!endpoint_var:-}" ]]; then
