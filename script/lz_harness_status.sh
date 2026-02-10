@@ -116,8 +116,9 @@ main() {
   l2_harness="$(resolve_harness L2)"
 
   local l1_peer_b32 l2_peer_b32
-  l1_peer_b32="$(cast --to-bytes32 "$l1_harness")"
-  l2_peer_b32="$(cast --to-bytes32 "$l2_harness")"
+  # LayerZero peer format is bytes32(uint256(uint160(address))) => right-aligned address bytes.
+  l1_peer_b32="$(cast abi-encode "f(address)" "$l1_harness")"
+  l2_peer_b32="$(cast abi-encode "f(address)" "$l2_harness")"
 
   print_side "L1" "L1_RPC_URL" "L1_REMOTE_EID" "L2_REMOTE_EID" "$l1_harness" "$l2_peer_b32"
   echo
