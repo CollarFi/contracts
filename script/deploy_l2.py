@@ -59,7 +59,7 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
 def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
     env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l2.<env> (and .env.l1.<env> fallback)."),
-    broadcast: bool = typer.Option(True, help="Execute onchain txs"),
+    broadcast: bool = typer.Option(False, help="Execute onchain txs"),
     verify: bool = typer.Option(True, help="Verify contracts during deployment"),
     l1_output_json: str = typer.Option("", help="Optional L1 deployment JSON to auto-fill L1_MESSENGER/L1_VAULT"),
     verifier: str = typer.Option("", help="Optional forge verifier (e.g. blockscout, etherscan)") ,
