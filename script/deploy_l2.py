@@ -77,25 +77,16 @@ def _load_market_registry(chain_id: str, market: str) -> dict[str, str]:
     if not path.is_file():
         raise FileNotFoundError(f"market registry file not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
-    needed = ["option", "spotFeed"]
+    needed = ["option", "spotFeed", "base"]
     missing = [k for k in needed if not data.get(k)]
     if missing:
         raise ValueError(f"market registry missing keys {missing} in {path}")
     return {
         "OPTION_ASSET": str(data["option"]),
         "BASE_FEED": str(data["spotFeed"]),
+        # TSA expects wrappedDepositAsset = market base asset, not TSA token proxy.
+        "WRAPPED_DEPOSIT_ASSET": str(data["base"]),
     }
-
-
-def _load_tsa_token_registry(chain_id: str, tsa_token: str) -> dict[str, str]:
-    path = ROOT_DIR / "lib" / "v2-matching" / "deployments" / chain_id / f"{tsa_token}.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"tsa token registry file not found: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    proxy = data.get("proxy")
-    if not proxy:
-        raise ValueError(f"tsa token registry missing 'proxy' in {path}")
-    return {"WRAPPED_DEPOSIT_ASSET": str(proxy)}
 
 
 @app.command()
@@ -157,11 +148,6 @@ def main(
         market_name = (l2.get("DERIVE_MARKET") or "").strip()
         if market_name:
             registry_resolved.update(_load_market_registry(registry_chain_id_used, market_name))
-
-        # Optional TSA token deployment file for WRAPPED_DEPOSIT_ASSET
-        tsa_token = (l2.get("DERIVE_TSA_TOKEN") or "").strip()
-        if tsa_token:
-            registry_resolved.update(_load_tsa_token_registry(registry_chain_id_used, tsa_token))
 
         for k, v in registry_resolved.items():
             l2.setdefault(k, v)
