@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 from rich import print
 
-from lz_harness_common import ROOT_DIR, cast_call, cast_send, load_env, load_harness_address, must
+from common import ROOT_DIR, cast_call, cast_send, load_env, load_harness_address, must
 
 app = typer.Typer(add_completion=False)
 

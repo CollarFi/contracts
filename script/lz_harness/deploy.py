@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 from rich import print
 
-from lz_harness_common import (
+from common import (
     ROOT_DIR,
     address_to_peer_bytes32,
     cast_send,
