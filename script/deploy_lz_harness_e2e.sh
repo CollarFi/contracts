@@ -125,6 +125,12 @@ resolve_account_address() {
   cast wallet address --account "$account_name"
 }
 
+address_to_peer_bytes32() {
+  local addr="$1"
+  # LayerZero OApp peer expects bytes32(uint256(uint160(addr))) (right-aligned address).
+  cast abi-encode "f(address)" "$addr"
+}
+
 deploy_one_side() {
   local side="$1" # L1 or L2
   local rpc_url_var="${side}_RPC_URL"
@@ -224,8 +230,8 @@ wire_peers() {
 
   local l2_peer_b32
   local l1_peer_b32
-  l2_peer_b32="$(cast --to-bytes32 "$L2_HARNESS")"
-  l1_peer_b32="$(cast --to-bytes32 "$L1_HARNESS")"
+  l2_peer_b32="$(address_to_peer_bytes32 "$L2_HARNESS")"
+  l1_peer_b32="$(address_to_peer_bytes32 "$L1_HARNESS")"
 
   if [[ "$BROADCAST" -eq 1 ]]; then
     echo "[info] wiring L1 peer -> L2"
