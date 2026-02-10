@@ -94,7 +94,7 @@ def main(
         suffix = resolved_env if resolved_env in {"testnet", "mainnet"} else "default"
         l2["OUTPUT_JSON"] = f"./deployments/l2-{suffix}.json"
 
-    profile = derive_registry_profile or l2.get("DERIVE_REGISTRY_PROFILE", "")
+    profile = derive_registry_profile or l2.get("DERIVE_REGISTRY_PROFILE", "") or resolved_env
     chain_id_override = derive_registry_chain_id or l2.get("DERIVE_REGISTRY_CHAIN_ID", "")
     registry_resolved: dict[str, str] = {}
     registry_chain_id_used = ""
