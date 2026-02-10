@@ -32,9 +32,11 @@ import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
 ///
 /// Required env vars:
 /// - ADMIN (address)
+/// - OUTPUT_JSON (string)
+///
+/// Optional wiring vars (can be set later via script/wire_lz_peers.py and receiver admin calls):
 /// - L1_MESSENGER (address)           (for setPeer)
 /// - L1_VAULT (address)               (vaultRecipient)
-/// - OUTPUT_JSON (string)
 ///
 /// Optional:
 /// - LZ_ENDPOINT (address)            (if omitted, deploys a placeholder mock endpoint)
@@ -84,8 +86,8 @@ contract DeployL2 is Script {
     function run() external {
         address admin = vm.envAddress("ADMIN");
 
-        address l1Messenger = vm.envAddress("L1_MESSENGER");
-        address l1Vault = vm.envAddress("L1_VAULT");
+        address l1Messenger = vm.envOr("L1_MESSENGER", address(0));
+        address l1Vault = vm.envOr("L1_VAULT", address(0));
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
         address socketTracker = vm.envOr("SOCKET_TRACKER", address(0));
@@ -138,9 +140,13 @@ contract DeployL2 is Script {
         bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
         CollarLoanStore(loanStoreAddr).grantRole(writerRole, address(receiver));
 
-        receiver.setVaultRecipient(l1Vault);
-        // Allow messages from the L1 messenger (right-aligned bytes32 encoding).
-        receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
+        if (l1Vault != address(0)) {
+            receiver.setVaultRecipient(l1Vault);
+        }
+        if (l1Messenger != address(0)) {
+            // Allow messages from the L1 messenger (right-aligned bytes32 encoding).
+            receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
+        }
 
         vm.stopBroadcast();
 

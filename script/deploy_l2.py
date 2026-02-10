@@ -190,9 +190,6 @@ def main(
             l2.setdefault("L1_MESSENGER", l1_messenger)
             l2.setdefault("L1_VAULT", l1_vault)
 
-    for k in ("L1_MESSENGER", "L1_VAULT"):
-        must(l2, k)
-
     out_abs = resolve_output_json(l2["OUTPUT_JSON"])
     out_abs.parent.mkdir(parents=True, exist_ok=True)
 
@@ -209,12 +206,12 @@ def main(
 
     env_overrides = {
         "ADMIN": l2["ADMIN"],
-        "L1_MESSENGER": l2["L1_MESSENGER"],
-        "L1_VAULT": l2["L1_VAULT"],
         "OUTPUT_JSON": l2["OUTPUT_JSON"],
     }
 
     for opt in (
+        "L1_MESSENGER",
+        "L1_VAULT",
         "LZ_ENDPOINT",
         "SOCKET_TRACKER",
         "LOAN_STORE",

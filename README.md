@@ -98,7 +98,11 @@ uv run python script/lz_harness/deploy.py
 uv run python script/lz_harness/deploy.py --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
+# (L1_MESSENGER/L1_VAULT optional; can wire later)
 uv run python script/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
+
+# Wire L1<->L2 LayerZero peers after both sides are deployed
+uv run python script/wire_lz_peers.py --env testnet --broadcast
 
 # In auto-init mode (no TSA_INIT_DATA), provide TSA init env inputs:
 # SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING,
