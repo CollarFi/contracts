@@ -85,11 +85,27 @@ def main(
         for k, v in registry_resolved.items():
             l2.setdefault(k, v)
 
-    # If creating a new TSA proxy, require init calldata so deploy+initialize happen atomically.
+    # If creating a new TSA proxy without explicit init calldata, ensure auto-init inputs are present.
     if not l2.get("TSA_PROXY") and not l2.get("TSA_INIT_DATA"):
-        raise ValueError(
-            "TSA_INIT_DATA is required when TSA_PROXY is not provided (atomic deploy+init enforced)."
+        auto_keys = (
+            "SUBACCOUNTS",
+            "AUCTION",
+            "CASH",
+            "WRAPPED_DEPOSIT_ASSET",
+            "MANAGER",
+            "MATCHING",
+            "BASE_FEED",
+            "DEPOSIT_MODULE",
+            "WITHDRAWAL_MODULE",
+            "TRADE_MODULE",
+            "RFQ_MODULE",
+            "OPTION_ASSET",
         )
+        missing_auto = [k for k in auto_keys if not l2.get(k)]
+        if missing_auto:
+            raise ValueError(
+                "auto TSA init encoding requires missing env vars: " + ", ".join(missing_auto)
+            )
 
     if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_output_json:
         l1_messenger, l1_vault = _load_l1_addrs(l1_output_json)
@@ -133,6 +149,16 @@ def main(
         "WITHDRAWAL_MODULE",
         "TRADE_MODULE",
         "RFQ_MODULE",
+        "SUBACCOUNTS",
+        "AUCTION",
+        "CASH",
+        "WRAPPED_DEPOSIT_ASSET",
+        "MANAGER",
+        "BASE_FEED",
+        "OPTION_ASSET",
+        "TSA_INITIAL_OWNER",
+        "TSA_SYMBOL",
+        "TSA_NAME",
     ):
         if l2.get(opt):
             env_overrides[opt] = l2[opt]

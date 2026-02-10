@@ -14,6 +14,20 @@ import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol
 import {SocketMessageTrackerMock} from "../src/mocks/SocketMessageTrackerMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
+import {BaseTSA} from "v2-matching/src/tokenizedSubaccounts/BaseTSA.sol";
+import {ISubAccounts} from "v2-core/src/interfaces/ISubAccounts.sol";
+import {DutchAuction} from "v2-core/src/liquidation/DutchAuction.sol";
+import {CashAsset} from "v2-core/src/assets/CashAsset.sol";
+import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
+import {ILiquidatableManager} from "v2-core/src/interfaces/ILiquidatableManager.sol";
+import {IMatching} from "v2-matching/src/interfaces/IMatching.sol";
+import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
+import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
+import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
+import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
+import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
+import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
+
 /// @dev Deploy L2 protocol components.
 ///
 /// Required env vars:
@@ -28,10 +42,44 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - LOAN_STORE (address)             (if omitted, deploys CollarLoanStore)
 /// - TSA_PROXY (address)              (if omitted, deploys ERC1967 proxy)
 /// - TSA_IMPLEMENTATION (address)     (if omitted and TSA_PROXY not provided, deploys CollarTSA implementation)
-/// - TSA_INIT_DATA (bytes)            (initializer calldata for TSA proxy, required if TSA_PROXY is not provided)
+/// - TSA_INIT_DATA (bytes)            (optional explicit initializer calldata for TSA proxy)
 /// - L1_EID (uint32)                  (default: 0)
+///
+/// Auto-init env vars (used when TSA_INIT_DATA is omitted and TSA_PROXY is not provided):
+/// - SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING
+/// - BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET
+/// - TSA_INITIAL_OWNER (optional, default ADMIN)
+/// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
 contract DeployL2 is Script {
-    error DeployL2_UninitializedProxy();
+    function _buildTsaInitData(address admin, address loanStoreAddr) internal view returns (bytes memory) {
+        address initialOwner = vm.envOr("TSA_INITIAL_OWNER", admin);
+
+        string memory symbol = vm.envOr("TSA_SYMBOL", string("cTSA"));
+        string memory name = vm.envOr("TSA_NAME", string("Collar TSA"));
+
+        BaseTSA.BaseTSAInitParams memory baseInitParams = BaseTSA.BaseTSAInitParams({
+            subAccounts: ISubAccounts(vm.envAddress("SUBACCOUNTS")),
+            auction: DutchAuction(vm.envAddress("AUCTION")),
+            cash: CashAsset(vm.envAddress("CASH")),
+            wrappedDepositAsset: IWrappedERC20Asset(vm.envAddress("WRAPPED_DEPOSIT_ASSET")),
+            manager: ILiquidatableManager(vm.envAddress("MANAGER")),
+            matching: IMatching(vm.envAddress("MATCHING")),
+            symbol: symbol,
+            name: name
+        });
+
+        CollarTSA.CollarTSAInitParams memory collarInitParams = CollarTSA.CollarTSAInitParams({
+            baseFeed: ISpotFeed(vm.envAddress("BASE_FEED")),
+            depositModule: IDepositModule(vm.envAddress("DEPOSIT_MODULE")),
+            withdrawalModule: IWithdrawalModule(vm.envAddress("WITHDRAWAL_MODULE")),
+            tradeModule: ITradeModule(vm.envAddress("TRADE_MODULE")),
+            rfqModule: IRfqModule(vm.envAddress("RFQ_MODULE")),
+            optionAsset: IOptionAsset(vm.envAddress("OPTION_ASSET")),
+            loanStore: loanStoreAddr
+        });
+
+        return abi.encodeCall(CollarTSA.initialize, (initialOwner, baseInitParams, collarInitParams));
+    }
 
     function run() external {
         address admin = vm.envAddress("ADMIN");
@@ -68,11 +116,12 @@ contract DeployL2 is Script {
                 tsaImplementation = address(new CollarTSA());
             }
 
-            // Enforce atomic deploy+init to avoid uninitialized proxy takeover risk.
+            // Auto-build initializer calldata if not provided explicitly.
             if (tsaInitData.length == 0) {
-                revert DeployL2_UninitializedProxy();
+                tsaInitData = _buildTsaInitData(admin, loanStoreAddr);
             }
 
+            // Deploy + initialize atomically in ERC1967Proxy constructor.
             tsaProxyAddr = address(new ERC1967Proxy(tsaImplementation, tsaInitData));
         }
 
