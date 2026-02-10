@@ -133,6 +133,8 @@ deploy_one_side() {
   local admin_var="${side}_ADMIN"
   local remote_eid_var="${side}_REMOTE_EID"
   local endpoint_var="${side}_LZ_ENDPOINT"
+  local receive_gas_var="${side}_LZ_RECEIVE_GAS"
+  local receive_value_var="${side}_LZ_RECEIVE_VALUE"
 
   must_have "$rpc_url_var"
   must_have "$account_var"
@@ -143,6 +145,9 @@ deploy_one_side() {
   if [[ -z "$admin_address" ]]; then
     admin_address="$(resolve_account_address "${!account_var}")"
   fi
+
+  local receive_gas="${!receive_gas_var:-200000}"
+  local receive_value="${!receive_value_var:-0}"
 
   local output_json_raw="${!out_var}"
   local output_json_abs="$output_json_raw"
@@ -186,6 +191,24 @@ deploy_one_side() {
   local harness
   harness="$(json_get_harness "$output_json_abs")"
   echo "[info] $side harness deployed at: $harness"
+
+  if [[ "$BROADCAST" -eq 1 ]]; then
+    echo "[info] setting $side default options (receiveGas=$receive_gas, receiveValue=$receive_value)"
+    (
+      cd "$ROOT_DIR"
+      export HARNESS="$harness"
+      export RECEIVE_GAS="$receive_gas"
+      export RECEIVE_VALUE="$receive_value"
+
+      forge script script/SetLZHarnessOptions.s.sol:SetLZHarnessOptions \
+        --rpc-url "${!rpc_url_var}" \
+        --account "${!account_var}" \
+        --broadcast
+    )
+  else
+    echo "[dry-run] would set $side default options: receiveGas=$receive_gas receiveValue=$receive_value"
+  fi
+
   export "${side}_HARNESS=$harness"
 }
 

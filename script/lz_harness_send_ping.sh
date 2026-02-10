@@ -144,11 +144,20 @@ main() {
     dst_rpc="$L1_RPC_URL"; dst_harness="$l1_harness"; src_eid="$L1_REMOTE_EID" # L1's destination eid points to L2
   fi
 
+  local src_default_options
+  src_default_options="$(cast call "$src_harness" "defaultOptions()(bytes)" --rpc-url "$src_rpc")"
+  if [[ -z "$src_default_options" || "$src_default_options" == "0x" ]]; then
+    echo "[error] source harness defaultOptions is empty; LayerZero will revert (InvalidWorkerOptions)." >&2
+    echo "[hint] set default options first (via deploy script --broadcast, or SetLZHarnessOptions.s.sol)." >&2
+    exit 1
+  fi
+
   echo "[info] sending ping from $FROM"
   echo "  src harness: $src_harness"
   echo "  dst harness: $dst_harness"
   echo "  nonce: $NONCE"
   echo "  tag: $TAG"
+  echo "  defaultOptions: $src_default_options"
 
   cast send "$src_harness" \
     "sendPing(uint64,bytes32)" "$NONCE" "$TAG" \
