@@ -23,6 +23,38 @@ def _load_l1_addrs(path_value: str) -> tuple[str, str]:
     return str(l1_messenger), str(l1_vault)
 
 
+def _resolve_registry_chain_id(profile: str, explicit_chain_id: str) -> str:
+    if explicit_chain_id:
+        return explicit_chain_id
+
+    p = profile.strip().lower()
+    if p in {"testnet", "derive-testnet", "lyra-testnet"}:
+        return "901"
+    if p in {"mainnet", "derive-mainnet", "lyra-mainnet"}:
+        return "957"
+    raise ValueError(
+        "unknown DERIVE_REGISTRY_PROFILE; use one of: testnet/mainnet (or set DERIVE_REGISTRY_CHAIN_ID explicitly)"
+    )
+
+
+def _load_matching_registry(chain_id: str) -> dict[str, str]:
+    path = ROOT_DIR / "lib" / "v2-matching" / "deployments" / chain_id / "matching.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"matching registry file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    needed = ["matching", "deposit", "withdrawal", "trade", "rfq"]
+    missing = [k for k in needed if not data.get(k)]
+    if missing:
+        raise ValueError(f"registry missing keys {missing} in {path}")
+    return {
+        "MATCHING": str(data["matching"]),
+        "DEPOSIT_MODULE": str(data["deposit"]),
+        "WITHDRAWAL_MODULE": str(data["withdrawal"]),
+        "TRADE_MODULE": str(data["trade"]),
+        "RFQ_MODULE": str(data["rfq"]),
+    }
+
+
 @app.command()
 def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
@@ -32,6 +64,8 @@ def main(
     verifier: str = typer.Option("", help="Optional forge verifier (e.g. blockscout, etherscan)") ,
     verifier_url: str = typer.Option("", help="Optional verifier URL"),
     etherscan_api_key: str = typer.Option("", help="Optional API key override for --etherscan-api-key"),
+    derive_registry_profile: str = typer.Option("", help="Registry profile: testnet|mainnet (or set in env DERIVE_REGISTRY_PROFILE)"),
+    derive_registry_chain_id: str = typer.Option("", help="Explicit registry chain id override (e.g. 901, 957)"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
     require_cmd("forge")
@@ -40,6 +74,16 @@ def main(
     l2 = load_env(l2_env_file)
     for k in ("RPC_URL", "ACCOUNT", "OUTPUT_JSON", "ADMIN"):
         must(l2, k)
+
+    profile = derive_registry_profile or l2.get("DERIVE_REGISTRY_PROFILE", "")
+    chain_id_override = derive_registry_chain_id or l2.get("DERIVE_REGISTRY_CHAIN_ID", "")
+    registry_resolved: dict[str, str] = {}
+    registry_chain_id_used = ""
+    if profile or chain_id_override:
+        registry_chain_id_used = _resolve_registry_chain_id(profile or "testnet", chain_id_override)
+        registry_resolved = _load_matching_registry(registry_chain_id_used)
+        for k, v in registry_resolved.items():
+            l2.setdefault(k, v)
 
     # If creating a new TSA proxy, require init calldata so deploy+initialize happen atomically.
     if not l2.get("TSA_PROXY") and not l2.get("TSA_INIT_DATA"):
@@ -84,9 +128,19 @@ def main(
         "TSA_IMPLEMENTATION",
         "TSA_INIT_DATA",
         "L1_EID",
+        "MATCHING",
+        "DEPOSIT_MODULE",
+        "WITHDRAWAL_MODULE",
+        "TRADE_MODULE",
+        "RFQ_MODULE",
     ):
         if l2.get(opt):
             env_overrides[opt] = l2[opt]
+
+    if registry_resolved:
+        print(f"[cyan][info][/cyan] loaded derive module registry (chainId={registry_chain_id_used}):")
+        for k, v in registry_resolved.items():
+            print(f"  {k}: {v}")
 
     print(f"[cyan][info][/cyan] deploying L2 protocol via script/DeployL2.s.sol (broadcast={broadcast}, verify={verify})")
     forge_out = forge_script(
@@ -106,6 +160,9 @@ def main(
                     "broadcast": broadcast,
                     "verify": verify,
                     "account": l2["ACCOUNT"],
+                    "registryProfile": profile or None,
+                    "registryChainId": (registry_chain_id_used or None),
+                    "registryResolved": registry_resolved,
                 },
                 indent=2,
             )
