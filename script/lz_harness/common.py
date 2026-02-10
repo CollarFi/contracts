@@ -10,7 +10,8 @@ from typing import Any
 
 from dotenv import dotenv_values
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# common.py lives in script/lz_harness/, so repo root is 2 levels up.
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 class CmdError(RuntimeError):
