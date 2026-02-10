@@ -20,7 +20,11 @@ contract CollarVaultMessenger is AccessControl, OApp {
     uint32 public remoteEid;
     bytes public defaultOptions;
 
-    mapping(bytes32 => CollarLZMessages.Message) public receivedMessages;
+    mapping(bytes32 => CollarLZMessages.Message) private _receivedMessages;
+
+    function receivedMessage(bytes32 guid) external view returns (CollarLZMessages.Message memory message) {
+        return _receivedMessages[guid];
+    }
 
     event MessageSent(bytes32 indexed guid, CollarLZMessages.Action action, uint256 indexed loanId);
     event MessageReceived(bytes32 indexed guid, CollarLZMessages.Action action, uint256 indexed loanId);
@@ -84,7 +88,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         override
     {
         CollarLZMessages.Message memory decoded = abi.decode(message, (CollarLZMessages.Message));
-        receivedMessages[guid] = decoded;
+        _receivedMessages[guid] = decoded;
         emit MessageReceived(guid, decoded.action, decoded.loanId);
     }
 

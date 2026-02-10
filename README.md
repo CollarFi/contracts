@@ -15,6 +15,19 @@ https://book.getfoundry.sh/
 
 ## Usage
 
+### Local setup (important)
+
+This repo vendors Derive's `v2-matching` as a submodule. That submodule contains two copies of `lyra-utils`, which can cause Foundry to fail locally with duplicate identifier errors after submodule updates.
+
+Run this once after `git submodule update --init --recursive` (and again if you reset submodules):
+
+```bash
+./script/fix-local-deps.sh
+```
+
+This mirrors what CI does (prunes the duplicate and normalizes imports).
+
+
 ### Build
 
 ```shell

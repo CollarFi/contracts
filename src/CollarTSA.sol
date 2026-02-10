@@ -22,6 +22,8 @@ import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {StandardManager, IStandardManager, IVolFeed, IForwardFeed} from "v2-core/src/risk-managers/StandardManager.sol";
 import {CollateralManagementTSA} from "v2-matching/src/tokenizedSubaccounts/CollateralManagementTSA.sol";
 
+import {ICollarLoanStore} from "./interfaces/ICollarLoanStore.sol";
+
 /// @title CollarTSA
 /// @notice TSA that allows selling covered calls and buying long puts for collar construction.
 contract CollarTSA is CollateralManagementTSA {
@@ -38,6 +40,7 @@ contract CollarTSA is CollateralManagementTSA {
         ITradeModule tradeModule;
         IRfqModule rfqModule;
         IOptionAsset optionAsset;
+        address loanStore;
     }
 
     struct CollarTSAParams {
@@ -77,6 +80,9 @@ contract CollarTSA is CollateralManagementTSA {
         CollateralManagementParams collateralManagementParams;
         /// @dev Only one hash is considered valid at a time, and it is revoked when a new one comes in.
         bytes32 lastSeenHash;
+
+        /// @dev L2 loan store to enforce borrower mandates and track per-loan collateral accounting.
+        address loanStore;
     }
 
     // keccak256(abi.encode(uint256(keccak256("lyra.storage.CollarTSA")) - 1)) & ~bytes32(uint256(0xff))
@@ -98,7 +104,7 @@ contract CollarTSA is CollateralManagementTSA {
         address initialOwner,
         BaseTSA.BaseTSAInitParams memory initParams,
         CollarTSAInitParams memory collarInitParams
-    ) external reinitializer(5) {
+    ) external reinitializer(6) {
         __BaseTSA_init(initialOwner, initParams);
 
         CollarTSAStorage storage $ = _getCollarTSAStorage();
@@ -109,6 +115,12 @@ contract CollarTSA is CollateralManagementTSA {
         $.rfqModule = collarInitParams.rfqModule;
         $.optionAsset = collarInitParams.optionAsset;
         $.baseFeed = collarInitParams.baseFeed;
+
+        if (collarInitParams.loanStore == address(0)) {
+            revert CTSA_InvalidParams();
+        }
+        $.loanStore = collarInitParams.loanStore;
+
         BaseTSAAddresses memory tsaAddresses = getBaseTSAAddresses();
         tsaAddresses.depositAsset.approve(address($.depositModule), type(uint256).max);
     }
@@ -151,6 +163,10 @@ contract CollarTSA is CollateralManagementTSA {
         _getCollarTSAStorage().collateralManagementParams = newCollateralMgmtParams;
 
         emit CMTSAParamsSet(newCollateralMgmtParams);
+    }
+
+    function loanStore() public view returns (address) {
+        return _getCollarTSAStorage().loanStore;
     }
 
     function _getCollateralManagementParams() internal view override returns (CollateralManagementParams storage $) {
@@ -267,34 +283,81 @@ contract CollarTSA is CollateralManagementTSA {
     /// @dev If extraData is 0, the action is a maker action; otherwise, it is a taker action.
     function _verifyRfqAction(IMatching.Action memory action, bytes memory extraData) internal view {
         // TODO: Confirm whether RFQ maxFee should be bounded by on-chain parameters for collar trades.
+        // AtomicSigningExecutor callback `extraData` is used to carry mandate context as well.
+        // Format (preferred): abi.encode(uint256 loanId, bytes rfqExtraData)
+        // - rfqExtraData is the same data that would have previously been passed as extraData,
+        //   i.e. the ABI-encoded `IRfqModule.TradeData[]` for taker orders.
+        uint256 loanId = 0;
+        bytes memory rfqExtraData = extraData;
+        if (extraData.length != 0) {
+            // AtomicSigningExecutor callback format (required for all taker RFQs, including spot RFQs):
+            // abi.encode(uint256 loanId, bytes rfqExtraData)
+            (loanId, rfqExtraData) = abi.decode(extraData, (uint256, bytes));
+            if (loanId == 0) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+        }
+
         IRfqModule.TradeData[] memory makerTrades;
-        bool isTaker = extraData.length != 0;
+        bool isTaker = rfqExtraData.length != 0;
         if (!isTaker) {
             IRfqModule.RfqOrder memory makerOrder = abi.decode(action.data, (IRfqModule.RfqOrder));
             makerTrades = makerOrder.trades;
         } else {
             IRfqModule.TakerOrder memory takerOrder = abi.decode(action.data, (IRfqModule.TakerOrder));
-            if (keccak256(extraData) != takerOrder.orderHash) {
+            if (keccak256(rfqExtraData) != takerOrder.orderHash) {
                 revert CTSA_TradeDataDoesNotMatchOrderHash();
             }
-            makerTrades = abi.decode(extraData, (IRfqModule.TradeData[]));
+            makerTrades = abi.decode(rfqExtraData, (IRfqModule.TradeData[]));
         }
 
         if (_isSpotRfqTrade(makerTrades)) {
-            _verifySpotRfqTrade(makerTrades[0], isTaker);
+            _verifySpotRfqTrade(makerTrades[0], isTaker, loanId);
             return;
         }
 
-        _verifyCollarRfqTrades(makerTrades, isTaker);
+        _verifyCollarRfqTrades(makerTrades, isTaker, loanId);
     }
 
-    function _verifyCollarRfqTrades(IRfqModule.TradeData[] memory makerTrades, bool isTaker) internal view {
+    function _verifyCollarRfqTrades(IRfqModule.TradeData[] memory makerTrades, bool isTaker, uint256 loanId)
+        internal
+        view
+    {
         CollarTSAStorage storage $ = _getCollarTSAStorage();
         (CollarLeg memory callLeg, CollarLeg memory putLeg) = _splitRfqLegs(makerTrades, address($.optionAsset));
 
         if (callLeg.expiry != putLeg.expiry) {
             revert CTSA_InvalidRfqTradeDetails();
         }
+
+        // Enforce borrower mandate constraints.
+        if (loanId == 0) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        ICollarLoanStore.Loan memory loan = ICollarLoanStore($.loanStore).getLoan(loanId);
+
+        if (loan.borrower == address(0) || loan.consumed) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+        if (loan.deadline != 0 && block.timestamp > loan.deadline) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        // Mandate requires exact maturity == option expiry.
+        if (loan.maturity != 0 && callLeg.expiry != loan.maturity) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        // Strike bounds.
+        if (loan.minCallStrike != 0 && callLeg.strike < loan.minCallStrike) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+        if (loan.maxPutStrike != 0 && putLeg.strike > loan.maxPutStrike) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        // borrowAmount is not directly observable in RFQ leg data; it is enforced on L1 when finalizing the loan.
 
         int256 callAmount = isTaker ? -callLeg.trade.amount : callLeg.trade.amount;
         int256 putAmount = isTaker ? -putLeg.trade.amount : putLeg.trade.amount;
@@ -333,17 +396,36 @@ contract CollarTSA is CollateralManagementTSA {
         return makerTrades[0].asset == address(tsaAddresses.wrappedDepositAsset) && makerTrades[0].subId == 0;
     }
 
-    function _verifySpotRfqTrade(IRfqModule.TradeData memory trade, bool isTaker) internal view {
+    function _verifySpotRfqTrade(IRfqModule.TradeData memory trade, bool isTaker, uint256 loanId) internal view {
         if (!isTaker) {
             revert CTSA_SpotRfqRequiresTaker();
         }
         if (trade.subId != 0) {
             revert CTSA_InvalidAsset();
         }
+        if (loanId == 0) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
 
         uint256 amount = trade.amount.toUint256();
         if (amount == 0) {
             revert CTSA_SpotRfqAmountInvalid();
+        }
+
+        address store = _getCollarTSAStorage().loanStore;
+        if (store == address(0)) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        ICollarLoanStore.Loan memory loan = ICollarLoanStore(store).getLoan(loanId);
+        if (loan.borrower == address(0) || loan.consumed) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+        if (loan.collateralAsset != address(0) && trade.asset != loan.collateralAsset) {
+            revert CTSA_InvalidAsset();
+        }
+        if (loan.collateralAmount != 0 && amount > loan.collateralAmount) {
+            revert CTSA_SpotRfqSellTooMuch();
         }
 
         uint256 basePrice = _getBasePrice();

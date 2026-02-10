@@ -18,7 +18,7 @@ function toHex32(x: Hex): Hex32 {
 
 // Minimal decoding for LayerZero message events.
 // We rely on the messenger/receiver storing decoded messages in mappings,
-// then read them back via `receivedMessages(guid)`.
+// then read them back via `receivedMessage(guid)`.
 const L1_MessageReceived = parseAbiItem(
   "event MessageReceived(bytes32 indexed guid, uint8 action, uint256 indexed loanId)"
 );
@@ -48,7 +48,7 @@ async function main() {
   // main loop
   // - Poll L2 receiver MessageReceived events and call handleMessage(guid)
   // - Poll L1 messenger MessageReceived and track guids by loanId
-  // - If we have DepositConfirmed + TradeConfirmed for a loan and pendingQuotes exist, attempt finalizeLoan
+  // - If we have DepositConfirmed + TradeConfirmed for a loan and a mandate exists, attempt finalizeLoan
   for (;;) {
     try {
       await tickL2(state, cfg, l2.publicClient, l2.walletClient);
@@ -143,7 +143,7 @@ async function tickL1(state: ReturnType<typeof newState>, cfg: ReturnType<typeof
     const msg: any = await publicClient.readContract({
       address: cfg.L1_LZ_MESSENGER,
       abi: CollarVaultMessengerAbi,
-      functionName: "receivedMessages",
+      functionName: "receivedMessage",
       args: [guid]
     });
 
@@ -160,23 +160,23 @@ async function tickL1(state: ReturnType<typeof newState>, cfg: ReturnType<typeof
 
 function lzActionName(n: bigint): string {
   // CollarLZMessages.Action enum order in Solidity:
-  // DepositIntent=0, CancelRequest=1, ReturnRequest=2, SettlementReport=3,
-  // DepositConfirmed=4, CollateralReturned=5, TradeConfirmed=6
+  // DepositIntent=0, ReturnRequest=1, SettlementReport=2,
+  // DepositConfirmed=3, CollateralReturned=4, TradeConfirmed=5, MandateCreated=6
   switch (Number(n)) {
     case 0:
       return "DepositIntent";
     case 1:
-      return "CancelRequest";
-    case 2:
       return "ReturnRequest";
-    case 3:
+    case 2:
       return "SettlementReport";
-    case 4:
+    case 3:
       return "DepositConfirmed";
-    case 5:
+    case 4:
       return "CollateralReturned";
-    case 6:
+    case 5:
       return "TradeConfirmed";
+    case 6:
+      return "MandateCreated";
     default:
       return `Unknown(${n})`;
   }
@@ -207,15 +207,15 @@ async function tryFinalizeLoans(state: ReturnType<typeof newState>, cfg: ReturnT
 
     if (pending.borrower === "0x0000000000000000000000000000000000000000") continue;
 
-    const quote: any = await publicClient.readContract({
+    const mandate: any = await publicClient.readContract({
       address: cfg.L1_COLLAR_VAULT,
       abi: CollarVaultAbi,
-      functionName: "pendingQuotes",
+      functionName: "mandates",
       args: [loanId]
     });
 
-    if (quote.collateralAsset === "0x0000000000000000000000000000000000000000") {
-      // borrower hasn't accepted a quote; can't finalize
+    if (mandate.borrower === "0x0000000000000000000000000000000000000000") {
+      // borrower hasn't accepted a mandate; can't finalize
       continue;
     }
 

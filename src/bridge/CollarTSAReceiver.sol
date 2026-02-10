@@ -13,11 +13,13 @@ import {
 import {OApp} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
 
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
+// forge-lint: disable-next-line(unused-import)
 import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
 import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
 import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
 
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
+import {ICollarLoanStore} from "../interfaces/ICollarLoanStore.sol";
 import {ISocketMessageTracker} from "../interfaces/ISocketMessageTracker.sol";
 import {CollarLZMessages} from "./CollarLZMessages.sol";
 
@@ -34,6 +36,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
 
     ISocketMessageTracker public socket;
     ICollarTSA public tsa;
+    ICollarLoanStore public loanStore;
     address public vaultRecipient;
 
     uint32 public remoteEid;
@@ -44,6 +47,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
     mapping(uint256 => bool) public returnRequested;
     mapping(uint256 => bool) public returnCompleted;
     mapping(uint256 => bool) public tradeConfirmed;
+
+    // Loan terms/collateral accounting is persisted in `loanStore`.
 
     event MessageReceived(bytes32 indexed guid, CollarLZMessages.Action action, uint256 indexed loanId);
     event MessageHandled(bytes32 indexed guid, CollarLZMessages.Action action, uint256 indexed loanId);
@@ -70,16 +75,25 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_TradeConfirmedAfterReturn();
     error CTR_TradeAlreadyConfirmed();
 
-    constructor(address admin, address endpoint_, ISocketMessageTracker socket_, ICollarTSA tsa_, uint32 remoteEid_)
-        OApp(endpoint_, admin)
-        Ownable(admin)
-    {
+    constructor(
+        address admin,
+        address endpoint_,
+        ISocketMessageTracker socket_,
+        ICollarTSA tsa_,
+        ICollarLoanStore loanStore_,
+        uint32 remoteEid_
+    ) OApp(endpoint_, admin) Ownable(admin) {
+        if (address(loanStore_) == address(0)) {
+            revert CTR_InvalidPeer();
+        }
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PARAMETER_ROLE, admin);
         _grantRole(KEEPER_ROLE, admin);
 
         socket = socket_;
         tsa = tsa_;
+        loanStore = loanStore_;
         remoteEid = remoteEid_;
     }
 
@@ -136,6 +150,19 @@ contract CollarTSAReceiver is AccessControl, OApp {
             }
         }
 
+        if (message.action == CollarLZMessages.Action.MandateCreated) {
+            (address borrower, uint256 minCallStrike, uint256 maxPutStrike, uint64 maturity, uint64 deadline) =
+                abi.decode(message.data, (address, uint256, uint256, uint64, uint64));
+
+            loanStore.recordMandate(
+                message.loanId, borrower, message.asset, message.amount, minCallStrike, maxPutStrike, maturity, deadline
+            );
+
+            handledMessages[guid] = true;
+            emit MessageHandled(guid, message.action, message.loanId);
+            return;
+        }
+
         if (message.action == CollarLZMessages.Action.DepositIntent) {
             if (message.recipient == address(0)) {
                 revert CTR_InvalidRecipient();
@@ -143,12 +170,12 @@ contract CollarTSAReceiver is AccessControl, OApp {
             if (message.subaccountId != tsa.subAccount()) {
                 revert CTR_InvalidSubaccount();
             }
+
+            loanStore.recordCollateral(message.loanId, message.asset, message.amount);
+
             _signDeposit(message);
             _sendAck(message, CollarLZMessages.Action.DepositConfirmed);
-        } else if (
-            message.action == CollarLZMessages.Action.ReturnRequest
-                || message.action == CollarLZMessages.Action.CancelRequest
-        ) {
+        } else if (message.action == CollarLZMessages.Action.ReturnRequest) {
             if (message.subaccountId != tsa.subAccount()) {
                 revert CTR_InvalidSubaccount();
             }
@@ -189,7 +216,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
             socketMessageId: socketMessageId,
             secondaryAmount: collateralSold,
             quoteHash: bytes32(0),
-            takerNonce: 0
+            takerNonce: 0,
+            data: bytes("")
         });
 
         return _send(message, defaultOptions);
@@ -223,30 +251,69 @@ contract CollarTSAReceiver is AccessControl, OApp {
             socketMessageId: socketMessageId,
             secondaryAmount: 0,
             quoteHash: bytes32(0),
-            takerNonce: 0
+            takerNonce: 0,
+            data: bytes("")
         });
         returnCompleted[loanId] = true;
         returnRequested[loanId] = false;
         return _send(message, defaultOptions);
     }
 
-    function sendTradeConfirmed(
-        uint256 loanId,
-        address asset,
-        uint256 amount,
-        bytes32 socketMessageId,
-        bytes32 quoteHash,
-        uint256 takerNonce
-    ) external payable onlyRole(KEEPER_ROLE) returns (MessagingReceipt memory) {
+    struct TradeConfirmedParams {
+        uint256 loanId;
+        address asset;
+        uint256 amount;
+        bytes32 socketMessageId;
+        bytes32 quoteHash;
+        uint256 takerNonce;
+        uint256 callStrike;
+        uint256 putStrike;
+        uint64 expiry;
+    }
+
+    function sendTradeConfirmed(TradeConfirmedParams calldata p)
+        external
+        payable
+        onlyRole(KEEPER_ROLE)
+        returns (MessagingReceipt memory)
+    {
         if (vaultRecipient == address(0)) {
             revert CTR_InvalidRecipient();
         }
-        if (returnCompleted[loanId]) {
+        if (returnCompleted[p.loanId]) {
             revert CTR_TradeConfirmedAfterReturn();
         }
-        if (tradeConfirmed[loanId]) {
+        if (tradeConfirmed[p.loanId]) {
             revert CTR_TradeAlreadyConfirmed();
         }
+        _validateTradeConfirmedPreconditions(p.amount, p.socketMessageId, p.takerNonce);
+
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.TradeConfirmed,
+            loanId: p.loanId,
+            asset: p.asset,
+            amount: p.amount,
+            recipient: vaultRecipient,
+            subaccountId: tsa.subAccount(),
+            socketMessageId: p.socketMessageId,
+            secondaryAmount: 0,
+            quoteHash: p.quoteHash,
+            takerNonce: p.takerNonce,
+            data: abi.encode(p.callStrike, p.putStrike, p.expiry)
+        });
+
+        MessagingReceipt memory receipt = _send(message, defaultOptions);
+
+        loanStore.markConsumed(p.loanId);
+
+        tradeConfirmed[p.loanId] = true;
+        return receipt;
+    }
+
+    function _validateTradeConfirmedPreconditions(uint256 amount, bytes32 socketMessageId, uint256 takerNonce)
+        internal
+        view
+    {
         (,,,, address rfqModule,) = tsa.getCollarTSAAddresses();
         if (rfqModule == address(0)) {
             revert CTR_RfqModuleNotSet();
@@ -262,23 +329,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 revert CTR_SocketNotFinalized();
             }
         }
-
-        CollarLZMessages.Message memory message = CollarLZMessages.Message({
-            action: CollarLZMessages.Action.TradeConfirmed,
-            loanId: loanId,
-            asset: asset,
-            amount: amount,
-            recipient: vaultRecipient,
-            subaccountId: tsa.subAccount(),
-            socketMessageId: socketMessageId,
-            secondaryAmount: 0,
-            quoteHash: quoteHash,
-            takerNonce: takerNonce
-        });
-
-        MessagingReceipt memory receipt = _send(message, defaultOptions);
-        tradeConfirmed[loanId] = true;
-        return receipt;
     }
 
     function quoteMessage(CollarLZMessages.Message calldata message, bytes calldata options)
@@ -349,7 +399,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
             socketMessageId: origin.socketMessageId,
             secondaryAmount: 0,
             quoteHash: bytes32(0),
-            takerNonce: 0
+            takerNonce: 0,
+            data: bytes("")
         });
 
         _send(message, defaultOptions);

@@ -9,19 +9,27 @@ import {
 } from "openzeppelin/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {ProxyAdmin} from "openzeppelin/proxy/transparent/ProxyAdmin.sol";
 import {BaseTSA, BaseOnChainSigningTSA, CollateralManagementTSA} from "v2-matching/src/tokenizedSubaccounts/CCTSA.sol";
+// forge-lint: disable-next-line(unused-import)
 import {LeveragedBasisTSA} from "v2-matching/src/tokenizedSubaccounts/LevBasisTSA.sol";
+// forge-lint: disable-next-line(unused-import)
 import {PrincipalProtectedTSA} from "v2-matching/src/tokenizedSubaccounts/PPTSA.sol";
 
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
 
+// forge-lint: disable-next-line(unused-import)
 import {IDutchAuction} from "v2-core/src/interfaces/IDutchAuction.sol";
+// forge-lint: disable-next-line(unused-import)
 import {IManager} from "v2-core/src/interfaces/IManager.sol";
 import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
+// forge-lint: disable-next-line(unused-import)
 import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
+// forge-lint: disable-next-line(unused-import)
 import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
+// forge-lint: disable-next-line(unused-import)
 import {ISubAccounts} from "v2-core/src/interfaces/ISubAccounts.sol";
+// forge-lint: disable-next-line(unused-import)
 import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
 import {SignedMath} from "openzeppelin/utils/math/SignedMath.sol";
 import {MockTSA} from "v2-matching/test/tokenizedSubaccounts/utils/MockTSA.sol";
@@ -238,13 +246,16 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
     }
 
     function _tradeOption(int256 amount, uint256 price, uint256 expiry, uint256 strike) internal {
+        // forge-lint: disable-next-line(unsafe-typecast)
         _setForwardPrice(MARKET, uint64(expiry), 2000e18, 1e18);
+        // forge-lint: disable-next-line(unsafe-typecast)
         _setFixedSVIDataForExpiry(MARKET, uint64(expiry));
 
         bytes memory tradeData = abi.encode(
             ITradeModule.TradeData({
                 asset: address(markets[MARKET].option),
                 subId: OptionEncoding.toSubId(expiry, strike, true),
+                // forge-lint: disable-next-line(unsafe-typecast)
                 limitPrice: int256(price),
                 desiredAmount: int256(amount.abs()),
                 worstFee: 1e18,
@@ -257,6 +268,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             ITradeModule.TradeData({
                 asset: address(markets[MARKET].option),
                 subId: OptionEncoding.toSubId(expiry, strike, true),
+                // forge-lint: disable-next-line(unsafe-typecast)
                 limitPrice: int256(price),
                 desiredAmount: int256(amount.abs()),
                 worstFee: 1e18,
@@ -299,6 +311,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
                 tsaSubacc,
                 nonVaultSubacc,
                 amount.abs(),
+                // forge-lint: disable-next-line(unsafe-typecast)
                 int256(price),
                 // trade fees
                 0,
@@ -312,6 +325,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             ITradeModule.TradeData({
                 asset: address(markets[MARKET].base),
                 subId: 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 limitPrice: int256(price),
                 desiredAmount: int256(amount.abs()),
                 worstFee: 1e18,
@@ -324,6 +338,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             ITradeModule.TradeData({
                 asset: address(markets[MARKET].base),
                 subId: 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 limitPrice: int256(price),
                 desiredAmount: int256(amount.abs()),
                 worstFee: 1e18,
@@ -366,6 +381,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
                 tsaSubacc,
                 nonVaultSubacc,
                 amount.abs(),
+                // forge-lint: disable-next-line(unsafe-typecast)
                 int256(price),
                 // trade fees
                 0,
@@ -383,6 +399,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
                 ITradeModule.TradeData({
                     asset: address(markets[MARKET].base),
                     subId: 0,
+                    // forge-lint: disable-next-line(unsafe-typecast)
                     limitPrice: int256(price),
                     desiredAmount: int256(amount.abs()),
                     worstFee: 1e18,
@@ -403,6 +420,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             ITradeModule.TradeData({
                 asset: address(markets[MARKET].perp),
                 subId: 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 limitPrice: int256(price),
                 desiredAmount: int256(amount.abs()),
                 worstFee: 1e18,
@@ -422,6 +440,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
                 ITradeModule.TradeData({
                     asset: address(markets[MARKET].perp),
                     subId: 0,
+                    // forge-lint: disable-next-line(unsafe-typecast)
                     limitPrice: int256(price),
                     desiredAmount: int256(amount.abs()),
                     worstFee: 1e18,
@@ -449,7 +468,11 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
         tsa.signActionData(actions[0], "");
 
         _verifyAndMatch(
-            actions, signatures, _createMatchedTrade(tsaSubacc, nonVaultSubacc, amount.abs(), int256(price), 0, 0)
+            // forge-lint: disable-next-line(unsafe-typecast)
+            actions,
+            signatures,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            _createMatchedTrade(tsaSubacc, nonVaultSubacc, amount.abs(), int256(price), 0, 0)
         );
     }
 
@@ -559,7 +582,9 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
         uint256 strike2,
         bool isCallSpread
     ) internal returns (IRfqModule.RfqOrder memory order, IRfqModule.TakerOrder memory takerOrder) {
+        // forge-lint: disable-next-line(unsafe-typecast)
         _setForwardPrice(MARKET, uint64(expiry), 2000e18, 1e18);
+        // forge-lint: disable-next-line(unsafe-typecast)
         _setFixedSVIDataForExpiry(MARKET, uint64(expiry));
 
         IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](2);
@@ -618,7 +643,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             signer: address(tsa)
         });
         vm.prank(signer);
-        tsa.signActionData(actions[1], abi.encode(order.trades));
+        tsa.signActionData(actions[1], abi.encode(uint256(1), abi.encode(order.trades)));
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: nonVaultSubacc, takerAccount: tsaSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")

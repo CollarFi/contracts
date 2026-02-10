@@ -20,19 +20,5 @@ interface ICollarVaultMessenger {
         payable
         returns (MessagingReceipt memory receipt);
 
-    function receivedMessages(bytes32 guid)
-        external
-        view
-        returns (
-            CollarLZMessages.Action action,
-            uint256 loanId,
-            address asset,
-            uint256 amount,
-            address recipient,
-            uint256 subaccountId,
-            bytes32 socketMessageId,
-            uint256 secondaryAmount,
-            bytes32 quoteHash,
-            uint256 takerNonce
-        );
+    function receivedMessage(bytes32 guid) external view returns (CollarLZMessages.Message memory message);
 }

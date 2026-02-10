@@ -4,14 +4,21 @@ pragma solidity ^0.8.20;
 library CollarLZMessages {
     enum Action {
         DepositIntent,
-        CancelRequest,
         ReturnRequest,
         SettlementReport,
         DepositConfirmed,
         CollateralReturned,
-        TradeConfirmed
+        TradeConfirmed,
+        MandateCreated
     }
 
+    /// @dev Generic LZ message envelope. Different actions interpret fields differently.
+    ///
+    /// For MandateCreated (L1 -> L2):
+    /// - loanId: identifies the loan/mandate
+    /// - asset: collateral asset
+    /// - amount: borrowAmount (mandate size)
+    /// - data: abi.encode(borrower, minCallStrike, maxPutStrike, maturity, deadline)
     struct Message {
         Action action;
         uint256 loanId;
@@ -23,5 +30,6 @@ library CollarLZMessages {
         uint256 secondaryAmount;
         bytes32 quoteHash;
         uint256 takerNonce;
+        bytes data;
     }
 }

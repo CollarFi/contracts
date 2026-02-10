@@ -30,16 +30,17 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 2200e18, true),
             price: 100e18,
-            amount: -1e18
+            amount: 1e18
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 1800e18, false),
             price: 1e18,
-            amount: 1e18
+            amount: -1e18
         });
 
-        IRfqModule.RfqOrder memory order = IRfqModule.RfqOrder({maxFee: 0, trades: trades});
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
@@ -51,8 +52,10 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
-        collarTsa.signActionData(action, "");
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testAllowsCashWithdrawal() public {
@@ -109,16 +112,17 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 2200e18, true),
             price: 100e18,
-            amount: 1e18
+            amount: -1e18
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 1800e18, false),
             price: 1e18,
-            amount: 1e18
+            amount: -1e18
         });
 
-        IRfqModule.RfqOrder memory order = IRfqModule.RfqOrder({maxFee: 0, trades: trades});
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
@@ -130,9 +134,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
         vm.expectRevert(CollarTSA.CTSA_CanOnlyOpenShortCalls.selector);
-        collarTsa.signActionData(action, "");
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testRejectsShortPut() public {
@@ -144,20 +150,22 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setFixedSVIDataForExpiry(MARKET, expiry);
 
         IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](2);
+        // Maker is long put. Taker (TSA) becomes short put, which should be rejected.
         trades[0] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 2200e18, true),
             price: 100e18,
-            amount: -1e18
+            amount: 1e18
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 1800e18, false),
             price: 1e18,
-            amount: -1e18
+            amount: 1e18
         });
 
-        IRfqModule.RfqOrder memory order = IRfqModule.RfqOrder({maxFee: 0, trades: trades});
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
@@ -169,9 +177,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
         vm.expectRevert(CollarTSA.CTSA_OnlyLongPutsAllowed.selector);
-        collarTsa.signActionData(action, "");
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testPutPriceTooHigh() public {
@@ -191,16 +201,17 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 2200e18, true),
             price: 100e18,
-            amount: -1e18
+            amount: 1e18
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
             subId: OptionEncoding.toSubId(expiry, 1800e18, false),
             price: 10_000e18,
-            amount: 1e18
+            amount: -1e18
         });
 
-        IRfqModule.RfqOrder memory order = IRfqModule.RfqOrder({maxFee: 0, trades: trades});
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
@@ -212,9 +223,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
         vm.expectRevert(CollarTSA.CTSA_PutPriceTooHigh.selector);
-        collarTsa.signActionData(action, "");
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testRejectsTakerOrderHashMismatch() public {
@@ -248,9 +261,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
         vm.expectRevert(CollarTSA.CTSA_TradeDataDoesNotMatchOrderHash.selector);
-        collarTsa.signActionData(action, abi.encode(trades));
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function _openCollarPosition(int256 amount) internal {
@@ -300,8 +315,10 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, expiry);
+
         vm.prank(signer);
-        tsa.signActionData(actions[1], abi.encode(trades));
+        tsa.signActionData(actions[1], abi.encode(uint256(1), abi.encode(trades)));
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: nonVaultSubacc, takerAccount: tsaSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")
@@ -332,8 +349,10 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
+        _seedLoan(1, 0);
+
         vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(trades));
+        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testRejectsSpotRfqSellAsMaker() public {
