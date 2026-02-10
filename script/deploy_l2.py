@@ -58,6 +58,7 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
 @app.command()
 def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env> as fallback."),
     broadcast: bool = typer.Option(True, help="Execute onchain txs"),
     verify: bool = typer.Option(True, help="Verify contracts during deployment"),
     l1_output_json: str = typer.Option("", help="Optional L1 deployment JSON to auto-fill L1_MESSENGER/L1_VAULT"),
@@ -72,6 +73,16 @@ def main(
     require_cmd("cast")
 
     l2 = load_env(l2_env_file)
+
+    resolved_env = env_profile.strip().lower() or l2.get("ENV", "").strip().lower()
+    l1_fallback: dict[str, str] = {}
+    if resolved_env in {"testnet", "mainnet"}:
+        l1_env_file = ROOT_DIR / f".env.l1.{resolved_env}"
+        if l1_env_file.is_file():
+            l1_fallback = load_env(l1_env_file)
+        else:
+            raise FileNotFoundError(f"expected L1 env file not found for --env {resolved_env}: {l1_env_file}")
+
     for k in ("RPC_URL", "ACCOUNT", "OUTPUT_JSON", "ADMIN"):
         must(l2, k)
 
@@ -111,6 +122,17 @@ def main(
         l1_messenger, l1_vault = _load_l1_addrs(l1_output_json)
         l2.setdefault("L1_MESSENGER", l1_messenger)
         l2.setdefault("L1_VAULT", l1_vault)
+
+    # Fallback: read L1 messenger/vault directly from .env.l1.<env>.
+    if l1_fallback:
+        l2.setdefault("L1_MESSENGER", l1_fallback.get("L1_MESSENGER", ""))
+        l2.setdefault("L1_VAULT", l1_fallback.get("L1_VAULT", ""))
+
+        # Or derive from L1 output JSON referenced by the L1 env.
+        if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_fallback.get("OUTPUT_JSON"):
+            l1_messenger, l1_vault = _load_l1_addrs(l1_fallback["OUTPUT_JSON"])
+            l2.setdefault("L1_MESSENGER", l1_messenger)
+            l2.setdefault("L1_VAULT", l1_vault)
 
     for k in ("L1_MESSENGER", "L1_VAULT"):
         must(l2, k)
@@ -186,6 +208,7 @@ def main(
                     "broadcast": broadcast,
                     "verify": verify,
                     "account": l2["ACCOUNT"],
+                    "envProfile": resolved_env or None,
                     "registryProfile": profile or None,
                     "registryChainId": (registry_chain_id_used or None),
                     "registryResolved": registry_resolved,
