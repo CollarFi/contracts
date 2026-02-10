@@ -110,12 +110,15 @@ def forge_script(
     account: str,
     broadcast: bool,
     env_overrides: dict[str, str],
+    extra_args: list[str] | None = None,
 ) -> str:
     env = os.environ.copy()
     env.update(env_overrides)
     cmd = ["forge", "script", script_target, "--rpc-url", rpc_url, "--account", account]
     if broadcast:
         cmd.append("--broadcast")
+    if extra_args:
+        cmd.extend(extra_args)
     proc = subprocess.run(
         cmd,
         cwd=ROOT_DIR,
