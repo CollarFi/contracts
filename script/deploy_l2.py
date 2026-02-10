@@ -58,7 +58,7 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
 @app.command()
 def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
-    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env> as fallback."),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l2.<env> (and .env.l1.<env> fallback)."),
     broadcast: bool = typer.Option(True, help="Execute onchain txs"),
     verify: bool = typer.Option(True, help="Verify contracts during deployment"),
     l1_output_json: str = typer.Option("", help="Optional L1 deployment JSON to auto-fill L1_MESSENGER/L1_VAULT"),
@@ -71,6 +71,10 @@ def main(
 ) -> None:
     require_cmd("forge")
     require_cmd("cast")
+
+    # If caller uses default l2 env path + --env profile, resolve to .env.l2.<env> automatically.
+    if env_profile and l2_env_file == (ROOT_DIR / ".env.l2.testnet"):
+        l2_env_file = ROOT_DIR / f".env.l2.{env_profile.strip().lower()}"
 
     l2 = load_env(l2_env_file)
 
