@@ -81,14 +81,14 @@ PY
 deploy_one_side() {
   local side="$1" # L1 or L2
   local rpc_url_var="${side}_RPC_URL"
-  local pk_var="${side}_PRIVATE_KEY"
+  local account_var="${side}_ACCOUNT"
   local out_var="${side}_OUTPUT_JSON"
   local admin_var="${side}_ADMIN"
   local remote_eid_var="${side}_REMOTE_EID"
   local endpoint_var="${side}_LZ_ENDPOINT"
 
   must_have "$rpc_url_var"
-  must_have "$pk_var"
+  must_have "$account_var"
   must_have "$out_var"
   must_have "$admin_var"
   must_have "$remote_eid_var"
@@ -112,7 +112,7 @@ deploy_one_side() {
 
     forge script script/DeployLZHarness.s.sol:DeployLZHarness \
       --rpc-url "${!rpc_url_var}" \
-      --private-key "${!pk_var}" \
+      --account "${!account_var}" \
       --broadcast
   )
 
@@ -132,8 +132,8 @@ wire_peers() {
   must_have L2_HARNESS
   must_have L1_RPC_URL
   must_have L2_RPC_URL
-  must_have L1_PRIVATE_KEY
-  must_have L2_PRIVATE_KEY
+  must_have L1_ACCOUNT
+  must_have L2_ACCOUNT
   must_have L1_REMOTE_EID
   must_have L2_REMOTE_EID
 
@@ -146,13 +146,13 @@ wire_peers() {
   cast send "$L1_HARNESS" \
     "setPeer(uint32,bytes32)" "$L1_REMOTE_EID" "$l2_peer_b32" \
     --rpc-url "$L1_RPC_URL" \
-    --private-key "$L1_PRIVATE_KEY" >/dev/null
+    --account "$L1_ACCOUNT" >/dev/null
 
   echo "[info] wiring L2 peer -> L1"
   cast send "$L2_HARNESS" \
     "setPeer(uint32,bytes32)" "$L2_REMOTE_EID" "$l1_peer_b32" \
     --rpc-url "$L2_RPC_URL" \
-    --private-key "$L2_PRIVATE_KEY" >/dev/null
+    --account "$L2_ACCOUNT" >/dev/null
 }
 
 main() {
