@@ -77,3 +77,34 @@ $ forge --help
 $ anvil --help
 $ cast --help
 ```
+
+## LayerZero harness scripts (Python + uv)
+
+Harness tooling is now Python-based (instead of bash), with optional rich/json output.
+
+Install/run via uv:
+
+```bash
+uv sync
+```
+
+Examples:
+
+```bash
+# Deploy both sides (dry-run by default)
+uv run python script/lz_harness/deploy.py
+
+# Broadcast deploy + set options + wire peers
+uv run python script/lz_harness/deploy.py --broadcast
+
+# Check harness wiring/state
+uv run python script/lz_harness/status.py
+uv run python script/lz_harness/status.py --json
+
+# Send ping and wait for relay
+uv run python script/lz_harness/send_ping.py --from l1 --nonce 1
+
+# Inspect route/config details (delegate/libs/config/initializable)
+uv run python script/lz_harness/route_check.py
+uv run python script/lz_harness/route_check.py --json
+```

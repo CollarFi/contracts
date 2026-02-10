@@ -2,6 +2,9 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+fs_permissions = [
+  { access = "read-write", path = "./deployments" }
+]
 remappings = [
   "forge-std/=lib/forge-std/src/",
   "@openzeppelin/contracts-upgradeable/security/=lib/v2-matching/lib/v2-core/lib/openzeppelin-contracts-upgradeable/contracts/utils/",

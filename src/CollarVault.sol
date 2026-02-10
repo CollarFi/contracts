@@ -17,7 +17,7 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 
 import {IEulerAdapter} from "./interfaces/IEulerAdapter.sol";
 import {ISocketBridge} from "./interfaces/ISocketBridge.sol";
-import {ISocketConnector} from "./interfaces/ISocketConnector.sol";
+import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
 import {CollarLZMessages} from "./bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "./interfaces/ICollarVaultMessenger.sol";
 
@@ -108,11 +108,7 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     IAllowanceTransfer public immutable permit2;
 
     struct SocketBridgeConfig {
-        ISocketBridge bridge;
-        ISocketConnector connector;
-        uint256 msgGasLimit;
-        bytes options;
-        bytes extraData;
+        IBridgeAdapter adapter;
     }
 
     mapping(address => SocketBridgeConfig) private socketBridgeConfigs;
@@ -210,14 +206,7 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     event OriginationFeeAprUpdated(uint256 feeApr);
     event MaxTotalPrincipalUpdated(uint256 maxTotalPrincipal);
     event CollateralConfigUpdated(address indexed asset, bool allowed, uint256 strikeScale);
-    event BridgeConfigUpdated(
-        address indexed asset,
-        address indexed bridge,
-        address indexed connector,
-        uint256 msgGasLimit,
-        bytes options,
-        bytes extraData
-    );
+    event BridgeConfigUpdated(address indexed asset, address indexed adapter);
     event L2RecipientUpdated(address indexed recipient);
     event EulerAdapterUpdated(address indexed adapter);
     event SubaccountUpdated(uint256 subaccountId);
@@ -860,22 +849,13 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
         emit L2RecipientUpdated(newL2Recipient);
     }
 
-    /// @notice Configure Socket bridge settings for an asset.
-    function setSocketBridgeConfig(
-        address asset,
-        ISocketBridge bridge,
-        ISocketConnector connector,
-        uint256 msgGasLimit,
-        bytes calldata options,
-        bytes calldata extraData
-    ) external onlyRole(PARAMETER_ROLE) {
-        if (asset == address(0) || address(bridge) == address(0) || address(connector) == address(0)) {
+    /// @notice Configure Socket bridge settings for an asset using a preconfigured adapter.
+    function setSocketVaultConfig(address asset, IBridgeAdapter adapter) external onlyRole(PARAMETER_ROLE) {
+        if (asset == address(0) || address(adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
-        socketBridgeConfigs[asset] = SocketBridgeConfig({
-            bridge: bridge, connector: connector, msgGasLimit: msgGasLimit, options: options, extraData: extraData
-        });
-        emit BridgeConfigUpdated(asset, address(bridge), address(connector), msgGasLimit, options, extraData);
+        socketBridgeConfigs[asset] = SocketBridgeConfig({adapter: adapter});
+        emit BridgeConfigUpdated(asset, address(adapter));
     }
 
     /// @notice Update the Euler adapter.
@@ -907,13 +887,12 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     }
 
     /// @notice Estimate the Socket bridge fees for a transfer.
-    function estimateBridgeFees(address asset, address receiver, uint256 amount) public view returns (uint256) {
+    function estimateBridgeFees(address asset, address, uint256) public view returns (uint256) {
         SocketBridgeConfig storage config = socketBridgeConfigs[asset];
-        if (address(config.bridge) == address(0) || address(config.connector) == address(0)) {
+        if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
-        bytes memory payload = abi.encode(receiver, amount, bytes32(0), config.extraData);
-        return config.connector.getMinFees(config.msgGasLimit, payload.length);
+        return config.adapter.estimateFee();
     }
 
     /// @notice Update treasury configuration for settlement surplus.
@@ -1068,10 +1047,10 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
         });
 
         SocketBridgeConfig storage config = socketBridgeConfigs[params.collateralAsset];
-        if (address(config.bridge) == address(0) || address(config.connector) == address(0)) {
+        if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
-        socketMessageId = config.connector.getMessageId();
+        socketMessageId = config.adapter.messageId();
 
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
             action: CollarLZMessages.Action.DepositIntent,
@@ -1131,17 +1110,15 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
 
     function _bridgeToL2(address asset, uint256 amount, address receiver) internal {
         SocketBridgeConfig storage config = socketBridgeConfigs[asset];
-        if (address(config.bridge) == address(0) || address(config.connector) == address(0)) {
+        if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
         uint256 fee = estimateBridgeFees(asset, receiver, amount);
         if (address(this).balance < fee) {
             revert CV_InsufficientBridgeFees();
         }
-        IERC20(asset).safeIncreaseAllowance(address(config.bridge), amount);
-        config.bridge.bridge{value: fee}(
-            receiver, amount, config.msgGasLimit, address(config.connector), config.extraData, config.options
-        );
+        IERC20(asset).safeIncreaseAllowance(address(config.adapter), amount);
+        config.adapter.bridge{value: fee}(receiver, amount);
     }
 
     function _loadLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
