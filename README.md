@@ -98,7 +98,7 @@ uv run python script/lz_harness/deploy.py
 uv run python script/lz_harness/deploy.py --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
-uv run python script/lz_harness/deploy_l2.py --broadcast --verify
+uv run python script/deploy_l2.py --broadcast --verify
 
 # Check harness wiring/state
 uv run python script/lz_harness/status.py

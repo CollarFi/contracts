@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 from rich import print
 
-from common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json
+from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json
 
 app = typer.Typer(add_completion=False)
 
@@ -40,6 +40,12 @@ def main(
     l2 = load_env(l2_env_file)
     for k in ("RPC_URL", "ACCOUNT", "OUTPUT_JSON", "ADMIN"):
         must(l2, k)
+
+    # If creating a new TSA proxy, require init calldata so deploy+initialize happen atomically.
+    if not l2.get("TSA_PROXY") and not l2.get("TSA_INIT_DATA"):
+        raise ValueError(
+            "TSA_INIT_DATA is required when TSA_PROXY is not provided (atomic deploy+init enforced)."
+        )
 
     if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_output_json:
         l1_messenger, l1_vault = _load_l1_addrs(l1_output_json)

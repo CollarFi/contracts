@@ -28,9 +28,11 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - LOAN_STORE (address)             (if omitted, deploys CollarLoanStore)
 /// - TSA_PROXY (address)              (if omitted, deploys ERC1967 proxy)
 /// - TSA_IMPLEMENTATION (address)     (if omitted and TSA_PROXY not provided, deploys CollarTSA implementation)
-/// - TSA_INIT_DATA (bytes)            (initializer calldata for TSA proxy, default: 0x)
+/// - TSA_INIT_DATA (bytes)            (initializer calldata for TSA proxy, required if TSA_PROXY is not provided)
 /// - L1_EID (uint32)                  (default: 0)
 contract DeployL2 is Script {
+    error DeployL2_UninitializedProxy();
+
     function run() external {
         address admin = vm.envAddress("ADMIN");
 
@@ -64,6 +66,11 @@ contract DeployL2 is Script {
         if (tsaProxyAddr == address(0)) {
             if (tsaImplementation == address(0)) {
                 tsaImplementation = address(new CollarTSA());
+            }
+
+            // Enforce atomic deploy+init to avoid uninitialized proxy takeover risk.
+            if (tsaInitData.length == 0) {
+                revert DeployL2_UninitializedProxy();
             }
 
             tsaProxyAddr = address(new ERC1967Proxy(tsaImplementation, tsaInitData));
