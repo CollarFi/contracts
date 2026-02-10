@@ -192,12 +192,15 @@ main() {
   l2_sender_b32="$(address_to_peer_bytes32 "$l2_harness")"
 
   local l1_nonce l2_nonce
-  l1_nonce="$(call_or_na "$L1_RPC_URL" "$l1_harness" "lastNonceBySourceEid(uint32)(uint64)" "$L2_REMOTE_EID")"
-  l2_nonce="$(call_or_na "$L2_RPC_URL" "$l2_harness" "lastNonceBySourceEid(uint32)(uint64)" "$L1_REMOTE_EID")"
+  # For each receiver side, source EID is the *other side's configured remoteEid*.
+  # L1 receives from L2 => srcEid = L1_REMOTE_EID
+  # L2 receives from L1 => srcEid = L2_REMOTE_EID
+  l1_nonce="$(call_or_na "$L1_RPC_URL" "$l1_harness" "lastNonceBySourceEid(uint32)(uint64)" "$L1_REMOTE_EID")"
+  l2_nonce="$(call_or_na "$L2_RPC_URL" "$l2_harness" "lastNonceBySourceEid(uint32)(uint64)" "$L2_REMOTE_EID")"
 
-  print_side "L1 (recv from L2)" "$L1_RPC_URL" "$L1_LZ_ENDPOINT" "$l1_harness" "$L1_REMOTE_EID" "$L2_REMOTE_EID" "$l2_sender_b32" "$l1_nonce"
+  print_side "L1 (recv from L2)" "$L1_RPC_URL" "$L1_LZ_ENDPOINT" "$l1_harness" "$L1_REMOTE_EID" "$L1_REMOTE_EID" "$l2_sender_b32" "$l1_nonce"
   echo
-  print_side "L2 (recv from L1)" "$L2_RPC_URL" "$L2_LZ_ENDPOINT" "$l2_harness" "$L2_REMOTE_EID" "$L1_REMOTE_EID" "$l1_sender_b32" "$l2_nonce"
+  print_side "L2 (recv from L1)" "$L2_RPC_URL" "$L2_LZ_ENDPOINT" "$l2_harness" "$L2_REMOTE_EID" "$L2_REMOTE_EID" "$l1_sender_b32" "$l2_nonce"
 }
 
 main "$@"
