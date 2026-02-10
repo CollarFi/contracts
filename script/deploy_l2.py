@@ -194,15 +194,20 @@ def main(
     out_abs.parent.mkdir(parents=True, exist_ok=True)
 
     extra_args: list[str] = []
-    if verify:
+    api_key = etherscan_api_key or l2.get("ETHERSCAN_API_KEY", "")
+    has_verify_params = bool(verifier or verifier_url or api_key)
+    verify_enabled = verify and has_verify_params
+
+    if verify_enabled:
         extra_args.append("--verify")
         if verifier:
             extra_args += ["--verifier", verifier]
         if verifier_url:
             extra_args += ["--verifier-url", verifier_url]
-        api_key = etherscan_api_key or l2.get("ETHERSCAN_API_KEY", "")
         if api_key:
             extra_args += ["--etherscan-api-key", api_key]
+    elif verify and not has_verify_params:
+        print("[yellow][warn][/yellow] verify requested but verifier params not set; skipping forge --verify flags")
 
     env_overrides = {
         "ADMIN": l2["ADMIN"],
@@ -243,7 +248,7 @@ def main(
         for k, v in registry_resolved.items():
             print(f"  {k}: {v}")
 
-    print(f"[cyan][info][/cyan] deploying L2 protocol via script/DeployL2.s.sol (broadcast={broadcast}, verify={verify})")
+    print(f"[cyan][info][/cyan] deploying L2 protocol via script/DeployL2.s.sol (broadcast={broadcast}, verify={verify_enabled})")
     forge_out = forge_script(
         "script/DeployL2.s.sol:DeployL2",
         l2["RPC_URL"],
@@ -259,7 +264,7 @@ def main(
                 {
                     "outputJson": str(out_abs),
                     "broadcast": broadcast,
-                    "verify": verify,
+                    "verify": verify_enabled,
                     "account": l2["ACCOUNT"],
                     "envProfile": resolved_env or None,
                     "registryProfile": profile or None,
@@ -275,7 +280,7 @@ def main(
 
     # Print where the broadcast artifacts and verification traces are.
     print("  broadcast dir: script/../broadcast")
-    if verify:
+    if verify_enabled:
         print("  verification: inspect forge output and broadcast logs for verification receipts")
 
     # Keep output available for debugging when run interactively.
