@@ -55,6 +55,49 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
     }
 
 
+def _load_core_registry(chain_id: str) -> dict[str, str]:
+    path = ROOT_DIR / "lib" / "v2-matching" / "lib" / "v2-core" / "deployments" / chain_id / "core.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"core registry file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    needed = ["subAccounts", "auction", "cash", "srm"]
+    missing = [k for k in needed if not data.get(k)]
+    if missing:
+        raise ValueError(f"core registry missing keys {missing} in {path}")
+    return {
+        "SUBACCOUNTS": str(data["subAccounts"]),
+        "AUCTION": str(data["auction"]),
+        "CASH": str(data["cash"]),
+        "MANAGER": str(data["srm"]),
+    }
+
+
+def _load_market_registry(chain_id: str, market: str) -> dict[str, str]:
+    path = ROOT_DIR / "lib" / "v2-matching" / "lib" / "v2-core" / "deployments" / chain_id / f"{market}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"market registry file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    needed = ["option", "spotFeed"]
+    missing = [k for k in needed if not data.get(k)]
+    if missing:
+        raise ValueError(f"market registry missing keys {missing} in {path}")
+    return {
+        "OPTION_ASSET": str(data["option"]),
+        "BASE_FEED": str(data["spotFeed"]),
+    }
+
+
+def _load_tsa_token_registry(chain_id: str, tsa_token: str) -> dict[str, str]:
+    path = ROOT_DIR / "lib" / "v2-matching" / "deployments" / chain_id / f"{tsa_token}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"tsa token registry file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    proxy = data.get("proxy")
+    if not proxy:
+        raise ValueError(f"tsa token registry missing 'proxy' in {path}")
+    return {"WRAPPED_DEPOSIT_ASSET": str(proxy)}
+
+
 @app.command()
 def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
@@ -103,7 +146,23 @@ def main(
     registry_chain_id_used = ""
     if profile or chain_id_override:
         registry_chain_id_used = _resolve_registry_chain_id(profile or "testnet", chain_id_override)
-        registry_resolved = _load_matching_registry(registry_chain_id_used)
+
+        # Matching modules registry
+        registry_resolved.update(_load_matching_registry(registry_chain_id_used))
+
+        # Core registry (subaccounts/auction/cash/srm manager)
+        registry_resolved.update(_load_core_registry(registry_chain_id_used))
+
+        # Optional market registry for OPTION_ASSET + BASE_FEED
+        market_name = (l2.get("DERIVE_MARKET") or "").strip()
+        if market_name:
+            registry_resolved.update(_load_market_registry(registry_chain_id_used, market_name))
+
+        # Optional TSA token deployment file for WRAPPED_DEPOSIT_ASSET
+        tsa_token = (l2.get("DERIVE_TSA_TOKEN") or "").strip()
+        if tsa_token:
+            registry_resolved.update(_load_tsa_token_registry(registry_chain_id_used, tsa_token))
+
         for k, v in registry_resolved.items():
             l2.setdefault(k, v)
 
