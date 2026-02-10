@@ -59,18 +59,14 @@ contract SocketBridgeAdapter is IBridgeAdapter {
 
     function estimateFee() external view override returns (uint256) {
         if (bridgeType == BridgeType.NEW) {
-            return ISocketBridgeWithFees(address(socketBridge)).getMinFees(
-                address(connector), msgGasLimit, payloadSize
-            );
+            return ISocketBridgeWithFees(address(socketBridge)).getMinFees(address(connector), msgGasLimit, payloadSize);
         }
         return socketVault.getMinFees(address(connector), msgGasLimit);
     }
 
     function bridge(address receiver, uint256 amount) external payable override {
         if (bridgeType == BridgeType.NEW) {
-            socketBridge.bridge{value: msg.value}(
-                receiver, amount, msgGasLimit, address(connector), extraData, options
-            );
+            socketBridge.bridge{value: msg.value}(receiver, amount, msgGasLimit, address(connector), extraData, options);
         } else {
             socketVault.depositToAppChain{value: msg.value}(receiver, amount, msgGasLimit, address(connector));
         }
