@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 from rich import print
 
-from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json
+from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
 
 app = typer.Typer(add_completion=False)
 
@@ -87,8 +87,11 @@ def main(
         else:
             raise FileNotFoundError(f"expected L1 env file not found for --env {resolved_env}: {l1_env_file}")
 
-    for k in ("RPC_URL", "ACCOUNT", "ADMIN"):
+    for k in ("RPC_URL", "ACCOUNT"):
         must(l2, k)
+
+    if not l2.get("ADMIN"):
+        l2["ADMIN"] = run(["cast", "wallet", "address", "--account", l2["ACCOUNT"]])
 
     if not l2.get("OUTPUT_JSON"):
         suffix = resolved_env if resolved_env in {"testnet", "mainnet"} else "default"
