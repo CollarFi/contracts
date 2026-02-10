@@ -87,8 +87,12 @@ def main(
         else:
             raise FileNotFoundError(f"expected L1 env file not found for --env {resolved_env}: {l1_env_file}")
 
-    for k in ("RPC_URL", "ACCOUNT", "OUTPUT_JSON", "ADMIN"):
+    for k in ("RPC_URL", "ACCOUNT", "ADMIN"):
         must(l2, k)
+
+    if not l2.get("OUTPUT_JSON"):
+        suffix = resolved_env if resolved_env in {"testnet", "mainnet"} else "default"
+        l2["OUTPUT_JSON"] = f"./deployments/l2-{suffix}.json"
 
     profile = derive_registry_profile or l2.get("DERIVE_REGISTRY_PROFILE", "")
     chain_id_override = derive_registry_chain_id or l2.get("DERIVE_REGISTRY_CHAIN_ID", "")
