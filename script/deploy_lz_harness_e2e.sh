@@ -136,9 +136,12 @@ deploy_one_side() {
     admin_address="$(resolve_account_address "${!account_var}")"
   fi
 
-  local output_json="${!out_var}"
-  [[ "$output_json" = /* ]] || output_json="$ROOT_DIR/$output_json"
-  mkdir -p "$(dirname "$output_json")"
+  local output_json_raw="${!out_var}"
+  local output_json_abs="$output_json_raw"
+  if [[ "$output_json_abs" != /* ]]; then
+    output_json_abs="$ROOT_DIR/$output_json_abs"
+  fi
+  mkdir -p "$(dirname "$output_json_abs")"
 
   echo "[info] deploying $side harness..."
   echo "[info] $side admin: $admin_address"
@@ -147,7 +150,8 @@ deploy_one_side() {
     cd "$ROOT_DIR"
     export ADMIN="$admin_address"
     export REMOTE_EID="${!remote_eid_var}"
-    export OUTPUT_JSON="$output_json"
+    # Keep OUTPUT_JSON exactly as provided (prefer relative path for foundry fs_permissions matching)
+    export OUTPUT_JSON="$output_json_raw"
     if [[ -n "${!endpoint_var:-}" ]]; then
       export LZ_ENDPOINT="${!endpoint_var}"
     else
@@ -166,13 +170,13 @@ deploy_one_side() {
     fi
   )
 
-  if [[ ! -f "$output_json" ]]; then
-    echo "[error] expected output json missing: $output_json" >&2
+  if [[ ! -f "$output_json_abs" ]]; then
+    echo "[error] expected output json missing: $output_json_abs" >&2
     exit 1
   fi
 
   local harness
-  harness="$(json_get_harness "$output_json")"
+  harness="$(json_get_harness "$output_json_abs")"
   echo "[info] $side harness deployed at: $harness"
   export "${side}_HARNESS=$harness"
 }
