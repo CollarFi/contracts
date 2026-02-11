@@ -5,7 +5,10 @@ import {Test} from "forge-std/Test.sol";
 
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVault, ILiquidityVault} from "../src/CollarVault.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {CollarVaultShared} from "../src/modules/CollarVaultShared.sol";
+import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
+import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
@@ -37,6 +40,8 @@ contract CollarVaultTest is Test {
     MockEulerAdapter internal eulerAdapter;
     CollarVault internal vault;
     MockLZMessenger internal messenger;
+    CollarVaultFinalizeModule internal finalizeModule;
+    CollarVaultSettleModule internal settleModule;
 
     uint256 internal borrowerKey = 0xB0B0;
     address internal borrower;
@@ -54,6 +59,8 @@ contract CollarVaultTest is Test {
         adapter = new MockBridgeAdapter();
         eulerAdapter = new MockEulerAdapter();
         messenger = new MockLZMessenger();
+        finalizeModule = new CollarVaultFinalizeModule();
+        settleModule = new CollarVaultSettleModule();
         borrower = vm.addr(borrowerKey);
         rfqSigner = vm.addr(rfqSignerKey);
 
@@ -61,17 +68,23 @@ contract CollarVaultTest is Test {
         permit2 = IAllowanceTransfer(permit2Address);
         permit2Signer = new Permit2ECDSASigner(permit2Address);
 
-        vault = new CollarVault();
-        vault.initialize(
-            address(this),
-            ILiquidityVault(address(liquidityVault)),
-            IEulerAdapter(address(eulerAdapter)),
-            permit2,
-            address(0x1001),
-            treasury
+        CollarVault vaultImpl = new CollarVault();
+        bytes memory initData = abi.encodeCall(
+            CollarVault.initialize,
+            (
+                address(this),
+                ILiquidityVault(address(liquidityVault)),
+                IEulerAdapter(address(eulerAdapter)),
+                permit2,
+                address(0x1001),
+                treasury
+            )
         );
+        vault = CollarVault(payable(address(new ERC1967Proxy(address(vaultImpl), initData))));
         vault.setTreasuryConfig(treasury, 0);
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
+        vault.setFinalizeModule(address(finalizeModule));
+        vault.setSettleModule(address(settleModule));
 
         vault.setCollateralConfig(address(wbtc), true, 1e8);
         vault.setSocketVaultConfig(address(wbtc), IBridgeAdapter(address(adapter)));
@@ -203,6 +216,12 @@ contract MockLZMessenger {
     uint256 public quoteFee;
     uint64 public nonce;
 
+    function _nextGuid(uint256 loanId, CollarLZMessages.Action action) internal returns (bytes32 guid) {
+        nonce++;
+        guid = keccak256(abi.encodePacked(nonce, loanId, action));
+        lastSentGuid = guid;
+    }
+
     function receivedMessage(bytes32 guid) external view returns (CollarLZMessages.Message memory message) {
         return _receivedMessages[guid];
     }
@@ -224,11 +243,142 @@ contract MockLZMessenger {
     }
 
     function sendMessage(CollarLZMessages.Message calldata message) external payable returns (MessagingReceipt memory) {
-        nonce++;
-        bytes32 guid = keccak256(abi.encodePacked(nonce, message.loanId, message.action));
+        bytes32 guid = _nextGuid(message.loanId, message.action);
         lastSentMessage = message;
-        lastSentGuid = guid;
         return MessagingReceipt({guid: guid, nonce: nonce, fee: MessagingFee(msg.value, 0)});
+    }
+
+    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address)
+        external
+        payable
+        returns (bytes32 guid)
+    {
+        guid = _nextGuid(message.loanId, message.action);
+        lastSentMessage = message;
+    }
+
+    function sendDepositIntentAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 amount,
+        address recipient,
+        uint256 subaccountId,
+        bytes32 socketMessageId,
+        address
+    ) external payable returns (bytes32 guid) {
+        guid = _nextGuid(loanId, CollarLZMessages.Action.DepositIntent);
+        lastSentMessage = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.DepositIntent,
+            loanId: loanId,
+            asset: asset,
+            amount: amount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: socketMessageId,
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: bytes("")
+        });
+    }
+
+    function sendMandateCreatedAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 borrowAmount,
+        address recipient,
+        uint256 subaccountId,
+        bytes calldata mandateData,
+        address
+    ) external payable returns (bytes32 guid) {
+        guid = _nextGuid(loanId, CollarLZMessages.Action.MandateCreated);
+        lastSentMessage = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.MandateCreated,
+            loanId: loanId,
+            asset: asset,
+            amount: borrowAmount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: mandateData
+        });
+    }
+
+    function sendReturnRequestAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 amount,
+        address recipient,
+        uint256 subaccountId,
+        address
+    ) external payable returns (bytes32 guid) {
+        guid = _nextGuid(loanId, CollarLZMessages.Action.ReturnRequest);
+        lastSentMessage = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.ReturnRequest,
+            loanId: loanId,
+            asset: asset,
+            amount: amount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: bytes("")
+        });
+    }
+
+    function validateDepositConfirmed(
+        CollarLZMessages.Message calldata lzMessage,
+        address pendingBorrower,
+        address expectedBorrower,
+        address pendingCollateralAsset,
+        uint256 pendingCollateralAmount,
+        address expectedRecipient,
+        uint256 expectedSubaccountId
+    ) external pure returns (uint256 loanId) {
+        require(lzMessage.action == CollarLZMessages.Action.DepositConfirmed, "bad action");
+        require(lzMessage.recipient == expectedRecipient, "bad recipient");
+        require(expectedSubaccountId == 0 || lzMessage.subaccountId == expectedSubaccountId, "bad subaccount");
+        require(lzMessage.asset == pendingCollateralAsset && lzMessage.amount == pendingCollateralAmount, "bad deposit");
+        require(pendingBorrower != address(0) && pendingBorrower == expectedBorrower, "bad borrower");
+        loanId = lzMessage.loanId;
+    }
+
+    function validateTradeConfirmedForFinalize(
+        CollarLZMessages.Message calldata tradeMessage,
+        uint256 expectedLoanId,
+        address expectedRecipient,
+        uint256 expectedSubaccountId,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint64 expectedMaturity
+    ) external pure returns (uint256 callStrike, uint256 putStrike) {
+        require(tradeMessage.action == CollarLZMessages.Action.TradeConfirmed, "bad action");
+        require(tradeMessage.loanId == expectedLoanId, "bad loan");
+        require(tradeMessage.recipient == expectedRecipient, "bad recipient");
+        require(expectedSubaccountId == 0 || tradeMessage.subaccountId == expectedSubaccountId, "bad subaccount");
+
+        uint64 expiry;
+        (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        require(expiry == expectedMaturity, "bad maturity");
+        require(callStrike >= minCallStrike && putStrike <= maxPutStrike, "bad strikes");
+    }
+
+    function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
+        external
+        pure
+    {
+        if (feeAmount == 0) {
+            require(lzMessage.amount == 0, "unexpected fee");
+            return;
+        }
+        require(lzMessage.asset == usdcAsset, "bad fee asset");
+        require(lzMessage.amount == feeAmount, "bad fee amount");
+        require(lzMessage.socketMessageId != bytes32(0), "missing fee socket id");
     }
 
     function setMessage(bytes32 guid, CollarLZMessages.Message memory message) external {
