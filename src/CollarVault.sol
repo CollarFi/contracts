@@ -32,7 +32,6 @@ contract CollarVault is
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
-    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
     bytes32 public constant PARAMETER_ROLE = keccak256("PARAMETER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant RFQ_SIGNER_ROLE = keccak256("RFQ_SIGNER_ROLE");
@@ -287,7 +286,6 @@ contract CollarVault is
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PARAMETER_ROLE, admin);
         _grantRole(KEEPER_ROLE, admin);
-        _grantRole(EXECUTOR_ROLE, admin);
         _grantRole(PAUSER_ROLE, admin);
     }
 
@@ -680,7 +678,7 @@ contract CollarVault is
         external
         nonReentrant
         whenNotPaused
-        onlyKeeperOrExecutor
+        onlyKeeper
         returns (uint256 finalizedLoanId)
     {
         CollarVaultStorage storage $ = _getCollarVaultStorage();
@@ -903,7 +901,7 @@ contract CollarVault is
         external
         nonReentrant
         whenNotPaused
-        onlyKeeperOrExecutor
+        onlyKeeper
     {
         CollarVaultStorage storage $ = _getCollarVaultStorage();
         Loan storage loan = $.loans[loanId];
@@ -991,7 +989,7 @@ contract CollarVault is
         if (block.timestamp < loan.maturity) {
             revert CV_NotMatured();
         }
-        if (msg.sender != loan.borrower && !(hasRole(KEEPER_ROLE, msg.sender) || hasRole(EXECUTOR_ROLE, msg.sender))) {
+        if (msg.sender != loan.borrower && !hasRole(KEEPER_ROLE, msg.sender)) {
             revert CV_NotAuthorized();
         }
 
@@ -1459,13 +1457,13 @@ contract CollarVault is
         }
     }
 
-    modifier onlyKeeperOrExecutor() {
-        _onlyKeeperOrExecutor();
+    modifier onlyKeeper() {
+        _onlyKeeper();
         _;
     }
 
-    function _onlyKeeperOrExecutor() internal view {
-        if (!(hasRole(KEEPER_ROLE, msg.sender) || hasRole(EXECUTOR_ROLE, msg.sender))) {
+    function _onlyKeeper() internal view {
+        if (!hasRole(KEEPER_ROLE, msg.sender)) {
             revert CV_NotAuthorized();
         }
     }
