@@ -77,8 +77,10 @@ contract SmokeL2Trade is Script {
         bool seedCollateral;
         bool configureSigner;
         bool configureSubmitter;
+        bool localDirectMatch;
         address signer;
         address submitter;
+        string artifactPath;
     }
 
     function run() external {
@@ -89,11 +91,10 @@ contract SmokeL2Trade is Script {
         ICollarLoanStoreWriter loanStore = ICollarLoanStoreWriter(cfg.loanStore);
         IMatchingSmoke matching = IMatchingSmoke(cfg.matching);
 
-        _preflight(cfg, tsa, receiver, matching);
+        _preflight(cfg, tsa, receiver);
 
         uint256 adminPk = vm.envUint("L2_SMOKE_ADMIN_PK");
         uint256 signerPk = vm.envUint("L2_SMOKE_SIGNER_PK");
-        uint256 executorPk = vm.envUint("L2_SMOKE_EXECUTOR_PK");
         uint256 makerPk = vm.envUint("L2_SMOKE_MAKER_PK");
 
         if (cfg.configureSigner) {
@@ -187,8 +188,23 @@ contract SmokeL2Trade is Script {
             managerData: bytes("")
         });
 
+        bytes memory fillData = abi.encode(fill);
+        bytes memory verifyAndMatchCalldata = abi.encodeCall(IMatchingSmoke.verifyAndMatch, (actions, sigs, fillData));
+        _emitArtifacts(cfg, actions, sigs, fillData, verifyAndMatchCalldata);
+
+        if (!cfg.localDirectMatch) {
+            console2.log("SmokeL2Trade prepared artifacts for Derive executor flow (no local verifyAndMatch)");
+            console2.log("loanId", cfg.loanId);
+            console2.log("tsa", cfg.tsa);
+            console2.log("matching", cfg.matching);
+            return;
+        }
+
+        uint256 executorPk = vm.envUint("L2_SMOKE_EXECUTOR_PK");
+        require(matching.tradeExecutors(vm.addr(executorPk)), "executor not authorized");
+
         vm.startBroadcast(executorPk);
-        matching.verifyAndMatch(actions, sigs, abi.encode(fill));
+        matching.verifyAndMatch(actions, sigs, fillData);
         vm.stopBroadcast();
 
         (uint256 shortCallsAfter, uint256 baseAfter, int256 cashAfter, uint256 longPutsAfter, uint256 posAfter) =
@@ -204,13 +220,13 @@ contract SmokeL2Trade is Script {
 
         bool replayed;
         vm.startBroadcast(executorPk);
-        try matching.verifyAndMatch(actions, sigs, abi.encode(fill)) {
+        try matching.verifyAndMatch(actions, sigs, fillData) {
             replayed = true;
         } catch {}
         vm.stopBroadcast();
         require(!replayed, "replay unexpectedly succeeded");
 
-        console2.log("SmokeL2Trade OK");
+        console2.log("SmokeL2Trade local verifyAndMatch OK");
         console2.log("loanId", cfg.loanId);
         console2.log("tsa", cfg.tsa);
         console2.log("receiver", cfg.receiver);
@@ -219,6 +235,36 @@ contract SmokeL2Trade is Script {
         console2.log("baseAfter", baseAfter);
         console2.log("cashBefore", cashBefore);
         console2.log("cashAfter", cashAfter);
+    }
+
+    function _emitArtifacts(
+        Cfg memory cfg,
+        IActionVerifier.Action[] memory actions,
+        bytes[] memory sigs,
+        bytes memory fillData,
+        bytes memory verifyAndMatchCalldata
+    ) internal {
+        string memory root = "smokeL2Trade";
+        vm.serializeAddress(root, "matching", cfg.matching);
+        vm.serializeUint(root, "loanId", cfg.loanId);
+        vm.serializeUint(root, "tsaSubaccount", cfg.tsaSubaccount);
+        vm.serializeUint(root, "makerSubaccount", cfg.makerSubaccount);
+        vm.serializeUint(root, "tsaNonce", cfg.tsaNonce);
+        vm.serializeUint(root, "makerNonce", cfg.makerNonce);
+        vm.serializeBool(root, "localDirectMatch", cfg.localDirectMatch);
+        vm.serializeBytes(root, "actionsEncoded", abi.encode(actions));
+        vm.serializeBytes(root, "signaturesEncoded", abi.encode(sigs));
+        vm.serializeBytes(root, "fillDataEncoded", fillData);
+        string memory json = vm.serializeBytes(root, "verifyAndMatchCalldata", verifyAndMatchCalldata);
+
+        console2.log("SMOKE_L2_TRADE_ARTIFACTS_JSON");
+        console2.log(json);
+
+        if (bytes(cfg.artifactPath).length != 0) {
+            vm.writeJson(json, cfg.artifactPath);
+            console2.log("SMOKE_L2_TRADE_ARTIFACT_PATH");
+            console2.log(cfg.artifactPath);
+        }
     }
 
     function _runDeposit(Cfg memory cfg, ICollarTSAExtended tsa, uint256 adminPk) internal {
@@ -232,10 +278,7 @@ contract SmokeL2Trade is Script {
         vm.stopBroadcast();
     }
 
-    function _preflight(Cfg memory cfg, ICollarTSAExtended tsa, ICollarReceiverLike receiver, IMatchingSmoke matching)
-        internal
-        view
-    {
+    function _preflight(Cfg memory cfg, ICollarTSAExtended tsa, ICollarReceiverLike receiver) internal view {
         require(receiver.tsa() == cfg.tsa, "receiver->tsa mismatch");
         require(receiver.loanStore() == cfg.loanStore, "receiver->loanStore mismatch");
 
@@ -254,8 +297,6 @@ contract SmokeL2Trade is Script {
         require(tradeModule != address(0), "tradeModule unset");
         require(rfqModule == cfg.rfqModule, "rfqModule mismatch");
         require(optionAsset == cfg.optionAsset, "optionAsset mismatch");
-
-        require(matching.tradeExecutors(vm.addr(vm.envUint("L2_SMOKE_EXECUTOR_PK"))), "executor not authorized");
     }
 
     function _signMatchingAction(IMatchingSmoke matching, IActionVerifier.Action memory action, uint256 pk)
@@ -299,7 +340,9 @@ contract SmokeL2Trade is Script {
         cfg.seedCollateral = vm.envOr("L2_SMOKE_SEED_COLLATERAL", true);
         cfg.configureSigner = vm.envOr("L2_SMOKE_CONFIGURE_SIGNER", false);
         cfg.configureSubmitter = vm.envOr("L2_SMOKE_CONFIGURE_SUBMITTER", false);
+        cfg.localDirectMatch = vm.envOr("L2_SMOKE_LOCAL_DIRECT_MATCH", false);
         cfg.signer = vm.envOr("L2_SMOKE_SIGNER", vm.addr(vm.envUint("L2_SMOKE_SIGNER_PK")));
         cfg.submitter = vm.envOr("L2_SMOKE_SUBMITTER", address(0));
+        cfg.artifactPath = vm.envOr("L2_SMOKE_ARTIFACT_PATH", string(""));
     }
 }

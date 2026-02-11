@@ -122,21 +122,21 @@ uv run python script/lz_harness/route_check.py --json
 
 ## L2 deployed TSA smoke trade script
 
-`script/SmokeL2Trade.s.sol` runs a deterministic tiny-notional L2 collar flow against deployed contracts:
+`script/SmokeL2Trade.s.sol` prepares a deterministic tiny-notional L2 collar RFQ flow aligned to Derive production execution (Derive keeper/executor calls `verifyAndMatch`, not this script by default):
 - preflight wiring checks (receiver↔tsa↔loanStore + TSA module addresses)
 - optional admin hooks (`setSigner` / `setSubmitter`)
 - mandate seeding (`recordMandate`) and optional collateral seed (`recordCollateral`)
 - optional deposit path (`initiateDeposit` + `processDeposit`)
-- one RFQ collar sign + execute path
-- post-trade asserts (position shape, replay rejection, cash guard)
+- RFQ maker+taker action construction/signing
+- machine-readable artifact output for API submission (encoded actions/signatures/fill + `verifyAndMatch` calldata)
 
-Required env vars:
+Required env vars (default Derive keeper flow):
 - `L2_SMOKE_TSA`, `L2_SMOKE_RECEIVER`, `L2_SMOKE_LOAN_STORE`, `L2_SMOKE_MATCHING`
 - `L2_SMOKE_COLLATERAL_ASSET`, `L2_SMOKE_OPTION_ASSET`, `L2_SMOKE_RFQ_MODULE`
 - `L2_SMOKE_TSA_SUBACCOUNT`, `L2_SMOKE_MAKER_SUBACCOUNT`, `L2_SMOKE_TSA_NONCE`, `L2_SMOKE_MAKER_NONCE`
 - `L2_SMOKE_LOAN_ID`, `L2_SMOKE_COLLATERAL_AMOUNT`, `L2_SMOKE_BORROW_AMOUNT`
 - `L2_SMOKE_EXPIRY`, `L2_SMOKE_CALL_STRIKE`, `L2_SMOKE_PUT_STRIKE`, `L2_SMOKE_CALL_PRICE`, `L2_SMOKE_PUT_PRICE`, `L2_SMOKE_TRADE_AMOUNT`
-- `L2_SMOKE_ADMIN_PK`, `L2_SMOKE_SIGNER_PK`, `L2_SMOKE_EXECUTOR_PK`, `L2_SMOKE_MAKER_PK`
+- `L2_SMOKE_ADMIN_PK`, `L2_SMOKE_SIGNER_PK`, `L2_SMOKE_MAKER_PK`
 
 Optional env vars:
 - `L2_SMOKE_DEADLINE` (defaults to `EXPIRY - 60`)
@@ -146,6 +146,11 @@ Optional env vars:
 - `L2_SMOKE_CONFIGURE_SUBMITTER` (`true/false`, default `false`)
 - `L2_SMOKE_SIGNER` (defaults from `L2_SMOKE_SIGNER_PK`)
 - `L2_SMOKE_SUBMITTER` (required only if configuring submitter)
+- `L2_SMOKE_ARTIFACT_PATH` (if set, writes the artifact JSON file)
+
+Local-only execution mode (fork/dev testing):
+- `L2_SMOKE_LOCAL_DIRECT_MATCH=true`
+- `L2_SMOKE_EXECUTOR_PK` (required only in local-direct mode; script then calls `verifyAndMatch` directly and runs post-trade assertions)
 
 Run:
 
@@ -155,4 +160,4 @@ forge script script/SmokeL2Trade.s.sol:SmokeL2Trade \
   --broadcast -vvvv
 ```
 
-If `L2_SMOKE_RUN_DEPOSIT=false`, pre-fund TSA collateral in advance (or run equivalent deposit path externally) so the RFQ collar open can pass collateral checks.
+Default run prints `SMOKE_L2_TRADE_ARTIFACTS_JSON` for Derive-side submission. If `L2_SMOKE_RUN_DEPOSIT=false`, pre-fund TSA collateral in advance (or run equivalent deposit path externally) so the RFQ collar open can pass collateral checks.
