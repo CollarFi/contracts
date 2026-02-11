@@ -27,6 +27,10 @@ import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.so
 import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
+import {IOptionRiskVerifier} from "../src/interfaces/IOptionRiskVerifier.sol";
+import {OptionRiskVerifier} from "../src/verifiers/OptionRiskVerifier.sol";
+import {IRfqVerifier} from "../src/interfaces/IRfqVerifier.sol";
+import {RfqVerifier} from "../src/verifiers/RfqVerifier.sol";
 
 /// @dev Deploy L2 protocol components.
 ///
@@ -50,10 +54,12 @@ import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
 /// Auto-init env vars (used when TSA_INIT_DATA is omitted and TSA_PROXY is not provided):
 /// - SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING
 /// - BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET
+/// - OPTION_RISK_VERIFIER (optional; if omitted, deploys OptionRiskVerifier)
+/// - RFQ_VERIFIER (optional; if omitted, deploys RfqVerifier)
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
 /// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
 contract DeployL2 is Script {
-    function _buildTsaInitData(address admin, address loanStoreAddr) internal view returns (bytes memory) {
+    function _buildTsaInitData(address admin, address loanStoreAddr, address optionRiskVerifierAddr, address rfqVerifierAddr) internal view returns (bytes memory) {
         address initialOwner = vm.envOr("TSA_INITIAL_OWNER", admin);
 
         string memory symbol = vm.envOr("TSA_SYMBOL", string("cTSA"));
@@ -77,6 +83,8 @@ contract DeployL2 is Script {
             tradeModule: ITradeModule(vm.envAddress("TRADE_MODULE")),
             rfqModule: IRfqModule(vm.envAddress("RFQ_MODULE")),
             optionAsset: IOptionAsset(vm.envAddress("OPTION_ASSET")),
+            optionRiskVerifier: IOptionRiskVerifier(optionRiskVerifierAddr),
+            rfqVerifier: IRfqVerifier(rfqVerifierAddr),
             loanStore: loanStoreAddr
         });
 
@@ -96,6 +104,8 @@ contract DeployL2 is Script {
         address tsaProxyAddr = vm.envOr("TSA_PROXY", address(0));
         address tsaImplementation = vm.envOr("TSA_IMPLEMENTATION", address(0));
         bytes memory tsaInitData = vm.envOr("TSA_INIT_DATA", bytes(""));
+        address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
+        address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
 
@@ -113,6 +123,13 @@ contract DeployL2 is Script {
             loanStoreAddr = address(new CollarLoanStore(admin));
         }
 
+        if (optionRiskVerifierAddr == address(0)) {
+            optionRiskVerifierAddr = address(new OptionRiskVerifier());
+        }
+        if (rfqVerifierAddr == address(0)) {
+            rfqVerifierAddr = address(new RfqVerifier());
+        }
+
         if (tsaProxyAddr == address(0)) {
             if (tsaImplementation == address(0)) {
                 tsaImplementation = address(new CollarTSA());
@@ -120,7 +137,7 @@ contract DeployL2 is Script {
 
             // Auto-build initializer calldata if not provided explicitly.
             if (tsaInitData.length == 0) {
-                tsaInitData = _buildTsaInitData(admin, loanStoreAddr);
+                tsaInitData = _buildTsaInitData(admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr);
             }
 
             // Deploy + initialize atomically in ERC1967Proxy constructor.
@@ -158,6 +175,8 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2LoanStore", loanStoreAddr);
         json = vm.serializeAddress("addrs", "l2Tsa", tsaProxyAddr);
         json = vm.serializeAddress("addrs", "l2TsaImplementation", tsaImplementation);
+        json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
+        json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
         vm.writeJson(json, outPath);
 
@@ -166,6 +185,8 @@ contract DeployL2 is Script {
         console2.log("L2 loanStore", loanStoreAddr);
         console2.log("L2 tsa(proxy)", tsaProxyAddr);
         console2.log("L2 tsaImplementation", tsaImplementation);
+        console2.log("L2 optionRiskVerifier", optionRiskVerifierAddr);
+        console2.log("L2 rfqVerifier", rfqVerifierAddr);
         console2.log("L2 lzEndpoint", lzEndpoint);
         console2.log("Wrote", outPath);
     }

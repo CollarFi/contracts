@@ -4,7 +4,8 @@ pragma solidity ^0.8.20;
 import {TSATestUtils} from "./TSATestUtils.sol";
 import {CollarTSA} from "../../src/CollarTSA.sol";
 import {CollarLoanStore} from "../../src/CollarLoanStore.sol";
-import {CollateralManagementTSA} from "v2-matching/src/tokenizedSubaccounts/CollateralManagementTSA.sol";
+import {OptionRiskVerifier} from "../../src/verifiers/OptionRiskVerifier.sol";
+import {RfqVerifier} from "../../src/verifiers/RfqVerifier.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
@@ -30,13 +31,8 @@ contract CollarTSATestUtils is TSATestUtils {
         putMaxPriceFactor: 1.1e18
     });
 
-    CollateralManagementTSA.CollateralManagementParams public defaultCollateralManagementParams =
-        CollateralManagementTSA.CollateralManagementParams({
-            feeFactor: 0.01e18,
-            spotTransactionLeniency: 1.01e18,
-            worstSpotBuyPrice: 1.01e18,
-            worstSpotSellPrice: 0.99e18
-        });
+    CollarTSA.CollateralManagementParams public defaultCollateralManagementParams =
+        CollarTSA.CollateralManagementParams({worstSpotSellPrice: 0.99e18});
 
     function upgradeToCollarTSA(string memory market) internal {
         IWrappedERC20Asset wrappedDepositAsset;
@@ -56,6 +52,8 @@ contract CollarTSATestUtils is TSATestUtils {
         tsaImplementation = new CollarTSA();
 
         loanStore = new CollarLoanStore(address(this));
+        OptionRiskVerifier optionRiskVerifier = new OptionRiskVerifier();
+        RfqVerifier rfqVerifier = new RfqVerifier();
 
         proxyAdmin.upgradeAndCall(
             ITransparentUpgradeableProxy(address(proxy)),
@@ -80,6 +78,8 @@ contract CollarTSATestUtils is TSATestUtils {
                     tradeModule: tradeModule,
                     rfqModule: rfqModule,
                     optionAsset: optionAsset,
+                    optionRiskVerifier: optionRiskVerifier,
+                    rfqVerifier: rfqVerifier,
                     loanStore: address(loanStore)
                 })
             )

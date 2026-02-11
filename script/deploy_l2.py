@@ -236,6 +236,8 @@ def main(
         "MANAGER",
         "BASE_FEED",
         "OPTION_ASSET",
+        "OPTION_RISK_VERIFIER",
+        "RFQ_VERIFIER",
         "TSA_INITIAL_OWNER",
         "TSA_SYMBOL",
         "TSA_NAME",
