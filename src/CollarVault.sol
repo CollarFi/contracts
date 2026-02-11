@@ -37,7 +37,6 @@ contract CollarVault is
     enum LoanState {
         NONE,
         ACTIVE_ZERO_COST,
-        ACTIVE_VARIABLE,
         CLOSED
     }
 
@@ -973,31 +972,6 @@ contract CollarVault is
         _convertToVariable(loanId, lzMessage.amount);
     }
 
-    /// @notice Repay a variable-rate loan and return collateral to the borrower.
-    function repayVariable(uint256 loanId) external nonReentrant {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Loan storage loan = $.loans[loanId];
-        if (loan.state != LoanState.ACTIVE_VARIABLE) {
-            revert CV_InvalidLoanState();
-        }
-        if (msg.sender != loan.borrower) {
-            revert CV_NotBorrower();
-        }
-
-        uint256 debt = loan.variableDebt;
-        if (debt == 0) {
-            revert CV_InvalidAmount();
-        }
-
-        $.usdc.safeTransferFrom(msg.sender, address(this), debt);
-        $.usdc.safeIncreaseAllowance(address($.eulerAdapter), debt);
-        $.eulerAdapter.repay(address($.usdc), debt, loan.borrower);
-        $.eulerAdapter.withdrawCollateral(loan.collateralAsset, loan.collateralAmount, loan.borrower, loan.borrower);
-
-        loan.state = LoanState.CLOSED;
-        emit LoanClosed(loanId);
-    }
-
     // (removed) hashQuote: quote-based flow removed.
 
     /// @notice Return a loan record by id.
@@ -1289,9 +1263,10 @@ contract CollarVault is
         $.eulerAdapter.borrow(address($.usdc), loan.principal, loan.borrower, address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
-        loan.state = LoanState.ACTIVE_VARIABLE;
-        loan.variableDebt = loan.principal;
-        emit LoanConverted(loanId, loan.variableDebt);
+        loan.state = LoanState.CLOSED;
+        loan.variableDebt = 0;
+        emit LoanConverted(loanId, loan.principal);
+        emit LoanClosed(loanId);
     }
 
     function _bridgeToL2(address asset, uint256 amount, address receiver) internal {

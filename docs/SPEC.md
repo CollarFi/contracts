@@ -308,7 +308,7 @@ Since the fast bridge is available for all fund movement, the protocol can remov
 
 - Collateral release: Upon neutral maturity, the collateral is unencumbered on Derive. The executor uses the Withdrawal Module to withdraw the collateral to L2 and bridges it back to L1.
 - Euler deposit: The collateral is deposited into a standard Euler V2 market on L1. The borrower borrows USDC up to the maximum LTV permitted by Euler. The borrowed USDC repays the zero-cost loan principal.
-- Accounting: The loan state changes from `ACTIVE_ZERO_COST` to `ACTIVE_VARIABLE`. Interest accrues at the Euler variable rate. When the borrower repays, the collateral is returned.
+- Accounting: On neutral expiry conversion, collateral is moved into borrower-owned Euler position and the Vault-side loan is closed; borrower manages the variable position directly in Euler thereafter.
 
 ### 5.4 Rolling a variable loan into a new collar
 
