@@ -36,8 +36,8 @@ def main(
         l1["ADMIN"] = deployer
 
     if not l1.get("OUTPUT_JSON"):
-        resolved_env = env_profile.strip().lower() or l1.get("ENV", "").strip().lower() or "default"
-        l1["OUTPUT_JSON"] = f"./deployments/l1-{resolved_env}.json"
+        chain_id = run(["cast", "chain-id", "--rpc-url", l1["RPC_URL"]])
+        l1["OUTPUT_JSON"] = f"./deployments/{chain_id}/l1.json"
 
     out_abs = resolve_output_json(l1["OUTPUT_JSON"])
     out_abs.parent.mkdir(parents=True, exist_ok=True)
