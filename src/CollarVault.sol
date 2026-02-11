@@ -19,6 +19,7 @@ import {ICollarVaultMessenger} from "./interfaces/ICollarVaultMessenger.sol";
 import {ICollarVaultFinalizeModule} from "./interfaces/ICollarVaultFinalizeModule.sol";
 import {ICollarVaultSettleModule} from "./interfaces/ICollarVaultSettleModule.sol";
 import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
+import {CollarVaultShared} from "./modules/CollarVaultShared.sol";
 
 contract CollarVault is
     Initializable,
@@ -33,8 +34,8 @@ contract CollarVault is
     bytes32 public constant PARAMETER_ROLE = keccak256("PARAMETER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant RFQ_SIGNER_ROLE = keccak256("RFQ_SIGNER_ROLE");
-    uint256 public constant YEAR = 365 days;
-    uint256 public constant MAX_BPS = 10_000;
+    uint256 public constant YEAR = CollarVaultShared.YEAR;
+    uint256 public constant MAX_BPS = CollarVaultShared.MAX_BPS;
 
     enum LoanState {
         NONE,
@@ -72,6 +73,22 @@ contract CollarVault is
         uint256 borrowAmount;
     }
 
+    struct SocketBridgeConfig {
+        IBridgeAdapter adapter;
+    }
+
+    struct Mandate {
+        address borrower;
+        address collateralAsset;
+        uint256 collateralAmount;
+        uint64 maturity;
+        uint64 deadline;
+        uint256 borrowAmount;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        bool sentToL2;
+    }
+
     struct DepositParams {
         address collateralAsset;
         uint256 collateralAmount;
@@ -99,60 +116,8 @@ contract CollarVault is
         "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint64 rfqExpiry,address borrower,uint256 nonce)"
     );
 
-    /// @custom:storage-location erc7201:collar.storage.CollarVault
-    struct CollarVaultStorage {
-        ILiquidityVault liquidityVault;
-        IERC20 usdc;
-        IAllowanceTransfer permit2;
-        mapping(address => SocketBridgeConfig) socketBridgeConfigs;
-        IEulerAdapter eulerAdapter;
-        address l2Recipient;
-        address treasury;
-        uint256 treasuryBps;
-        uint256 originationFeeApr;
-        uint256 maxTotalPrincipal;
-        uint256 totalCommittedPrincipal;
-        uint256 deriveSubaccountId;
-        uint256 nextLoanId;
-        mapping(uint256 => Loan) loans;
-        mapping(uint256 => PendingDeposit) pendingDeposits;
-        mapping(uint256 => Mandate) mandates;
-        mapping(bytes32 => bool) usedBaselineRfqs;
-        mapping(uint256 => bool) tradeConfirmed;
-        mapping(uint256 => bool) collateralActivated;
-        mapping(uint256 => bool) returnRequested;
-        mapping(address => bool) collateralAllowed;
-        mapping(address => uint256) strikeScale;
-        ICollarVaultMessenger lzMessenger;
-        mapping(bytes32 => bool) lzMessageConsumed;
-        address finalizeModule;
-        address settleModule;
-    }
-
-    // keccak256(abi.encode(uint256(keccak256("collar.storage.CollarVault")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant CollarVaultStorageLocation =
-        0x44df88ba167ccae38168bf10e759327f11cfe194bbb6b4faf1c1a932243f4100;
-
-    function _getCollarVaultStorage() private pure returns (CollarVaultStorage storage $) {
-        assembly {
-            $.slot := CollarVaultStorageLocation
-        }
-    }
-
-    struct SocketBridgeConfig {
-        IBridgeAdapter adapter;
-    }
-
-    struct Mandate {
-        address borrower;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint64 maturity;
-        uint64 deadline;
-        uint256 borrowAmount;
-        uint256 minCallStrike;
-        uint256 maxPutStrike;
-        bool sentToL2;
+    function _getCollarVaultStorage() private pure returns (CollarVaultShared.CollarVaultStorage storage $) {
+        return CollarVaultShared.getStorage();
     }
 
     // Quote-based RFQ flow removed: no quote replay tracking.
@@ -260,7 +225,7 @@ contract CollarVault is
         address l2Recipient_,
         address treasury_
     ) external initializer {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         __AccessControl_init();
         __Pausable_init();
         __ReentrancyGuard_init();
@@ -288,62 +253,62 @@ contract CollarVault is
     }
 
     function liquidityVault() external view returns (ILiquidityVault) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.liquidityVault;
     }
 
     function usdc() external view returns (IERC20) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.usdc;
     }
 
     function permit2() external view returns (IAllowanceTransfer) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.permit2;
     }
 
     function eulerAdapter() external view returns (IEulerAdapter) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.eulerAdapter;
     }
 
     function l2Recipient() external view returns (address) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.l2Recipient;
     }
 
     function treasury() external view returns (address) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.treasury;
     }
 
     function treasuryBps() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.treasuryBps;
     }
 
     function originationFeeApr() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.originationFeeApr;
     }
 
     function maxTotalPrincipal() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.maxTotalPrincipal;
     }
 
     function totalCommittedPrincipal() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.totalCommittedPrincipal;
     }
 
     function deriveSubaccountId() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.deriveSubaccountId;
     }
 
     function nextLoanId() external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.nextLoanId;
     }
 
@@ -359,14 +324,14 @@ contract CollarVault is
             uint256 callStrike,
             uint256 principal,
             uint256 subaccountId,
-            LoanState state,
+            CollarVaultShared.LoanState state,
             uint256 startTime,
             uint256 loanOriginationFeeApr,
             uint256 variableDebt
         )
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Loan storage loan = $.loans[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
         return (
             loan.borrower,
             loan.collateralAsset,
@@ -395,8 +360,8 @@ contract CollarVault is
             uint256 borrowAmount
         )
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        PendingDeposit storage pending = $.pendingDeposits[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.PendingDeposit storage pending = $.pendingDeposits[loanId];
         return (
             pending.borrower,
             pending.collateralAsset,
@@ -422,8 +387,8 @@ contract CollarVault is
             bool sentToL2
         )
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Mandate storage mandate = $.mandates[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Mandate storage mandate = $.mandates[loanId];
         return (
             mandate.borrower,
             mandate.collateralAsset,
@@ -438,52 +403,52 @@ contract CollarVault is
     }
 
     function usedBaselineRfqs(bytes32 rfqHash) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.usedBaselineRfqs[rfqHash];
     }
 
     function tradeConfirmed(uint256 loanId) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.tradeConfirmed[loanId];
     }
 
     function collateralActivated(uint256 loanId) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.collateralActivated[loanId];
     }
 
     function returnRequested(uint256 loanId) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.returnRequested[loanId];
     }
 
     function collateralAllowed(address asset) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.collateralAllowed[asset];
     }
 
     function strikeScale(address asset) external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.strikeScale[asset];
     }
 
     function lzMessenger() external view returns (ICollarVaultMessenger) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.lzMessenger;
     }
 
     function finalizeModule() external view returns (address) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.finalizeModule;
     }
 
     function settleModule() external view returns (address) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.settleModule;
     }
 
     function lzMessageConsumed(bytes32 guid) external view returns (bool) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.lzMessageConsumed[guid];
     }
 
@@ -493,7 +458,7 @@ contract CollarVault is
         IAllowanceTransfer.PermitSingle calldata permit,
         bytes calldata permitSig
     ) external payable nonReentrant whenNotPaused returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (!$.collateralAllowed[params.collateralAsset]) {
             revert CV_CollateralNotAllowed();
         }
@@ -546,8 +511,8 @@ contract CollarVault is
         whenNotPaused
         returns (bytes32 lzGuid)
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        PendingDeposit memory pending = $.pendingDeposits[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.PendingDeposit memory pending = $.pendingDeposits[loanId];
         if (pending.borrower == address(0)) {
             revert CV_PendingDepositNotFound();
         }
@@ -565,7 +530,7 @@ contract CollarVault is
         }
 
         // Only allow replacing an expired mandate.
-        Mandate memory existing = $.mandates[loanId];
+        CollarVaultShared.Mandate memory existing = $.mandates[loanId];
         bool hadMandate = existing.borrower != address(0);
         if (hadMandate && block.timestamp < existing.deadline) {
             revert CV_MandateAlreadySet();
@@ -613,7 +578,7 @@ contract CollarVault is
         uint256 minCallStrike = rfq.callStrike;
         uint256 maxPutStrike = rfq.putStrike;
 
-        $.mandates[loanId] = Mandate({
+        $.mandates[loanId] = CollarVaultShared.Mandate({
             borrower: pending.borrower,
             collateralAsset: pending.collateralAsset,
             collateralAmount: pending.collateralAmount,
@@ -641,12 +606,12 @@ contract CollarVault is
 
     function _sendMandateCreated(
         uint256 loanId,
-        PendingDeposit memory pending,
+        CollarVaultShared.PendingDeposit memory pending,
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 deadline
     ) internal returns (bytes32 lzGuid) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         bytes memory mandateData =
             abi.encode(pending.borrower, minCallStrike, maxPutStrike, uint64(pending.maturity), deadline);
 
@@ -669,7 +634,7 @@ contract CollarVault is
         onlyKeeper
         returns (uint256 finalizedLoanId)
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         address module = $.finalizeModule;
         if (module == address(0)) {
             revert CV_ModuleNotSet();
@@ -688,8 +653,8 @@ contract CollarVault is
         whenNotPaused
         returns (bytes32 lzGuid)
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        PendingDeposit storage pending = $.pendingDeposits[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.PendingDeposit storage pending = $.pendingDeposits[loanId];
         if (pending.borrower == address(0)) {
             revert CV_PendingDepositNotFound();
         }
@@ -702,11 +667,11 @@ contract CollarVault is
         if ($.tradeConfirmed[loanId] || $.collateralActivated[loanId]) {
             revert CV_PendingDepositReturnBlocked();
         }
-        Mandate memory mandate = $.mandates[loanId];
+        CollarVaultShared.Mandate memory mandate = $.mandates[loanId];
         if (mandate.borrower != address(0) && block.timestamp < mandate.deadline) {
             revert CV_MandateNotExpired();
         }
-        if ($.loans[loanId].state != LoanState.NONE) {
+        if ($.loans[loanId].state != CollarVaultShared.LoanState.NONE) {
             revert CV_InvalidLoanState();
         }
         if (address($.lzMessenger) == address(0)) {
@@ -726,10 +691,10 @@ contract CollarVault is
 
     /// @notice Finalize a returned deposit and transfer collateral to the borrower.
     function finalizeDepositReturn(uint256 loanId, bytes32 lzGuid) external nonReentrant whenNotPaused {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         CollarLZMessages.Message memory lzMessage = _consumeLZMessage(lzGuid);
 
-        PendingDeposit memory pending = $.pendingDeposits[loanId];
+        CollarVaultShared.PendingDeposit memory pending = $.pendingDeposits[loanId];
         if (pending.borrower == address(0)) {
             revert CV_PendingDepositNotFound();
         }
@@ -745,13 +710,13 @@ contract CollarVault is
                 address(this),
                 $.deriveSubaccountId
             );
-        if ($.loans[loanId].state != LoanState.NONE) {
+        if ($.loans[loanId].state != CollarVaultShared.LoanState.NONE) {
             revert CV_InvalidLoanState();
         }
 
         delete $.pendingDeposits[loanId];
 
-        Mandate memory mandate = $.mandates[loanId];
+        CollarVaultShared.Mandate memory mandate = $.mandates[loanId];
         if (mandate.borrower != address(0)) {
             _releaseCommittedPrincipal(mandate.borrowAmount);
             delete $.mandates[loanId];
@@ -769,7 +734,7 @@ contract CollarVault is
         whenNotPaused
         onlyKeeper
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         address module = $.settleModule;
         if (module == address(0)) {
             revert CV_ModuleNotSet();
@@ -779,9 +744,9 @@ contract CollarVault is
 
     /// @notice Convert a neutral-expiry loan into a variable-rate Euler position.
     function convertToVariable(uint256 loanId, bytes32 lzGuid) external nonReentrant whenNotPaused {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Loan storage loan = $.loans[loanId];
-        if (loan.state != LoanState.ACTIVE_ZERO_COST) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.ACTIVE_ZERO_COST) {
             revert CV_InvalidLoanState();
         }
         if (block.timestamp < loan.maturity) {
@@ -802,16 +767,30 @@ contract CollarVault is
     // (removed) hashQuote: quote-based flow removed.
 
     /// @notice Return a loan record by id.
-    function getLoan(uint256 loanId) external view returns (Loan memory) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        return $.loans[loanId];
+    function getLoan(uint256 loanId) external view returns (Loan memory loan_) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        loan_ = Loan({
+            borrower: loan.borrower,
+            collateralAsset: loan.collateralAsset,
+            collateralAmount: loan.collateralAmount,
+            maturity: loan.maturity,
+            putStrike: loan.putStrike,
+            callStrike: loan.callStrike,
+            principal: loan.principal,
+            subaccountId: loan.subaccountId,
+            state: LoanState(uint8(loan.state)),
+            startTime: loan.startTime,
+            originationFeeApr: loan.originationFeeApr,
+            variableDebt: loan.variableDebt
+        });
     }
 
     /// @notice Calculate the annualized origination fee amount for a loan.
     function calculateOriginationFee(uint256 loanId) external view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Loan storage loan = $.loans[loanId];
-        if (loan.state == LoanState.NONE) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state == CollarVaultShared.LoanState.NONE) {
             revert CV_InvalidLoanState();
         }
         if (loan.maturity <= loan.startTime) {
@@ -824,7 +803,7 @@ contract CollarVault is
 
     /// @notice Update the L2 recipient for bridge transfers.
     function setL2Recipient(address newL2Recipient) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (newL2Recipient == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -834,17 +813,17 @@ contract CollarVault is
 
     /// @notice Configure Socket bridge settings for an asset using a preconfigured adapter.
     function setSocketVaultConfig(address asset, IBridgeAdapter adapter) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (asset == address(0) || address(adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
-        $.socketBridgeConfigs[asset] = SocketBridgeConfig({adapter: adapter});
+        $.socketBridgeConfigs[asset] = CollarVaultShared.SocketBridgeConfig({adapter: adapter});
         emit BridgeConfigUpdated(asset, address(adapter));
     }
 
     /// @notice Update the Euler adapter.
     function setEulerAdapter(IEulerAdapter newAdapter) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (address(newAdapter) == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -854,7 +833,7 @@ contract CollarVault is
 
     /// @notice Update the Derive subaccount id used for action validation.
     function setDeriveSubaccountId(uint256 subaccountId) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (subaccountId == 0) {
             revert CV_InvalidSubaccount();
         }
@@ -864,7 +843,7 @@ contract CollarVault is
 
     /// @notice Update collateral allowlist and strike scale.
     function setCollateralConfig(address asset, bool allowed, uint256 scale) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (asset == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -875,8 +854,8 @@ contract CollarVault is
 
     /// @notice Estimate the Socket bridge fees for a transfer.
     function estimateBridgeFees(address asset, address, uint256) public view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        SocketBridgeConfig storage config = $.socketBridgeConfigs[asset];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.SocketBridgeConfig storage config = $.socketBridgeConfigs[asset];
         if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -885,7 +864,7 @@ contract CollarVault is
 
     /// @notice Update $.treasury configuration for settlement surplus.
     function setTreasuryConfig(address newTreasury, uint256 bps) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (newTreasury == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -899,14 +878,14 @@ contract CollarVault is
 
     /// @notice Update the annualized origination fee (1e18 precision).
     function setOriginationFeeApr(uint256 feeApr) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         $.originationFeeApr = feeApr;
         emit OriginationFeeAprUpdated(feeApr);
     }
 
     /// @notice Update the maximum total committed principal (0 disables the cap).
     function setMaxTotalPrincipal(uint256 maxPrincipal) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         $.maxTotalPrincipal = maxPrincipal;
         emit MaxTotalPrincipalUpdated(maxPrincipal);
     }
@@ -926,7 +905,7 @@ contract CollarVault is
 
     /// @notice Update the LayerZero messenger used to validate L2 acknowledgements.
     function setLZMessenger(ICollarVaultMessenger messenger) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (address(messenger) == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -935,7 +914,7 @@ contract CollarVault is
     }
 
     function setFinalizeModule(address module) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (module == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -944,7 +923,7 @@ contract CollarVault is
     }
 
     function setSettleModule(address module) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (module == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -970,7 +949,7 @@ contract CollarVault is
         uint256 putStrike,
         uint256 borrowAmount
     ) internal view {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         uint256 scale = $.strikeScale[collateralAsset];
         if (scale == 0) {
             revert CV_StrikeScaleUnset();
@@ -998,7 +977,7 @@ contract CollarVault is
     }
 
     function _quoteOriginationFee(uint256 borrowAmount, uint256 maturity) internal view returns (uint256) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if ($.originationFeeApr == 0) {
             return 0;
         }
@@ -1011,7 +990,7 @@ contract CollarVault is
     }
 
     function _commitPrincipal(uint256 amount) internal {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (amount == 0) {
             return;
         }
@@ -1023,7 +1002,7 @@ contract CollarVault is
     }
 
     function _releaseCommittedPrincipal(uint256 amount) internal {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (amount == 0) {
             return;
         }
@@ -1034,7 +1013,7 @@ contract CollarVault is
         internal
         returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
     {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (!$.collateralAllowed[params.collateralAsset]) {
             revert CV_CollateralNotAllowed();
         }
@@ -1052,7 +1031,7 @@ contract CollarVault is
         }
 
         loanId = $.nextLoanId++;
-        $.pendingDeposits[loanId] = PendingDeposit({
+        $.pendingDeposits[loanId] = CollarVaultShared.PendingDeposit({
             borrower: borrower,
             collateralAsset: params.collateralAsset,
             collateralAmount: params.collateralAmount,
@@ -1061,7 +1040,7 @@ contract CollarVault is
             borrowAmount: params.borrowAmount
         });
 
-        SocketBridgeConfig storage config = $.socketBridgeConfigs[params.collateralAsset];
+        CollarVaultShared.SocketBridgeConfig storage config = $.socketBridgeConfigs[params.collateralAsset];
         if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -1091,8 +1070,8 @@ contract CollarVault is
     // (removed) _confirmLoanCreation/_openLoan: quote-based flow removed.
 
     function _convertToVariable(uint256 loanId, uint256 collateralAmount) internal {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        Loan storage loan = $.loans[loanId];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
         if (collateralAmount != loan.collateralAmount) {
             revert CV_InvalidAmount();
         }
@@ -1102,15 +1081,15 @@ contract CollarVault is
         $.eulerAdapter.borrow(address($.usdc), loan.principal, loan.borrower, address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
-        loan.state = LoanState.CLOSED;
+        loan.state = CollarVaultShared.LoanState.CLOSED;
         loan.variableDebt = 0;
         emit LoanConverted(loanId, loan.principal);
         emit LoanClosed(loanId);
     }
 
     function _bridgeToL2(address asset, uint256 amount, address receiver) internal {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
-        SocketBridgeConfig storage config = $.socketBridgeConfigs[asset];
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.SocketBridgeConfig storage config = $.socketBridgeConfigs[asset];
         if (address(config.adapter) == address(0)) {
             revert CV_ZeroAddress();
         }
@@ -1123,7 +1102,7 @@ contract CollarVault is
     }
 
     function _loadLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (address($.lzMessenger) == address(0)) {
             revert CV_LZMessengerNotSet();
         }
@@ -1138,7 +1117,7 @@ contract CollarVault is
     }
 
     function _peekLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (address($.lzMessenger) == address(0)) {
             revert CV_LZMessengerNotSet();
         }
@@ -1151,7 +1130,7 @@ contract CollarVault is
 
     /// @notice Record that a trade was confirmed on L2 and mark collateral activated.
     function recordTradeConfirmed(bytes32 tradeGuid) external whenNotPaused {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         CollarLZMessages.Message memory lzMessage = _peekLZMessage(tradeGuid);
         uint256 loanId = $.lzMessenger.validateTradeConfirmedMarker(lzMessage, address(this), $.deriveSubaccountId);
         if ($.tradeConfirmed[loanId]) {
@@ -1164,7 +1143,7 @@ contract CollarVault is
     }
 
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {
-        CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         message = _loadLZMessage(guid);
         $.lzMessageConsumed[guid] = true;
     }
