@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {
     MessagingFee,
     MessagingReceipt
@@ -19,15 +21,15 @@ import {ISocketBridge} from "./interfaces/ISocketBridge.sol";
 import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
 import {CollarLZMessages} from "./bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "./interfaces/ICollarVaultMessenger.sol";
+import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
 
-interface ILiquidityVault {
-    function borrow(uint256 amount) external;
-    function repay(uint256 amount) external;
-    function writeOff(uint256 amount) external;
-    function asset() external view returns (address);
-}
-
-contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
+contract CollarVault is
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    EIP712Upgradeable
+{
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
@@ -106,7 +108,20 @@ contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
     IERC20 public usdc;
     IAllowanceTransfer public permit2;
 
-    bool private _initialized;
+    /// @custom:storage-location erc7201:collar.storage.CollarVault
+    struct CollarVaultStorage {
+        uint256 reserved;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("collar.storage.CollarVault")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant CollarVaultStorageLocation =
+        0x44df88ba167ccae38168bf10e759327f11cfe194bbb6b4faf1c1a932243f4100;
+
+    function _getCollarVaultStorage() private pure returns (CollarVaultStorage storage $) {
+        assembly {
+            $.slot := CollarVaultStorageLocation
+        }
+    }
 
     struct SocketBridgeConfig {
         IBridgeAdapter adapter;
@@ -245,7 +260,7 @@ contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
     );
 
     constructor() {
-        _initialized = true;
+        _disableInitializers();
     }
 
     function initialize(
@@ -256,9 +271,11 @@ contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
         IAllowanceTransfer permit2_,
         address l2Recipient_,
         address treasury_
-    ) external {
-        if (_initialized) revert CV_NotAuthorized();
-        _initialized = true;
+    ) external initializer {
+        __AccessControl_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __EIP712_init("CollarVault", "1");
 
         if (
             admin == address(0) || address(liquidityVault_) == address(0) || bridgeConfigAdmin_ == address(0)
@@ -311,21 +328,6 @@ contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
     }
 
     // (removed) acceptQuote: quote-based RFQ flow replaced by keeper-signed RFQ baseline + acceptMandate.
-
-    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant _EIP712_NAME_HASH = keccak256("CollarVault");
-    bytes32 private constant _EIP712_VERSION_HASH = keccak256("1");
-
-    function _domainSeparatorV4() internal view returns (bytes32) {
-        return keccak256(
-            abi.encode(_EIP712_DOMAIN_TYPEHASH, _EIP712_NAME_HASH, _EIP712_VERSION_HASH, block.chainid, address(this))
-        );
-    }
-
-    function _hashTypedDataV4(bytes32 structHash) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", _domainSeparatorV4(), structHash));
-    }
 
     function hashBaselineRfq(BaselineRfq memory rfq) public view returns (bytes32) {
         bytes32 structHash = keccak256(
