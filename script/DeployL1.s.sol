@@ -26,10 +26,12 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - env-driven inputs only
 ///
 /// Required env vars:
-/// - ADMIN (address)
 /// - BRIDGE_CONFIG_ADMIN (address)
 /// - TREASURY (address)
 /// - OUTPUT_JSON (string)
+///
+/// Optional env vars:
+/// - ADMIN (address, default deployer/broadcaster)
 ///
 /// Optional env vars:
 /// - BROADCAST (bool, default false)
@@ -46,7 +48,7 @@ contract DeployL1 is Script {
     function run() external {
         bool broadcast = vm.envOr("BROADCAST", false);
 
-        address admin = vm.envAddress("ADMIN");
+        address admin = vm.envOr("ADMIN", tx.origin);
         address bridgeConfigAdmin = vm.envAddress("BRIDGE_CONFIG_ADMIN");
         address treasury = vm.envAddress("TREASURY");
 

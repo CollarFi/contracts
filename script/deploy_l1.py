@@ -27,11 +27,13 @@ def main(
 
     l1 = load_env(l1_env_file)
 
-    for k in ("RPC_URL", "ACCOUNT", "ADMIN", "BRIDGE_CONFIG_ADMIN", "TREASURY"):
+    for k in ("RPC_URL", "ACCOUNT", "BRIDGE_CONFIG_ADMIN", "TREASURY"):
         must(l1, k)
 
     # Keep keystore/named-account workflow only.
-    _ = run(["cast", "wallet", "address", "--account", l1["ACCOUNT"]])
+    deployer = run(["cast", "wallet", "address", "--account", l1["ACCOUNT"]])
+    if not l1.get("ADMIN"):
+        l1["ADMIN"] = deployer
 
     if not l1.get("OUTPUT_JSON"):
         resolved_env = env_profile.strip().lower() or l1.get("ENV", "").strip().lower() or "default"
