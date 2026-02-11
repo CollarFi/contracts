@@ -24,8 +24,8 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// @dev Deploy L1 components.
 ///
 /// Safe defaults:
-/// - simulation mode unless BROADCAST=true
 /// - env-driven inputs only
+/// - use CLI --broadcast to send transactions onchain (without it, script simulates)
 ///
 /// Required env vars:
 /// - TREASURY (address)
@@ -35,7 +35,6 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - ADMIN (address, default broadcaster; deploy runner derives from ACCOUNT keystore)
 ///
 /// Optional env vars:
-/// - BROADCAST (bool, default false)
 /// - VAULT_OWNER (address, default ADMIN)
 /// - PERMIT2 (address, default mainnet Permit2)
 /// - L2_RECIPIENT (address, default ADMIN)
@@ -43,12 +42,10 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - USDC_ASSET (address, required only when LIQUIDITY_VAULT unset)
 /// - EULER_ADAPTER (address, if unset script deploys EulerAdapterMock as placeholder)
 /// - LZ_ENDPOINT (address, if unset script deploys LZEndpointV2Mock)
-/// - REMOTE_EID (uint32, default 0)
+/// - L2_EID (uint32, default 0)
 /// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
     function run() external {
-        bool broadcast = vm.envOr("BROADCAST", false);
-
         address admin = vm.envOr("ADMIN", msg.sender);
         address treasury = vm.envAddress("TREASURY");
 
@@ -66,7 +63,7 @@ contract DeployL1 is Script {
         address eulerAdapter = vm.envOr("EULER_ADAPTER", address(0));
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
-        uint32 remoteEid = uint32(vm.envOr("REMOTE_EID", vm.envOr("L2_EID", uint256(0))));
+        uint32 l2Eid = uint32(vm.envOr("L2_EID", vm.envOr("REMOTE_EID", uint256(0))));
 
         address wethAsset = vm.envOr("WETH_ASSET", address(0));
         address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
@@ -75,7 +72,9 @@ contract DeployL1 is Script {
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
 
-        if (broadcast) vm.startBroadcast();
+        // Always execute the flow in broadcast context so msg.sender is the configured
+        // deployer/account even during dry-run simulations (no --broadcast).
+        vm.startBroadcast();
 
         if (liquidityVault == address(0)) {
             if (usdcAsset == address(0)) revert("USDC_ASSET required when LIQUIDITY_VAULT is unset");
@@ -108,7 +107,7 @@ contract DeployL1 is Script {
         address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
         CollarVault vault = CollarVault(payable(vaultProxy));
 
-        CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, remoteEid);
+        CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
         CollarVaultFinalizeModule finalizeModule = new CollarVaultFinalizeModule();
         CollarVaultSettleModule settleModule = new CollarVaultSettleModule();
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
@@ -140,7 +139,7 @@ contract DeployL1 is Script {
             }
         }
 
-        if (broadcast) vm.stopBroadcast();
+        vm.stopBroadcast();
 
         string memory outPath = vm.envString("OUTPUT_JSON");
 
@@ -157,7 +156,6 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1WethAdapter", wethAdapter);
         vm.writeJson(json, outPath);
 
-        console2.log("broadcast", broadcast);
         console2.log("L1 vault proxy", address(vault));
         console2.log("L1 vault implementation", vaultImpl);
         console2.log("L1 messenger", address(messenger));
