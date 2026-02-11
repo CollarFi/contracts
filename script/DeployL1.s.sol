@@ -105,7 +105,7 @@ contract DeployL1 is Script {
             )
         );
         address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
-        CollarVault vault = CollarVault(vaultProxy);
+        CollarVault vault = CollarVault(payable(vaultProxy));
 
         CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));

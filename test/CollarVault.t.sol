@@ -60,7 +60,8 @@ contract CollarVaultTest is Test {
         permit2 = IAllowanceTransfer(permit2Address);
         permit2Signer = new Permit2ECDSASigner(permit2Address);
 
-        vault = new CollarVault(
+        vault = new CollarVault();
+        vault.initialize(
             address(this),
             ILiquidityVault(address(liquidityVault)),
             address(this),
