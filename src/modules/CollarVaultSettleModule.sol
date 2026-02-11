@@ -11,10 +11,8 @@ import {CollarVaultShared} from "./CollarVaultShared.sol";
 
 contract CollarVaultSettleModule is ICollarVaultSettleModule {
     using SafeERC20 for IERC20;
-
-    error CV_InvalidLoanState();
-    error CV_NotMatured();
-    error CV_InvalidAmount();
+    error CV_InvalidState();
+    error CV_InvalidInput();
 
     event LoanSettled(uint256 indexed loanId, CollarVaultShared.SettlementOutcome outcome, uint256 settlementAmount);
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
@@ -26,10 +24,10 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];
         if (loan.state != CollarVaultShared.LoanState.ACTIVE_ZERO_COST) {
-            revert CV_InvalidLoanState();
+            revert CV_InvalidState();
         }
         if (block.timestamp < loan.maturity) {
-            revert CV_NotMatured();
+            revert CV_InvalidState();
         }
 
         CollarLZMessages.Message memory lzMessage = _consumeLZMessage(lzGuid);
@@ -89,7 +87,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];
         if (collateralAmount != loan.collateralAmount) {
-            revert CV_InvalidAmount();
+            revert CV_InvalidInput();
         }
         _releaseCommittedPrincipal(loan.principal);
         IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.eulerAdapter), collateralAmount);
@@ -114,11 +112,11 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         if ($.lzMessageConsumed[guid]) {
-            revert CV_InvalidLoanState();
+            revert CV_InvalidState();
         }
         message = $.lzMessenger.receivedMessage(guid);
         if (message.loanId == 0) {
-            revert CV_InvalidLoanState();
+            revert CV_InvalidState();
         }
         $.lzMessageConsumed[guid] = true;
     }

@@ -11,12 +11,10 @@ import {CollarVaultShared} from "./CollarVaultShared.sol";
 
 contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
     using SafeERC20 for IERC20;
-
-    error CV_MandateExpired();
-    error CV_NotAuthorized();
-    error CV_LZMessageMismatch();
-    error CV_PendingDepositNotFound();
-    error CV_MandateNotFound();
+    error CV_InvalidState();
+    error CV_Unauthorized();
+    error CV_InvalidMessage();
+    error CV_NotFound();
 
     event LoanCreated(
         uint256 indexed loanId,
@@ -37,18 +35,18 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.PendingDeposit memory pending = $.pendingDeposits[loanId];
         if (pending.borrower == address(0)) {
-            revert CV_PendingDepositNotFound();
+            revert CV_NotFound();
         }
 
         CollarVaultShared.Mandate memory mandate = $.mandates[loanId];
         if (mandate.borrower == address(0)) {
-            revert CV_MandateNotFound();
+            revert CV_NotFound();
         }
         if (mandate.borrower != pending.borrower) {
-            revert CV_NotAuthorized();
+            revert CV_Unauthorized();
         }
         if (block.timestamp > mandate.deadline) {
-            revert CV_MandateExpired();
+            revert CV_InvalidState();
         }
 
         CollarLZMessages.Message memory depositMessage = _loadLZMessage(depositGuid);
@@ -149,12 +147,12 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
     function _loadLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         if ($.lzMessageConsumed[guid]) {
-            revert CV_LZMessageMismatch();
+            revert CV_InvalidMessage();
         }
 
         message = $.lzMessenger.receivedMessage(guid);
         if (message.loanId == 0) {
-            revert CV_LZMessageMismatch();
+            revert CV_InvalidMessage();
         }
     }
 }
