@@ -11,3 +11,4 @@ __pycache__/
 
 # Dotenv files
 .env
+.env.*
