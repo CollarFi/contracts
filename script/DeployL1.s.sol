@@ -6,10 +6,16 @@ import "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+
 import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
+import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
+import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
+import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {EulerAdapterMock} from "../src/mocks/EulerAdapterMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
@@ -90,10 +96,10 @@ contract DeployL1 is Script {
             CollarVault.initialize,
             (
                 vaultOwner,
-                CollarVault.ILiquidityVault(liquidityVault),
+                ILiquidityVault(liquidityVault),
                 bridgeConfigAdmin,
-                CollarVault.IEulerAdapter(eulerAdapter),
-                CollarVault.IAllowanceTransfer(permit2),
+                IEulerAdapter(eulerAdapter),
+                IAllowanceTransfer(permit2),
                 l2Recipient,
                 treasury
             )
@@ -102,7 +108,7 @@ contract DeployL1 is Script {
         CollarVault vault = CollarVault(vaultProxy);
 
         CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
-        vault.setLZMessenger(CollarVault.ICollarVaultMessenger(address(messenger)));
+        vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
 
         address wethAdapter = address(0);
         if (wethAsset != address(0) && wethSocketConnector != address(0)) {
@@ -125,7 +131,7 @@ contract DeployL1 is Script {
                     ""
                 );
                 wethAdapter = address(adapter);
-                vault.setSocketVaultConfig(wethAsset, CollarVault.IBridgeAdapter(wethAdapter));
+                vault.setSocketVaultConfig(wethAsset, IBridgeAdapter(wethAdapter));
             }
         }
 
