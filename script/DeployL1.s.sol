@@ -26,7 +26,6 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - env-driven inputs only
 ///
 /// Required env vars:
-/// - BRIDGE_CONFIG_ADMIN (address)
 /// - TREASURY (address)
 /// - OUTPUT_JSON (string)
 ///
@@ -49,7 +48,6 @@ contract DeployL1 is Script {
         bool broadcast = vm.envOr("BROADCAST", false);
 
         address admin = vm.envOr("ADMIN", tx.origin);
-        address bridgeConfigAdmin = vm.envAddress("BRIDGE_CONFIG_ADMIN");
         address treasury = vm.envAddress("TREASURY");
 
         address vaultOwner = vm.envOr("VAULT_OWNER", admin);
@@ -99,7 +97,6 @@ contract DeployL1 is Script {
             (
                 vaultOwner,
                 ILiquidityVault(liquidityVault),
-                bridgeConfigAdmin,
                 IEulerAdapter(eulerAdapter),
                 IAllowanceTransfer(permit2),
                 l2Recipient,

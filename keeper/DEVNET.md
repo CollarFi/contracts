@@ -52,7 +52,6 @@ Create a `.env` for forge scripts (NOT the keeper one):
 export RPC_URL=http://127.0.0.1:8545
 export ADMIN=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 export VAULT_OWNER=$ADMIN
-export BRIDGE_CONFIG_ADMIN=$ADMIN
 export TREASURY=$ADMIN
 
 # Euler Earn USDC (mainnet)

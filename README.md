@@ -118,6 +118,7 @@ uv run python script/wire_lz_peers.py --env testnet --broadcast
 # L1 notes:
 # - No direct Euler deployment/integration in this flow (liquidity vault can run without setting Euler vault).
 # - If LIQUIDITY_VAULT is not provided, set USDC_ASSET and script deploys a fresh CollarLiquidityVault.
+# - BRIDGE_CONFIG_ADMIN was removed; ADMIN/VAULT_OWNER is the PARAMETER_ROLE holder at init.
 
 # Check harness wiring/state
 uv run python script/lz_harness/status.py

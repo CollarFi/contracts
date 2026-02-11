@@ -64,7 +64,6 @@ contract CollarVaultTest is Test {
         vault.initialize(
             address(this),
             ILiquidityVault(address(liquidityVault)),
-            address(this),
             IEulerAdapter(address(eulerAdapter)),
             permit2,
             address(0x1001),

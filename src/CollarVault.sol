@@ -258,7 +258,6 @@ contract CollarVault is
     function initialize(
         address admin,
         ILiquidityVault liquidityVault_,
-        address bridgeConfigAdmin_,
         IEulerAdapter eulerAdapter_,
         IAllowanceTransfer permit2_,
         address l2Recipient_,
@@ -271,9 +270,8 @@ contract CollarVault is
         __EIP712_init("CollarVault", "1");
 
         if (
-            admin == address(0) || address(liquidityVault_) == address(0) || bridgeConfigAdmin_ == address(0)
-                || address(eulerAdapter_) == address(0) || address(permit2_) == address(0) || l2Recipient_ == address(0)
-                || treasury_ == address(0)
+            admin == address(0) || address(liquidityVault_) == address(0) || address(eulerAdapter_) == address(0)
+                || address(permit2_) == address(0) || l2Recipient_ == address(0) || treasury_ == address(0)
         ) {
             revert CV_ZeroAddress();
         }
@@ -291,7 +289,6 @@ contract CollarVault is
         _grantRole(KEEPER_ROLE, admin);
         _grantRole(EXECUTOR_ROLE, admin);
         _grantRole(PAUSER_ROLE, admin);
-        _grantRole(PARAMETER_ROLE, bridgeConfigAdmin_);
     }
 
     function liquidityVault() external view returns (ILiquidityVault) {

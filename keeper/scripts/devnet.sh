@@ -57,7 +57,6 @@ echo "==> deploying L1"
   export RPC_URL="http://127.0.0.1:$L1_PORT"
   export ADMIN
   export VAULT_OWNER="$ADMIN"
-  export BRIDGE_CONFIG_ADMIN="$ADMIN"
   export TREASURY="$ADMIN"
   export EULER_EARN_USDC
   export L2_RECIPIENT="$ADMIN"

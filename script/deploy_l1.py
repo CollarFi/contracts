@@ -27,7 +27,7 @@ def main(
 
     l1 = load_env(l1_env_file)
 
-    for k in ("RPC_URL", "ACCOUNT", "BRIDGE_CONFIG_ADMIN", "TREASURY"):
+    for k in ("RPC_URL", "ACCOUNT", "TREASURY"):
         must(l1, k)
 
     # Keep keystore/named-account workflow only.
@@ -44,7 +44,6 @@ def main(
 
     env_overrides = {
         "ADMIN": l1["ADMIN"],
-        "BRIDGE_CONFIG_ADMIN": l1["BRIDGE_CONFIG_ADMIN"],
         "TREASURY": l1["TREASURY"],
         "OUTPUT_JSON": l1["OUTPUT_JSON"],
         "BROADCAST": "true" if broadcast else "false",
