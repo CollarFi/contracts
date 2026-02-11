@@ -37,58 +37,6 @@ contract CollarVault is
     uint256 public constant YEAR = CollarVaultShared.YEAR;
     uint256 public constant MAX_BPS = CollarVaultShared.MAX_BPS;
 
-    enum LoanState {
-        NONE,
-        ACTIVE_ZERO_COST,
-        CLOSED
-    }
-
-    enum SettlementOutcome {
-        PutITM,
-        Neutral,
-        CallITM
-    }
-
-    struct Loan {
-        address borrower;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint256 maturity;
-        uint256 putStrike;
-        uint256 callStrike;
-        uint256 principal;
-        uint256 subaccountId;
-        LoanState state;
-        uint256 startTime;
-        uint256 originationFeeApr;
-        uint256 variableDebt;
-    }
-
-    struct PendingDeposit {
-        address borrower;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint256 maturity;
-        uint256 putStrike;
-        uint256 borrowAmount;
-    }
-
-    struct SocketBridgeConfig {
-        IBridgeAdapter adapter;
-    }
-
-    struct Mandate {
-        address borrower;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint64 maturity;
-        uint64 deadline;
-        uint256 borrowAmount;
-        uint256 minCallStrike;
-        uint256 maxPutStrike;
-        bool sentToL2;
-    }
-
     struct DepositParams {
         address collateralAsset;
         uint256 collateralAmount;
@@ -166,7 +114,7 @@ contract CollarVault is
         uint256 principal,
         uint256 subaccountId
     );
-    event LoanSettled(uint256 indexed loanId, SettlementOutcome outcome, uint256 settlementAmount);
+    event LoanSettled(uint256 indexed loanId, CollarVaultShared.SettlementOutcome outcome, uint256 settlementAmount);
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
     event LoanConverted(uint256 indexed loanId, uint256 variableDebt);
     event LoanClosed(uint256 indexed loanId);
@@ -728,7 +676,7 @@ contract CollarVault is
     }
 
     /// @notice Settle a matured loan into one of the three collar outcomes.
-    function settleLoan(uint256 loanId, SettlementOutcome outcome, bytes32 lzGuid)
+    function settleLoan(uint256 loanId, CollarVaultShared.SettlementOutcome outcome, bytes32 lzGuid)
         external
         nonReentrant
         whenNotPaused
@@ -767,10 +715,10 @@ contract CollarVault is
     // (removed) hashQuote: quote-based flow removed.
 
     /// @notice Return a loan record by id.
-    function getLoan(uint256 loanId) external view returns (Loan memory loan_) {
+    function getLoan(uint256 loanId) external view returns (CollarVaultShared.Loan memory loan_) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];
-        loan_ = Loan({
+        loan_ = CollarVaultShared.Loan({
             borrower: loan.borrower,
             collateralAsset: loan.collateralAsset,
             collateralAmount: loan.collateralAmount,
@@ -779,7 +727,7 @@ contract CollarVault is
             callStrike: loan.callStrike,
             principal: loan.principal,
             subaccountId: loan.subaccountId,
-            state: LoanState(uint8(loan.state)),
+            state: CollarVaultShared.LoanState(uint8(loan.state)),
             startTime: loan.startTime,
             originationFeeApr: loan.originationFeeApr,
             variableDebt: loan.variableDebt

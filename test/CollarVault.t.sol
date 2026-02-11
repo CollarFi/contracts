@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVault, ILiquidityVault} from "../src/CollarVault.sol";
+import {CollarVaultShared} from "../src/modules/CollarVaultShared.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
@@ -163,8 +164,8 @@ contract CollarVaultTest is Test {
         vm.prank(keeper);
         vault.finalizeLoan(loanId, depositGuid, tradeGuid);
 
-        CollarVault.Loan memory loan = vault.getLoan(loanId);
-        assertEq(uint256(loan.state), uint256(CollarVault.LoanState.ACTIVE_ZERO_COST));
+        CollarVaultShared.Loan memory loan = vault.getLoan(loanId);
+        assertEq(uint256(loan.state), uint256(CollarVaultShared.LoanState.ACTIVE_ZERO_COST));
         assertEq(loan.borrower, borrower);
         assertEq(loan.collateralAsset, address(wbtc));
         assertEq(loan.collateralAmount, 1e8);
