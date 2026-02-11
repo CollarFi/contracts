@@ -30,7 +30,7 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - OUTPUT_JSON (string)
 ///
 /// Optional env vars:
-/// - ADMIN (address, default deployer/broadcaster)
+/// - ADMIN (address, default broadcaster; deploy runner derives from ACCOUNT keystore)
 ///
 /// Optional env vars:
 /// - BROADCAST (bool, default false)
@@ -47,7 +47,7 @@ contract DeployL1 is Script {
     function run() external {
         bool broadcast = vm.envOr("BROADCAST", false);
 
-        address admin = vm.envOr("ADMIN", tx.origin);
+        address admin = vm.envOr("ADMIN", msg.sender);
         address treasury = vm.envAddress("TREASURY");
 
         address vaultOwner = vm.envOr("VAULT_OWNER", admin);

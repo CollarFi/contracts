@@ -98,7 +98,7 @@ uv run python script/lz_harness/deploy.py
 uv run python script/lz_harness/deploy.py --broadcast
 
 # Dry-run L1 deployment (safe default, named foundry account/keystore)
-# ADMIN is optional; defaults to deployer (ACCOUNT) if unset.
+# ADMIN is optional; deploy runner derives it from ACCOUNT (foundry keystore) if unset.
 uv run python script/deploy_l1.py --env testnet
 
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
