@@ -171,10 +171,7 @@ contract CollarVault is
     error CV_NotAuthorized();
     error CV_InsufficientBridgeFees();
     error CV_LZMessengerNotSet();
-    error CV_LZMessageNotFound();
-    error CV_LZMessageConsumed();
     error CV_LZMessageMismatch();
-    error CV_LZMessageRecipientMismatch();
     error CV_PendingDepositNotFound();
     error CV_PendingDepositReturnBlocked();
     error CV_MandateNotFound();
@@ -1242,12 +1239,12 @@ contract CollarVault is
             revert CV_LZMessengerNotSet();
         }
         if ($.lzMessageConsumed[guid]) {
-            revert CV_LZMessageConsumed();
+            revert CV_LZMessageMismatch();
         }
 
         message = $.lzMessenger.receivedMessage(guid);
         if (message.loanId == 0) {
-            revert CV_LZMessageNotFound();
+            revert CV_LZMessageMismatch();
         }
     }
 
@@ -1259,7 +1256,7 @@ contract CollarVault is
 
         message = $.lzMessenger.receivedMessage(guid);
         if (message.loanId == 0) {
-            revert CV_LZMessageNotFound();
+            revert CV_LZMessageMismatch();
         }
     }
 

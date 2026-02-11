@@ -34,9 +34,6 @@ contract CollarVaultMessenger is AccessControl, OApp {
     error CVM_InvalidPeer();
     error CVM_InsufficientNativeFee();
     error CV_LZMessageMismatch();
-    error CV_LZMessageRecipientMismatch();
-    error CV_PendingDepositNotFound();
-    error CV_NotBorrower();
 
     constructor(address admin, address vault, address endpoint_, uint32 remoteEid_)
         OApp(endpoint_, admin)
@@ -185,7 +182,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         }
         loanId = lzMessage.loanId;
         if (lzMessage.recipient != expectedRecipient) {
-            revert CV_LZMessageRecipientMismatch();
+            revert CV_LZMessageMismatch();
         }
         if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
             revert CV_LZMessageMismatch();
@@ -194,10 +191,10 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         if (pendingBorrower == address(0)) {
-            revert CV_PendingDepositNotFound();
+            revert CV_LZMessageMismatch();
         }
         if (pendingBorrower != expectedBorrower) {
-            revert CV_NotBorrower();
+            revert CV_LZMessageMismatch();
         }
     }
 
@@ -214,7 +211,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         if (tradeMessage.recipient != expectedRecipient) {
-            revert CV_LZMessageRecipientMismatch();
+            revert CV_LZMessageMismatch();
         }
         if (expectedSubaccountId != 0 && tradeMessage.subaccountId != expectedSubaccountId) {
             revert CV_LZMessageMismatch();
@@ -239,7 +236,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         if (lzMessage.recipient != expectedRecipient) {
-            revert CV_LZMessageRecipientMismatch();
+            revert CV_LZMessageMismatch();
         }
         if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
             revert CV_LZMessageMismatch();
@@ -262,7 +259,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         if (lzMessage.recipient != expectedRecipient) {
-            revert CV_LZMessageRecipientMismatch();
+            revert CV_LZMessageMismatch();
         }
         if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
             revert CV_LZMessageMismatch();
@@ -282,7 +279,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         if (lzMessage.recipient != expectedRecipient) {
-            revert CV_LZMessageRecipientMismatch();
+            revert CV_LZMessageMismatch();
         }
         settlementAmount = lzMessage.amount;
     }
