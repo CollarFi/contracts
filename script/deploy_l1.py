@@ -42,6 +42,10 @@ def main(
     out_abs = resolve_output_json(l1["OUTPUT_JSON"])
     out_abs.parent.mkdir(parents=True, exist_ok=True)
 
+    if not l1.get("REMOTE_EID") and l1.get("L2_EID"):
+        # Backward-compat fallback for older env files.
+        l1["REMOTE_EID"] = l1["L2_EID"]
+
     env_overrides = {
         "ADMIN": l1["ADMIN"],
         "TREASURY": l1["TREASURY"],
@@ -57,7 +61,7 @@ def main(
         "USDC_ASSET",
         "EULER_ADAPTER",
         "LZ_ENDPOINT",
-        "L2_EID",
+        "REMOTE_EID",
         "WETH_ASSET",
         "WETH_SOCKET_VAULT",
         "WETH_SOCKET_BRIDGE",

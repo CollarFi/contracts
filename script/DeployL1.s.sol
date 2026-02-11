@@ -41,7 +41,7 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - USDC_ASSET (address, required only when LIQUIDITY_VAULT unset)
 /// - EULER_ADAPTER (address, if unset script deploys EulerAdapterMock as placeholder)
 /// - LZ_ENDPOINT (address, if unset script deploys LZEndpointV2Mock)
-/// - L2_EID (uint32, default 0)
+/// - REMOTE_EID (uint32, default 0)
 /// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
     function run() external {
@@ -64,7 +64,7 @@ contract DeployL1 is Script {
         address eulerAdapter = vm.envOr("EULER_ADAPTER", address(0));
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
-        uint32 l2Eid = uint32(vm.envOr("L2_EID", uint256(0)));
+        uint32 remoteEid = uint32(vm.envOr("REMOTE_EID", vm.envOr("L2_EID", uint256(0))));
 
         address wethAsset = vm.envOr("WETH_ASSET", address(0));
         address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
@@ -106,7 +106,7 @@ contract DeployL1 is Script {
         address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
         CollarVault vault = CollarVault(payable(vaultProxy));
 
-        CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
+        CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, remoteEid);
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
 
         address wethAdapter = address(0);

@@ -65,7 +65,7 @@ export EULER_EARN_USDC=0x3B4802FDb0E5d74aA37d58FD77d63e93d4f9A4AF
 # Fork-dev defaults:
 export L2_RECIPIENT=$ADMIN
 export LZ_ENDPOINT=0x0000000000000000000000000000000000000000   # omitted => mock deployed
-export L2_EID=0
+export REMOTE_EID=0
 
 export OUTPUT_JSON=keeper/out/l1-addresses.json
 
