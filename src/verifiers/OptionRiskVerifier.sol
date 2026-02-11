@@ -23,7 +23,8 @@ contract OptionRiskVerifier is IOptionRiskVerifier {
         _validateExpiry(params.expiry, params.optionMinTimeToExpiry, params.optionMaxTimeToExpiry);
 
         uint256 timeToExpiry = params.expiry - block.timestamp;
-        (uint256 vol, uint256 forwardPrice) = _getFeedValues(params.manager, params.optionAsset, params.strike, params.expiry);
+        (uint256 vol, uint256 forwardPrice) =
+            _getFeedValues(params.manager, params.optionAsset, params.strike, params.expiry);
 
         (uint256 callPrice,, uint256 callDelta) = Black76.pricesAndDelta(
             Black76.Black76Inputs({
@@ -43,7 +44,8 @@ contract OptionRiskVerifier is IOptionRiskVerifier {
         _validateExpiry(params.expiry, params.optionMinTimeToExpiry, params.optionMaxTimeToExpiry);
 
         uint256 timeToExpiry = params.expiry - block.timestamp;
-        (uint256 vol, uint256 forwardPrice) = _getFeedValues(params.manager, params.optionAsset, params.strike, params.expiry);
+        (uint256 vol, uint256 forwardPrice) =
+            _getFeedValues(params.manager, params.optionAsset, params.strike, params.expiry);
 
         (, uint256 putPrice,) = Black76.pricesAndDelta(
             Black76.Black76Inputs({

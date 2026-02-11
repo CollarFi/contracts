@@ -52,7 +52,6 @@ Create a `.env` for forge scripts (NOT the keeper one):
 export RPC_URL=http://127.0.0.1:8545
 export ADMIN=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 export VAULT_OWNER=$ADMIN
-export BRIDGE_CONFIG_ADMIN=$ADMIN
 export TREASURY=$ADMIN
 
 # Euler Earn USDC (mainnet)
@@ -66,7 +65,7 @@ export EULER_EARN_USDC=0x3B4802FDb0E5d74aA37d58FD77d63e93d4f9A4AF
 # Fork-dev defaults:
 export L2_RECIPIENT=$ADMIN
 export LZ_ENDPOINT=0x0000000000000000000000000000000000000000   # omitted => mock deployed
-export L2_EID=0
+export REMOTE_EID=0
 
 export OUTPUT_JSON=keeper/out/l1-addresses.json
 

@@ -32,6 +32,8 @@ contract CollarVaultMessenger is AccessControl, OApp {
     event OptionsUpdated(bytes options);
 
     error CVM_InvalidPeer();
+    error CVM_InsufficientNativeFee();
+    error CV_LZMessageMismatch();
 
     constructor(address admin, address vault, address endpoint_, uint32 remoteEid_)
         OApp(endpoint_, admin)
@@ -83,6 +85,220 @@ contract CollarVaultMessenger is AccessControl, OApp {
         return _quote(remoteEid, abi.encode(message), options, false);
     }
 
+    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
+        external
+        payable
+        onlyRole(VAULT_ROLE)
+        returns (bytes32 guid)
+    {
+        return _sendAutoFee(message, refundTo);
+    }
+
+    function sendDepositIntentAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 amount,
+        address recipient,
+        uint256 subaccountId,
+        bytes32 socketMessageId,
+        address refundTo
+    ) external payable onlyRole(VAULT_ROLE) returns (bytes32 guid) {
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.DepositIntent,
+            loanId: loanId,
+            asset: asset,
+            amount: amount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: socketMessageId,
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: bytes("")
+        });
+        return _sendAutoFee(message, refundTo);
+    }
+
+    function sendMandateCreatedAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 borrowAmount,
+        address recipient,
+        uint256 subaccountId,
+        bytes calldata mandateData,
+        address refundTo
+    ) external payable onlyRole(VAULT_ROLE) returns (bytes32 guid) {
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.MandateCreated,
+            loanId: loanId,
+            asset: asset,
+            amount: borrowAmount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: mandateData
+        });
+        return _sendAutoFee(message, refundTo);
+    }
+
+    function sendReturnRequestAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 amount,
+        address recipient,
+        uint256 subaccountId,
+        address refundTo
+    ) external payable onlyRole(VAULT_ROLE) returns (bytes32 guid) {
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.ReturnRequest,
+            loanId: loanId,
+            asset: asset,
+            amount: amount,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: bytes("")
+        });
+        return _sendAutoFee(message, refundTo);
+    }
+
+    function validateDepositConfirmed(
+        CollarLZMessages.Message calldata lzMessage,
+        address pendingBorrower,
+        address expectedBorrower,
+        address pendingCollateralAsset,
+        uint256 pendingCollateralAmount,
+        address expectedRecipient,
+        uint256 expectedSubaccountId
+    ) external pure returns (uint256 loanId) {
+        if (lzMessage.action != CollarLZMessages.Action.DepositConfirmed) {
+            revert CV_LZMessageMismatch();
+        }
+        loanId = lzMessage.loanId;
+        if (lzMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
+            revert CV_LZMessageMismatch();
+        }
+        if (lzMessage.asset != pendingCollateralAsset || lzMessage.amount != pendingCollateralAmount) {
+            revert CV_LZMessageMismatch();
+        }
+        if (pendingBorrower == address(0)) {
+            revert CV_LZMessageMismatch();
+        }
+        if (pendingBorrower != expectedBorrower) {
+            revert CV_LZMessageMismatch();
+        }
+    }
+
+    function validateTradeConfirmedForFinalize(
+        CollarLZMessages.Message calldata tradeMessage,
+        uint256 expectedLoanId,
+        address expectedRecipient,
+        uint256 expectedSubaccountId,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint64 expectedMaturity
+    ) external pure returns (uint256 callStrike, uint256 putStrike) {
+        if (tradeMessage.action != CollarLZMessages.Action.TradeConfirmed || tradeMessage.loanId != expectedLoanId) {
+            revert CV_LZMessageMismatch();
+        }
+        if (tradeMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        if (expectedSubaccountId != 0 && tradeMessage.subaccountId != expectedSubaccountId) {
+            revert CV_LZMessageMismatch();
+        }
+
+        uint64 expiry;
+        (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        if (expiry != expectedMaturity) {
+            revert CV_LZMessageMismatch();
+        }
+        if (callStrike < minCallStrike || putStrike > maxPutStrike) {
+            revert CV_LZMessageMismatch();
+        }
+    }
+
+    function validateTradeConfirmedMarker(
+        CollarLZMessages.Message calldata lzMessage,
+        address expectedRecipient,
+        uint256 expectedSubaccountId
+    ) external pure returns (uint256 loanId) {
+        if (lzMessage.action != CollarLZMessages.Action.TradeConfirmed) {
+            revert CV_LZMessageMismatch();
+        }
+        if (lzMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
+            revert CV_LZMessageMismatch();
+        }
+        loanId = lzMessage.loanId;
+    }
+
+    function validateCollateralReturned(
+        CollarLZMessages.Message calldata lzMessage,
+        uint256 loanId,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address expectedRecipient,
+        uint256 expectedSubaccountId
+    ) external pure {
+        if (
+            lzMessage.action != CollarLZMessages.Action.CollateralReturned || lzMessage.loanId != loanId
+                || lzMessage.asset != collateralAsset || lzMessage.amount != collateralAmount
+        ) {
+            revert CV_LZMessageMismatch();
+        }
+        if (lzMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
+            revert CV_LZMessageMismatch();
+        }
+    }
+
+    function validateSettlementReport(
+        CollarLZMessages.Message calldata lzMessage,
+        uint256 loanId,
+        address usdcAsset,
+        address expectedRecipient
+    ) external pure returns (uint256 settlementAmount) {
+        if (
+            lzMessage.action != CollarLZMessages.Action.SettlementReport || lzMessage.loanId != loanId
+                || lzMessage.asset != usdcAsset
+        ) {
+            revert CV_LZMessageMismatch();
+        }
+        if (lzMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        settlementAmount = lzMessage.amount;
+    }
+
+    function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
+        external
+        pure
+    {
+        if (feeAmount == 0) {
+            if (lzMessage.amount != 0) {
+                revert CV_LZMessageMismatch();
+            }
+            return;
+        }
+        if (lzMessage.asset != usdcAsset || lzMessage.amount != feeAmount || lzMessage.socketMessageId == bytes32(0)) {
+            revert CV_LZMessageMismatch();
+        }
+    }
+
     function _lzReceive(Origin calldata, bytes32 guid, bytes calldata message, address, bytes calldata)
         internal
         override
@@ -99,5 +315,16 @@ contract CollarVaultMessenger is AccessControl, OApp {
         bytes memory payload = abi.encode(message);
         receipt = _lzSend(remoteEid, payload, options, MessagingFee(msg.value, 0), msg.sender);
         emit MessageSent(receipt.guid, message.action, message.loanId);
+    }
+
+    function _sendAutoFee(CollarLZMessages.Message memory message, address refundTo) internal returns (bytes32 guid) {
+        bytes memory payload = abi.encode(message);
+        MessagingFee memory fee = _quote(remoteEid, payload, defaultOptions, false);
+        if (msg.value < fee.nativeFee) revert CVM_InsufficientNativeFee();
+
+        MessagingReceipt memory receipt =
+            _lzSend(remoteEid, payload, defaultOptions, MessagingFee(fee.nativeFee, 0), refundTo);
+        emit MessageSent(receipt.guid, message.action, message.loanId);
+        return receipt.guid;
     }
 }

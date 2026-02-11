@@ -128,8 +128,8 @@ def main(
         l2["ADMIN"] = run(["cast", "wallet", "address", "--account", l2["ACCOUNT"]])
 
     if not l2.get("OUTPUT_JSON"):
-        suffix = resolved_env if resolved_env in {"testnet", "mainnet"} else "default"
-        l2["OUTPUT_JSON"] = f"./deployments/l2-{suffix}.json"
+        chain_id = run(["cast", "chain-id", "--rpc-url", l2["RPC_URL"]])
+        l2["OUTPUT_JSON"] = f"./deployments/{chain_id}/l2.json"
 
     profile = derive_registry_profile or l2.get("DERIVE_REGISTRY_PROFILE", "") or resolved_env
     chain_id_override = derive_registry_chain_id or l2.get("DERIVE_REGISTRY_CHAIN_ID", "")

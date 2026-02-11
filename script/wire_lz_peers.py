@@ -50,8 +50,15 @@ def main(
     l2 = load_env(l2_env_file)
 
     for env in (l1, l2):
-        for k in ("RPC_URL", "ACCOUNT", "REMOTE_EID", "OUTPUT_JSON"):
+        for k in ("RPC_URL", "ACCOUNT", "OUTPUT_JSON"):
             must(env, k)
+
+    l1_eid = l1.get("L2_EID") or l1.get("REMOTE_EID")
+    l2_eid = l2.get("L1_EID") or l2.get("REMOTE_EID")
+    if not l1_eid:
+        raise ValueError("missing L2_EID in L1 env (or legacy REMOTE_EID)")
+    if not l2_eid:
+        raise ValueError("missing L1_EID in L2 env (or legacy REMOTE_EID)")
 
     l1_messenger = _read_addr_from_output(l1["OUTPUT_JSON"], "l1Messenger")
     l2_receiver = _read_addr_from_output(l2["OUTPUT_JSON"], "l2Receiver")
@@ -62,8 +69,8 @@ def main(
     summary = {
         "l1Messenger": l1_messenger,
         "l2Receiver": l2_receiver,
-        "l1RemoteEid": l1["REMOTE_EID"],
-        "l2RemoteEid": l2["REMOTE_EID"],
+        "l1L2Eid": l1_eid,
+        "l2L1Eid": l2_eid,
         "l1SetPeerArg": l1_peer,
         "l2SetPeerArg": l2_peer,
         "mode": "broadcast" if broadcast else "dry-run",
@@ -76,7 +83,7 @@ def main(
             l1["ACCOUNT"],
             l1_messenger,
             "setPeer(uint32,bytes32)",
-            l1["REMOTE_EID"],
+            l1_eid,
             l1_peer,
         )
 
@@ -86,15 +93,15 @@ def main(
             l2["ACCOUNT"],
             l2_receiver,
             "setPeer(uint32,bytes32)",
-            l2["REMOTE_EID"],
+            l2_eid,
             l2_peer,
         )
 
         print("[green][ok][/green] peers wired")
     else:
         print("[yellow][dry-run][/yellow] no onchain txs sent")
-        print(f"  L1 call: setPeer({l1['REMOTE_EID']}, {l1_peer}) on {l1_messenger}")
-        print(f"  L2 call: setPeer({l2['REMOTE_EID']}, {l2_peer}) on {l2_receiver}")
+        print(f"  L1 call: setPeer({l1_eid}, {l1_peer}) on {l1_messenger}")
+        print(f"  L2 call: setPeer({l2_eid}, {l2_peer}) on {l2_receiver}")
 
     if json_out:
         print(json.dumps(summary, indent=2))

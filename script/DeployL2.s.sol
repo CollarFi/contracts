@@ -59,7 +59,12 @@ import {RfqVerifier} from "../src/verifiers/RfqVerifier.sol";
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
 /// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
 contract DeployL2 is Script {
-    function _buildTsaInitData(address admin, address loanStoreAddr, address optionRiskVerifierAddr, address rfqVerifierAddr) internal view returns (bytes memory) {
+    function _buildTsaInitData(
+        address admin,
+        address loanStoreAddr,
+        address optionRiskVerifierAddr,
+        address rfqVerifierAddr
+    ) internal view returns (bytes memory) {
         address initialOwner = vm.envOr("TSA_INITIAL_OWNER", admin);
 
         string memory symbol = vm.envOr("TSA_SYMBOL", string("cTSA"));

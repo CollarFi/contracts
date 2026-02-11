@@ -57,11 +57,10 @@ echo "==> deploying L1"
   export RPC_URL="http://127.0.0.1:$L1_PORT"
   export ADMIN
   export VAULT_OWNER="$ADMIN"
-  export BRIDGE_CONFIG_ADMIN="$ADMIN"
   export TREASURY="$ADMIN"
   export EULER_EARN_USDC
   export L2_RECIPIENT="$ADMIN"
-  export L2_EID="${L2_EID:-0}"
+  export REMOTE_EID="${REMOTE_EID:-0}"
   export OUTPUT_JSON="$KEEPER_DIR/out/l1-addresses.json"
 
   forge script script/DeployL1.s.sol:DeployL1 --rpc-url "$RPC_URL" --broadcast -v

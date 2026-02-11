@@ -128,7 +128,7 @@ The `TradeConfirmed` message contains:
 - `amount` + `socketMessageId` for the USDC origination fee bridged to L1 (if any)
 - `data = abi.encode(callStrike, putStrike, expiry)` to allow L1 to verify the executed strikes and expiry against the accepted mandate.
 
-**Loan disbursement**: On L1, `finalizeLoan` (keeper/executor) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry)` and verifies they satisfy the accepted mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`).
+**Loan disbursement**: On L1, `finalizeLoan` (keeper) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry)` and verifies they satisfy the accepted mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`).
 
 The vault computes the expected origination fee from `originationFeeApr` and loan duration and requires it to match the bridged amount (if any). The fee is split between the liquidity vault and treasury using `treasuryBps` and paid at loan creation. After fee distribution, the vault withdraws USDC from the liquidity vault equal to `D` and transfers it to the borrower. It records loan state `ACTIVE_ZERO_COST`, storing `loanId`, `Q`, `K_p`, `K_c`, `t`, principal `D` and the vault subaccount ID.
 
@@ -308,7 +308,7 @@ Since the fast bridge is available for all fund movement, the protocol can remov
 
 - Collateral release: Upon neutral maturity, the collateral is unencumbered on Derive. The executor uses the Withdrawal Module to withdraw the collateral to L2 and bridges it back to L1.
 - Euler deposit: The collateral is deposited into a standard Euler V2 market on L1. The borrower borrows USDC up to the maximum LTV permitted by Euler. The borrowed USDC repays the zero-cost loan principal.
-- Accounting: The loan state changes from `ACTIVE_ZERO_COST` to `ACTIVE_VARIABLE`. Interest accrues at the Euler variable rate. When the borrower repays, the collateral is returned.
+- Accounting: On neutral expiry conversion, collateral is moved into borrower-owned Euler position and the Vault-side loan is closed; borrower manages the variable position directly in Euler thereafter.
 
 ### 5.4 Rolling a variable loan into a new collar
 
@@ -329,10 +329,10 @@ Provides functions:
 - `createDepositWithPermit(params, permit, permitSig)` - permissionless; records the borrower's desired loan parameters, pulls collateral via Permit2, calls the bridge, and records a pending deposit awaiting L2 confirmation.
 - `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records the on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline quote. The vault sets `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, commits principal, and sends a `MandateCreated` message to L2.
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
-- `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper/executor; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
+- `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
-- `settleLoan(loanId)` - restricted to keeper/executor roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
-- `convertToVariable(loanId)` - restricted to keeper/executor roles; bridges collateral back and interacts with Euler. Reverts on-chain if `block.timestamp < maturity`.
+- `settleLoan(loanId)` - restricted to keeper roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
+- `convertToVariable(loanId)` - restricted to keeper roles; bridges collateral back and interacts with Euler. Reverts on-chain if `block.timestamp < maturity`.
 - `setMaxTotalPrincipal(max)` - parameter role; caps the total committed principal (pending + active zero-cost loans) to scale TVL gradually.
 
 Exposes events for state changes (`LoanCreated`, `LoanSettled`, etc.).

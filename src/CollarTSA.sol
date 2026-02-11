@@ -157,10 +157,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         external
         onlyOwner
     {
-        if (
-            newCollateralMgmtParams.worstSpotSellPrice > 1e18
-                || newCollateralMgmtParams.worstSpotSellPrice < 0.8e18
-        ) {
+        if (newCollateralMgmtParams.worstSpotSellPrice > 1e18 || newCollateralMgmtParams.worstSpotSellPrice < 0.8e18) {
             revert CTSA_InvalidParams();
         }
         _getCollarTSAStorage().collateralManagementParams = newCollateralMgmtParams;
@@ -298,8 +295,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
         CollarTSAStorage storage $ = _getCollarTSAStorage();
         BaseTSAAddresses memory tsaAddresses = getBaseTSAAddresses();
 
-        IRfqVerifier.ParsedRfq memory parsed =
-            $.rfqVerifier.parseAndValidate(action.data, extraData, address(tsaAddresses.wrappedDepositAsset), address($.optionAsset));
+        IRfqVerifier.ParsedRfq memory parsed = $.rfqVerifier
+            .parseAndValidate(action.data, extraData, address(tsaAddresses.wrappedDepositAsset), address($.optionAsset));
 
         if (parsed.isSpot) {
             _verifySpotRfqTrade(parsed.spotTrade, parsed.isTaker, parsed.loanId);
@@ -390,7 +387,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
         }
 
         uint256 basePrice = _getBasePrice();
-        if (trade.price < basePrice.multiplyDecimal(_getCollarTSAStorage().collateralManagementParams.worstSpotSellPrice)) {
+        if (
+            trade.price
+                < basePrice.multiplyDecimal(_getCollarTSAStorage().collateralManagementParams.worstSpotSellPrice)
+        ) {
             revert CTSA_SpotRfqPriceTooLow();
         }
 
@@ -406,36 +406,38 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
     function _validateCallDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
         CollarTSAStorage storage $ = _getCollarTSAStorage();
-        IOptionRiskVerifier($.optionRiskVerifier).validateCall(
-            IOptionRiskVerifier.ValidateCallParams({
-                manager: address(getBaseTSAAddresses().manager),
-                optionAsset: address($.optionAsset),
-                expiry: expiry,
-                strike: strike,
-                limitPrice: limitPrice,
-                optionVolSlippageFactor: $.params.optionVolSlippageFactor,
-                callMaxDelta: $.params.callMaxDelta,
-                optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
-                optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
-            })
-        );
+        IOptionRiskVerifier($.optionRiskVerifier)
+            .validateCall(
+                IOptionRiskVerifier.ValidateCallParams({
+                    manager: address(getBaseTSAAddresses().manager),
+                    optionAsset: address($.optionAsset),
+                    expiry: expiry,
+                    strike: strike,
+                    limitPrice: limitPrice,
+                    optionVolSlippageFactor: $.params.optionVolSlippageFactor,
+                    callMaxDelta: $.params.callMaxDelta,
+                    optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
+                    optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
+                })
+            );
     }
 
     function _validatePutDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
         CollarTSAStorage storage $ = _getCollarTSAStorage();
-        IOptionRiskVerifier($.optionRiskVerifier).validatePut(
-            IOptionRiskVerifier.ValidatePutParams({
-                manager: address(getBaseTSAAddresses().manager),
-                optionAsset: address($.optionAsset),
-                expiry: expiry,
-                strike: strike,
-                limitPrice: limitPrice,
-                optionVolSlippageFactor: $.params.optionVolSlippageFactor,
-                putMaxPriceFactor: $.params.putMaxPriceFactor,
-                optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
-                optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
-            })
-        );
+        IOptionRiskVerifier($.optionRiskVerifier)
+            .validatePut(
+                IOptionRiskVerifier.ValidatePutParams({
+                    manager: address(getBaseTSAAddresses().manager),
+                    optionAsset: address($.optionAsset),
+                    expiry: expiry,
+                    strike: strike,
+                    limitPrice: limitPrice,
+                    optionVolSlippageFactor: $.params.optionVolSlippageFactor,
+                    putMaxPriceFactor: $.params.putMaxPriceFactor,
+                    optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
+                    optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
+                })
+            );
     }
 
     function _verifyDepositAction(IMatching.Action memory action, BaseTSAAddresses memory tsaAddresses) internal view {
@@ -540,7 +542,6 @@ contract CollarTSA is BaseOnChainSigningTSA {
     ///////////
     // Views //
     ///////////
-
 
     function getCollarTSAParams() public view returns (CollarTSAParams memory) {
         return _getCollarTSAStorage().params;

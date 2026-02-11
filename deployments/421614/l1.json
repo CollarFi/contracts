@@ -1,0 +1,11 @@
+{
+  "l1Vault": "0xd37dcacc394f8082277ddfc6aec736b0ee189c6c",
+  "l1VaultProxy": "0xd37dcacc394f8082277ddfc6aec736b0ee189c6c",
+  "l1VaultImplementation": "0xcd1c0dc47846801f4dd73f3cc81848ed293ea169",
+  "l1Messenger": "0xd378acea3d24fd18ca38dd61300e353527897170",
+  "l1FinalizeModule": "0xcbdddf9dbef3da060a20aaf9cf3c88d00ac1b05b",
+  "l1SettleModule": "0x8f073d58648e3967bbdcede25c0ec805a8b6c516",
+  "l1LiquidityVault": "0x5fdb2ac00501db1de7994d54918a6e9bf92d0f09",
+  "l1EulerAdapter": "0xd688b1d686664d461262ad8bf7687e4f9f435af7",
+  "l1WethAdapter": "0xde9cc9dfe941338213029955221e69da62cc136b"
+}

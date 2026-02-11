@@ -4,72 +4,67 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
 import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
+import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
+import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
+import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
+import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
+import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {EulerAdapterMock} from "../src/mocks/EulerAdapterMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
-interface IERC4626Like {
-    function asset() external view returns (address);
-}
-
-/// @dev Deploy L1 components against a fork (mainnet).
+/// @dev Deploy L1 components.
 ///
-/// You can either:
-/// - supply full dependency addresses (real) OR
-/// - use Euler Earn USDC as the idle-yield vault and mock the rest.
+/// Safe defaults:
+/// - env-driven inputs only
+/// - use CLI --broadcast to send transactions onchain (without it, script simulates)
 ///
 /// Required env vars:
-/// - ADMIN (address)
-/// - BRIDGE_CONFIG_ADMIN (address)
 /// - TREASURY (address)
 /// - OUTPUT_JSON (string)
 ///
-/// Optional (recommended for fork dev):
-/// - EULER_EARN_USDC (address)   (default: 0x3B4802FDb0E5d74aA37d58FD77d63e93d4f9A4AF)
-/// - PERMIT2 (address)          (default: mainnet Permit2 from Euler metadata)
-/// - LIQUIDITY_VAULT (address)  (if omitted, deploys CollarLiquidityVault)
-/// - EULER_ADAPTER (address)    (if omitted, deploys EulerAdapterMock)
-/// - L2_RECIPIENT (address)     (default: ADMIN)
-/// - LZ_ENDPOINT (address)      (if omitted, deploys a placeholder mock endpoint)
-/// - L2_EID (uint32)            (default: 0)
-/// - VAULT_OWNER (address)      (defaults to ADMIN)
-/// - WETH_ASSET (address)       (collateral asset to enable)
-/// - WETH_SOCKET_VAULT (address)    (legacy Socket vault)
-/// - WETH_SOCKET_BRIDGE (address)   (new bridge controller)
-/// - WETH_SOCKET_CONNECTOR (address)
-/// - WETH_MSG_GAS_LIMIT (uint256)   (default: 100_000)
-/// - WETH_PAYLOAD_SIZE (uint256)    (default: 161)
+/// Optional env vars:
+/// - ADMIN (address, default broadcaster; deploy runner derives from ACCOUNT keystore)
+///
+/// Optional env vars:
+/// - VAULT_OWNER (address, default ADMIN)
+/// - PERMIT2 (address, default mainnet Permit2)
+/// - L2_RECIPIENT (address, default ADMIN)
+/// - LIQUIDITY_VAULT (address, if unset script deploys CollarLiquidityVault)
+/// - USDC_ASSET (address, required only when LIQUIDITY_VAULT unset)
+/// - EULER_ADAPTER (address, if unset script deploys EulerAdapterMock as placeholder)
+/// - LZ_ENDPOINT (address, if unset script deploys LZEndpointV2Mock)
+/// - L2_EID (uint32, default 0)
+/// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
     function run() external {
-        address admin = vm.envAddress("ADMIN");
-        address bridgeConfigAdmin = vm.envAddress("BRIDGE_CONFIG_ADMIN");
+        address admin = vm.envOr("ADMIN", msg.sender);
         address treasury = vm.envAddress("TREASURY");
 
         address vaultOwner = vm.envOr("VAULT_OWNER", admin);
 
-        // Defaults from Euler metadata (mainnet)
         address defaultPermit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
         address permit2 = vm.envOr("PERMIT2", defaultPermit2);
 
         address l2Recipient = vm.envOr("L2_RECIPIENT", admin);
 
-        // If no explicit liquidity vault is provided, deploy CollarLiquidityVault and plug Euler Earn USDC.
         address liquidityVault = vm.envOr("LIQUIDITY_VAULT", address(0));
-        address eulerEarnUsdc = vm.envOr("EULER_EARN_USDC", 0x3B4802FDb0E5d74aA37d58FD77d63e93d4f9A4AF);
+        address usdcAsset = vm.envOr("USDC_ASSET", address(0));
 
-        // Euler adapter can be mocked
+        // Placeholder adapter only; no Euler deploy/integration in this flow.
         address eulerAdapter = vm.envOr("EULER_ADAPTER", address(0));
 
-        // LayerZero endpoint can be mocked for fork dev (keeper doesn't rely on sendMessage)
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
-        uint32 l2Eid = uint32(vm.envOr("L2_EID", uint256(0)));
+        uint32 l2Eid = uint32(vm.envOr("L2_EID", vm.envOr("REMOTE_EID", uint256(0))));
 
-        // Optional Socket adapter inputs (WETH only for now)
         address wethAsset = vm.envOr("WETH_ASSET", address(0));
         address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
         address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
@@ -77,12 +72,14 @@ contract DeployL1 is Script {
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
 
+        // Always execute the flow in broadcast context so msg.sender is the configured
+        // deployer/account even during dry-run simulations (no --broadcast).
         vm.startBroadcast();
 
         if (liquidityVault == address(0)) {
-            address usdc = IERC4626Like(eulerEarnUsdc).asset();
-            CollarLiquidityVault lv = new CollarLiquidityVault(IERC20(usdc), "Collar Liquidity Vault", "cLV", admin);
-            lv.setEulerVault(IERC4626(eulerEarnUsdc));
+            if (usdcAsset == address(0)) revert("USDC_ASSET required when LIQUIDITY_VAULT is unset");
+            CollarLiquidityVault lv =
+                new CollarLiquidityVault(IERC20(usdcAsset), "Collar Liquidity Vault", "cLV", admin);
             liquidityVault = address(lv);
         }
 
@@ -94,22 +91,29 @@ contract DeployL1 is Script {
             lzEndpoint = address(new LZEndpointV2Mock());
         }
 
-        CollarVault vault = new CollarVault(
-            vaultOwner,
-            CollarVault.ILiquidityVault(liquidityVault),
-            bridgeConfigAdmin,
-            CollarVault.IEulerAdapter(eulerAdapter),
-            CollarVault.IAllowanceTransfer(permit2),
-            l2Recipient,
-            treasury
+        // Deploy implementation + atomically initialize proxy in constructor calldata.
+        address vaultImpl = address(new CollarVault());
+        bytes memory initData = abi.encodeCall(
+            CollarVault.initialize,
+            (
+                vaultOwner,
+                ILiquidityVault(liquidityVault),
+                IEulerAdapter(eulerAdapter),
+                IAllowanceTransfer(permit2),
+                l2Recipient,
+                treasury
+            )
         );
+        address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
+        CollarVault vault = CollarVault(payable(vaultProxy));
 
         CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
+        CollarVaultFinalizeModule finalizeModule = new CollarVaultFinalizeModule();
+        CollarVaultSettleModule settleModule = new CollarVaultSettleModule();
+        vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
+        vault.setFinalizeModule(address(finalizeModule));
+        vault.setSettleModule(address(settleModule));
 
-        // Wire the messenger into the vault
-        vault.setLZMessenger(CollarVault.ICollarVaultMessenger(address(messenger)));
-
-        // Optional: deploy Socket adapter + set WETH config (legacy vault or new bridge)
         address wethAdapter = address(0);
         if (wethAsset != address(0) && wethSocketConnector != address(0)) {
             SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
@@ -131,9 +135,7 @@ contract DeployL1 is Script {
                     ""
                 );
                 wethAdapter = address(adapter);
-                vault.setSocketVaultConfig(wethAsset, CollarVault.IBridgeAdapter(wethAdapter));
-
-                // TODO: setCollateralConfig + strikeScale for WETH (await Euler + asset config)
+                vault.setSocketVaultConfig(wethAsset, IBridgeAdapter(wethAdapter));
             }
         }
 
@@ -143,20 +145,25 @@ contract DeployL1 is Script {
 
         string memory json;
         json = vm.serializeAddress("addrs", "l1Vault", address(vault));
+        json = vm.serializeAddress("addrs", "l1VaultProxy", address(vault));
+        json = vm.serializeAddress("addrs", "l1VaultImplementation", vaultImpl);
         json = vm.serializeAddress("addrs", "l1Messenger", address(messenger));
+        json = vm.serializeAddress("addrs", "l1FinalizeModule", address(finalizeModule));
+        json = vm.serializeAddress("addrs", "l1SettleModule", address(settleModule));
         json = vm.serializeAddress("addrs", "l1LiquidityVault", liquidityVault);
         json = vm.serializeAddress("addrs", "l1EulerAdapter", eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", permit2);
-        json = vm.serializeAddress("addrs", "l1EulerEarnUsdc", eulerEarnUsdc);
         json = vm.serializeAddress("addrs", "l1WethAdapter", wethAdapter);
         vm.writeJson(json, outPath);
 
-        console2.log("L1 vault", address(vault));
+        console2.log("L1 vault proxy", address(vault));
+        console2.log("L1 vault implementation", vaultImpl);
         console2.log("L1 messenger", address(messenger));
+        console2.log("L1 finalizeModule", address(finalizeModule));
+        console2.log("L1 settleModule", address(settleModule));
         console2.log("L1 liquidityVault", liquidityVault);
-        console2.log("L1 eulerAdapter", eulerAdapter);
+        console2.log("L1 eulerAdapter placeholder", eulerAdapter);
         console2.log("L1 permit2", permit2);
-        console2.log("L1 EulerEarn USDC", eulerEarnUsdc);
         if (wethAdapter != address(0)) {
             console2.log("L1 WETH adapter", wethAdapter);
         }

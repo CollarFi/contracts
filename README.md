@@ -61,7 +61,7 @@ $ anvil
 ### Deploy
 
 ```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --account <keystore_name>
 ```
 
 ### Cast
@@ -97,6 +97,13 @@ uv run python script/lz_harness/deploy.py
 # Broadcast deploy + set options + wire peers
 uv run python script/lz_harness/deploy.py --broadcast
 
+# Dry-run L1 deployment (safe default, named foundry account/keystore)
+# ADMIN is optional; deploy runner derives it from ACCOUNT (foundry keystore) if unset.
+uv run python script/deploy_l1.py --env testnet
+
+# Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
+uv run python script/deploy_l1.py --env testnet --broadcast
+
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
 uv run python script/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
@@ -107,6 +114,11 @@ uv run python script/wire_lz_peers.py --env testnet --broadcast
 # In auto-init mode (no TSA_INIT_DATA), provide TSA init env inputs:
 # SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING,
 # BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET.
+
+# L1 notes:
+# - No direct Euler deployment/integration in this flow (liquidity vault can run without setting Euler vault).
+# - If LIQUIDITY_VAULT is not provided, set USDC_ASSET and script deploys a fresh CollarLiquidityVault.
+# - BRIDGE_CONFIG_ADMIN was removed; ADMIN/VAULT_OWNER is the PARAMETER_ROLE holder at init.
 
 # Check harness wiring/state
 uv run python script/lz_harness/status.py
