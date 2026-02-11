@@ -20,5 +20,11 @@ interface ICollarVaultMessenger {
         payable
         returns (MessagingReceipt memory receipt);
 
+    /// @notice Quote then send a message, refunding any excess native fee to `refundTo`.
+    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
+        external
+        payable
+        returns (bytes32 guid);
+
     function receivedMessage(bytes32 guid) external view returns (CollarLZMessages.Message memory message);
 }

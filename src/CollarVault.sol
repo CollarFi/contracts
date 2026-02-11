@@ -10,10 +10,6 @@ import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/Reentra
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {EIP712Upgradeable} from "openzeppelin-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
-import {
-    MessagingFee,
-    MessagingReceipt
-} from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
 import {IEulerAdapter} from "./interfaces/IEulerAdapter.sol";
@@ -175,7 +171,6 @@ contract CollarVault is
     error CV_InvalidSubaccount();
     error CV_NotAuthorized();
     error CV_InsufficientBridgeFees();
-    error CV_RefundFailed();
     error CV_LZMessengerNotSet();
     error CV_LZMessageNotFound();
     error CV_LZMessageConsumed();
@@ -656,21 +651,7 @@ contract CollarVault is
             data: mandateData
         });
 
-        bytes memory options = $.lzMessenger.defaultOptions();
-        MessagingFee memory lzFee = $.lzMessenger.quoteMessage(message, options);
-        if (msg.value < lzFee.nativeFee) {
-            revert CV_InsufficientBridgeFees();
-        }
-
-        MessagingReceipt memory receipt = $.lzMessenger.sendMessage{value: lzFee.nativeFee}(message);
-        lzGuid = receipt.guid;
-
-        if (msg.value > lzFee.nativeFee) {
-            (bool success,) = msg.sender.call{value: msg.value - lzFee.nativeFee}("");
-            if (!success) {
-                revert CV_RefundFailed();
-            }
-        }
+        lzGuid = $.lzMessenger.sendMessageAutoFee{value: msg.value}(message, msg.sender);
     }
 
     /// @notice Finalize a loan once deposit and RFQ trades have been confirmed on L2.
@@ -835,22 +816,8 @@ contract CollarVault is
             data: bytes("")
         });
 
-        bytes memory options = $.lzMessenger.defaultOptions();
-        MessagingFee memory lzFee = $.lzMessenger.quoteMessage(message, options);
-        if (msg.value < lzFee.nativeFee) {
-            revert CV_InsufficientBridgeFees();
-        }
-
-        MessagingReceipt memory receipt = $.lzMessenger.sendMessage{value: lzFee.nativeFee}(message);
-        lzGuid = receipt.guid;
+        lzGuid = $.lzMessenger.sendMessageAutoFee{value: msg.value}(message, msg.sender);
         $.returnRequested[loanId] = true;
-
-        if (msg.value > lzFee.nativeFee) {
-            (bool success,) = msg.sender.call{value: msg.value - lzFee.nativeFee}("");
-            if (!success) {
-                revert CV_RefundFailed();
-            }
-        }
 
         emit CollateralReturnRequested(loanId, msg.sender, pending.collateralAsset, pending.collateralAmount, lzGuid);
     }
@@ -1295,24 +1262,13 @@ contract CollarVault is
             data: bytes("")
         });
 
-        bytes memory options = $.lzMessenger.defaultOptions();
-        MessagingFee memory lzFee = $.lzMessenger.quoteMessage(message, options);
         uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
-        uint256 requiredFee = bridgeFee + lzFee.nativeFee;
-        if (msg.value < requiredFee) {
+        if (msg.value < bridgeFee) {
             revert CV_InsufficientBridgeFees();
         }
 
         _bridgeToL2(params.collateralAsset, params.collateralAmount, $.l2Recipient);
-        MessagingReceipt memory receipt = $.lzMessenger.sendMessage{value: lzFee.nativeFee}(message);
-        lzGuid = receipt.guid;
-
-        if (msg.value > requiredFee) {
-            (bool success,) = msg.sender.call{value: msg.value - requiredFee}("");
-            if (!success) {
-                revert CV_RefundFailed();
-            }
-        }
+        lzGuid = $.lzMessenger.sendMessageAutoFee{value: msg.value - bridgeFee}(message, msg.sender);
 
         emit CollateralDepositRequested(
             loanId, borrower, params.collateralAsset, params.collateralAmount, params.maturity, socketMessageId, lzGuid

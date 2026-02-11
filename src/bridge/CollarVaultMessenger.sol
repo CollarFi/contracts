@@ -32,6 +32,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
     event OptionsUpdated(bytes options);
 
     error CVM_InvalidPeer();
+    error CVM_InsufficientNativeFee();
 
     constructor(address admin, address vault, address endpoint_, uint32 remoteEid_)
         OApp(endpoint_, admin)
@@ -81,6 +82,22 @@ contract CollarVaultMessenger is AccessControl, OApp {
         returns (MessagingFee memory fee)
     {
         return _quote(remoteEid, abi.encode(message), options, false);
+    }
+
+    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
+        external
+        payable
+        onlyRole(VAULT_ROLE)
+        returns (bytes32 guid)
+    {
+        bytes memory payload = abi.encode(message);
+        MessagingFee memory fee = _quote(remoteEid, payload, defaultOptions, false);
+        if (msg.value < fee.nativeFee) revert CVM_InsufficientNativeFee();
+
+        MessagingReceipt memory receipt =
+            _lzSend(remoteEid, payload, defaultOptions, MessagingFee(fee.nativeFee, 0), refundTo);
+        emit MessageSent(receipt.guid, message.action, message.loanId);
+        return receipt.guid;
     }
 
     function _lzReceive(Origin calldata, bytes32 guid, bytes calldata message, address, bytes calldata)
