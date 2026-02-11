@@ -12,6 +12,8 @@ import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
+import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
+import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
 import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
@@ -107,7 +109,11 @@ contract DeployL1 is Script {
         CollarVault vault = CollarVault(payable(vaultProxy));
 
         CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, remoteEid);
+        CollarVaultFinalizeModule finalizeModule = new CollarVaultFinalizeModule();
+        CollarVaultSettleModule settleModule = new CollarVaultSettleModule();
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
+        vault.setFinalizeModule(address(finalizeModule));
+        vault.setSettleModule(address(settleModule));
 
         address wethAdapter = address(0);
         if (wethAsset != address(0) && wethSocketConnector != address(0)) {
@@ -143,6 +149,8 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1VaultProxy", address(vault));
         json = vm.serializeAddress("addrs", "l1VaultImplementation", vaultImpl);
         json = vm.serializeAddress("addrs", "l1Messenger", address(messenger));
+        json = vm.serializeAddress("addrs", "l1FinalizeModule", address(finalizeModule));
+        json = vm.serializeAddress("addrs", "l1SettleModule", address(settleModule));
         json = vm.serializeAddress("addrs", "l1LiquidityVault", liquidityVault);
         json = vm.serializeAddress("addrs", "l1EulerAdapter", eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", permit2);
@@ -153,6 +161,8 @@ contract DeployL1 is Script {
         console2.log("L1 vault proxy", address(vault));
         console2.log("L1 vault implementation", vaultImpl);
         console2.log("L1 messenger", address(messenger));
+        console2.log("L1 finalizeModule", address(finalizeModule));
+        console2.log("L1 settleModule", address(settleModule));
         console2.log("L1 liquidityVault", liquidityVault);
         console2.log("L1 eulerAdapter placeholder", eulerAdapter);
         console2.log("L1 permit2", permit2);
