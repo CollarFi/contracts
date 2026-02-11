@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -28,7 +27,7 @@ interface ILiquidityVault {
     function asset() external view returns (address);
 }
 
-contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
+contract CollarVault is AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
@@ -104,8 +103,10 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     );
 
     ILiquidityVault public liquidityVault;
-    IERC20 public immutable usdc;
-    IAllowanceTransfer public immutable permit2;
+    IERC20 public usdc;
+    IAllowanceTransfer public permit2;
+
+    bool private _initialized;
 
     struct SocketBridgeConfig {
         IBridgeAdapter adapter;
@@ -243,7 +244,11 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
         bytes32 lzGuid
     );
 
-    constructor(
+    constructor() {
+        _initialized = true;
+    }
+
+    function initialize(
         address admin,
         ILiquidityVault liquidityVault_,
         address bridgeConfigAdmin_,
@@ -251,7 +256,10 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
         IAllowanceTransfer permit2_,
         address l2Recipient_,
         address treasury_
-    ) EIP712("CollarVault", "1") {
+    ) external {
+        if (_initialized) revert CV_NotAuthorized();
+        _initialized = true;
+
         if (
             admin == address(0) || address(liquidityVault_) == address(0) || bridgeConfigAdmin_ == address(0)
                 || address(eulerAdapter_) == address(0) || address(permit2_) == address(0) || l2Recipient_ == address(0)
@@ -303,6 +311,21 @@ contract CollarVault is AccessControl, EIP712, Pausable, ReentrancyGuard {
     }
 
     // (removed) acceptQuote: quote-based RFQ flow replaced by keeper-signed RFQ baseline + acceptMandate.
+
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _EIP712_NAME_HASH = keccak256("CollarVault");
+    bytes32 private constant _EIP712_VERSION_HASH = keccak256("1");
+
+    function _domainSeparatorV4() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(_EIP712_DOMAIN_TYPEHASH, _EIP712_NAME_HASH, _EIP712_VERSION_HASH, block.chainid, address(this))
+        );
+    }
+
+    function _hashTypedDataV4(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparatorV4(), structHash));
+    }
 
     function hashBaselineRfq(BaselineRfq memory rfq) public view returns (bytes32) {
         bytes32 structHash = keccak256(
