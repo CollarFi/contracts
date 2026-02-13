@@ -4,8 +4,13 @@ pragma solidity ^0.8.20;
 import {IBridgeAdapter} from "../interfaces/IBridgeAdapter.sol";
 import {ISocketVault} from "../interfaces/ISocketVault.sol";
 import {ISocketConnectorShared, ISocketCoreShared} from "../interfaces/ISocketAdapterShared.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract SocketBridgeAdapterOld is IBridgeAdapter {
+    using SafeERC20 for IERC20;
+
+    IERC20 public immutable asset;
     ISocketVault public immutable socketVault;
     ISocketConnectorShared public immutable connector;
     ISocketCoreShared public immutable socket;
@@ -13,10 +18,12 @@ contract SocketBridgeAdapterOld is IBridgeAdapter {
     uint256 public immutable messageIdPrefix;
     uint256 public immutable msgGasLimit;
 
-    constructor(address socketVault_, address connector_, uint256 msgGasLimit_) {
+    constructor(address asset_, address socketVault_, address connector_, uint256 msgGasLimit_) {
+        if (asset_ == address(0)) revert("SBA_OLD:zero-asset");
         if (socketVault_ == address(0)) revert("SBA_OLD:zero-vault");
         if (connector_ == address(0)) revert("SBA_OLD:zero-connector");
 
+        asset = IERC20(asset_);
         socketVault = ISocketVault(socketVault_);
         connector = ISocketConnectorShared(connector_);
         msgGasLimit = msgGasLimit_;
@@ -43,6 +50,8 @@ contract SocketBridgeAdapterOld is IBridgeAdapter {
     }
 
     function bridge(address receiver, uint256 amount) external payable override {
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        asset.forceApprove(address(socketVault), amount);
         socketVault.depositToAppChain{value: msg.value}(receiver, amount, msgGasLimit, address(connector));
     }
 }
