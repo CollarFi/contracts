@@ -111,6 +111,14 @@ uv run python script/deploy_l2.py --env testnet --broadcast --verify --derive-re
 # Wire L1<->L2 LayerZero peers after both sides are deployed
 uv run python script/wire_lz_peers.py --env testnet --broadcast
 
+# Check LayerZero ULN/route config for deployed messenger/receiver using current env files
+uv run python script/check_lz_uln.py --env testnet
+uv run python script/check_lz_uln.py --env testnet --json
+
+# Enable ETH collateral on L1 CollarVault (dry-run default; resolves vault from deployments/<CHAIN_ID>/l1.json)
+uv run python script/management/enable_collateral.py --env testnet
+uv run python script/management/enable_collateral.py --env testnet --broadcast
+
 # In auto-init mode (no TSA_INIT_DATA), provide TSA init env inputs:
 # SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING,
 # BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET.
@@ -119,6 +127,7 @@ uv run python script/wire_lz_peers.py --env testnet --broadcast
 # - No direct Euler deployment/integration in this flow (liquidity vault can run without setting Euler vault).
 # - If LIQUIDITY_VAULT is not provided, set USDC_ASSET and script deploys a fresh CollarLiquidityVault.
 # - BRIDGE_CONFIG_ADMIN was removed; ADMIN/VAULT_OWNER is the PARAMETER_ROLE holder at init.
+# - If WETH_ASSET is set, deploy enables it as allowed collateral via setCollateralConfig(WETH_ASSET, true, WETH_STRIKE_SCALE).
 
 # Check harness wiring/state
 uv run python script/lz_harness/status.py
