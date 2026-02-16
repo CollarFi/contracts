@@ -20,6 +20,7 @@ import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {EulerAdapterMock} from "../src/mocks/EulerAdapterMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
+import {OptionsBuilder} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/libs/OptionsBuilder.sol";
 
 /// @dev Deploy L1 components.
 ///
@@ -43,8 +44,14 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 /// - EULER_ADAPTER (address, if unset script deploys EulerAdapterMock as placeholder)
 /// - LZ_ENDPOINT (address, if unset script deploys LZEndpointV2Mock)
 /// - L2_EID (uint32, default 0)
+/// - LZ_RECEIVE_GAS (uint256, if >0 sets messenger defaultOptions with executor receive option)
+/// - LZ_RECEIVE_VALUE (uint256, default 0; used with LZ_RECEIVE_GAS)
+/// - WETH_ASSET enables WETH collateral in CollarVault
+/// - WETH_STRIKE_SCALE (uint256, default 1e30) strike scale for WETH collateral
 /// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
+    using OptionsBuilder for bytes;
+
     function run() external {
         address admin = vm.envOr("ADMIN", msg.sender);
         address treasury = vm.envAddress("TREASURY");
@@ -64,6 +71,8 @@ contract DeployL1 is Script {
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
         uint32 l2Eid = uint32(vm.envOr("L2_EID", vm.envOr("REMOTE_EID", uint256(0))));
+        uint256 lzReceiveGas = vm.envOr("LZ_RECEIVE_GAS", uint256(0));
+        uint256 lzReceiveValue = vm.envOr("LZ_RECEIVE_VALUE", uint256(0));
 
         address wethAsset = vm.envOr("WETH_ASSET", address(0));
         address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
@@ -71,6 +80,7 @@ contract DeployL1 is Script {
         address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
+        uint256 wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
 
         // Always execute the flow in broadcast context so msg.sender is the configured
         // deployer/account even during dry-run simulations (no --broadcast).
@@ -108,11 +118,21 @@ contract DeployL1 is Script {
         CollarVault vault = CollarVault(payable(vaultProxy));
 
         CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
+        if (lzReceiveGas > 0) {
+            bytes memory lzOptions =
+                OptionsBuilder.newOptions().addExecutorLzReceiveOption(uint128(lzReceiveGas), uint128(lzReceiveValue));
+            messenger.setDefaultOptions(lzOptions);
+        }
+
         CollarVaultFinalizeModule finalizeModule = new CollarVaultFinalizeModule();
         CollarVaultSettleModule settleModule = new CollarVaultSettleModule();
         vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
         vault.setFinalizeModule(address(finalizeModule));
         vault.setSettleModule(address(settleModule));
+
+        if (wethAsset != address(0)) {
+            vault.setCollateralConfig(wethAsset, true, wethStrikeScale);
+        }
 
         address wethAdapter = address(0);
         if (wethAsset != address(0) && wethSocketConnector != address(0)) {
@@ -164,8 +184,18 @@ contract DeployL1 is Script {
         console2.log("L1 liquidityVault", liquidityVault);
         console2.log("L1 eulerAdapter placeholder", eulerAdapter);
         console2.log("L1 permit2", permit2);
+        if (wethAsset != address(0)) {
+            console2.log("L1 collateral enabled", wethAsset);
+            console2.log("L1 collateral strike scale", wethStrikeScale);
+        }
         if (wethAdapter != address(0)) {
             console2.log("L1 WETH adapter", wethAdapter);
+        }
+        if (lzReceiveGas > 0) {
+            console2.log("L1 messenger defaultOptions receive gas", lzReceiveGas);
+            console2.log("L1 messenger defaultOptions receive value", lzReceiveValue);
+        } else {
+            console2.log("L1 messenger defaultOptions not set (LZ_RECEIVE_GAS=0)");
         }
         console2.log("Wrote", outPath);
     }
