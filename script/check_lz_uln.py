@@ -59,6 +59,25 @@ def _is_empty_hex(blob: str) -> bool:
     return b in {"", "0x"}
 
 
+def _encode_lz_receive_option(gas: int, value: int) -> str:
+    # Matches common encoding from OptionsBuilder.addExecutorLzReceiveOption.
+    # For value=0, options are encoded as: 0x0003 | 0x0100 | 0x11 | 0x01 | gas(uint128)
+    if value == 0:
+        return "0x000301001101" + f"{gas:032x}"
+    return "0x000301001102" + f"{gas:032x}" + f"{value:032x}"
+
+
+def _parse_uint(value: str) -> int | None:
+    s = value.strip()
+    if not s or s == "N/A":
+        return None
+    token = s.split()[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
 def _snapshot_side(
     *,
     label: str,
@@ -68,9 +87,13 @@ def _snapshot_side(
     remote_eid: str,
     source_eid: str,
     expected_peer_b32: str,
+    expected_remote_eid: str,
+    expected_default_options: str | None,
 ) -> dict[str, Any]:
     peer = cast_call(rpc_url, oapp, "peers(uint32)(bytes32)", remote_eid, allow_fail=True)
     delegate = cast_call(rpc_url, endpoint, "delegates(address)(address)", oapp, allow_fail=True)
+    configured_remote_eid = cast_call(rpc_url, oapp, "remoteEid()(uint32)", allow_fail=True)
+    default_options = cast_call(rpc_url, oapp, "defaultOptions()(bytes)", allow_fail=True)
 
     send_lib = cast_call(rpc_url, endpoint, "getSendLibrary(address,uint32)(address)", oapp, remote_eid, allow_fail=True)
     recv_lib_raw = cast_call(
@@ -137,6 +160,33 @@ def _snapshot_side(
     )
     checks.append(
         {
+            "name": "remoteEid set",
+            "ok": _parse_uint(configured_remote_eid) == int(expected_remote_eid),
+            "actual": configured_remote_eid,
+            "expected": str(expected_remote_eid),
+            "hint": "Set setRemoteEid(...) on the OApp contract.",
+        }
+    )
+    checks.append(
+        {
+            "name": "defaultOptions set",
+            "ok": default_options not in {"N/A"} and not _is_empty_hex(default_options),
+            "actual": default_options,
+            "hint": "Set setDefaultOptions(...) on the OApp contract.",
+        }
+    )
+    if expected_default_options:
+        checks.append(
+            {
+                "name": "defaultOptions matches env",
+                "ok": default_options.lower().strip() == expected_default_options.lower().strip(),
+                "actual": default_options,
+                "expected": expected_default_options,
+                "hint": "Re-apply setDefaultOptions from env LZ_RECEIVE_GAS/LZ_RECEIVE_VALUE.",
+            }
+        )
+    checks.append(
+        {
             "name": "delegate set",
             "ok": delegate != "N/A" and not _is_zero_address(delegate),
             "actual": delegate,
@@ -196,6 +246,8 @@ def _snapshot_side(
         "peer": peer,
         "expectedPeer": expected_peer_b32,
         "delegate": delegate,
+        "configuredRemoteEid": configured_remote_eid,
+        "defaultOptions": default_options,
         "sendLibrary": send_lib,
         "receiveLibrary": recv_lib,
         "sendConfigType1": send_cfg_1,
@@ -246,6 +298,20 @@ def main(
     l1_expected_peer = address_to_peer_bytes32(l2_receiver)
     l2_expected_peer = address_to_peer_bytes32(l1_messenger)
 
+    l1_expected_options = None
+    if l1.get("LZ_RECEIVE_GAS"):
+        l1_expected_options = _encode_lz_receive_option(
+            int(l1["LZ_RECEIVE_GAS"]),
+            int(l1.get("LZ_RECEIVE_VALUE", "0") or 0),
+        )
+
+    l2_expected_options = None
+    if l2.get("LZ_RECEIVE_GAS"):
+        l2_expected_options = _encode_lz_receive_option(
+            int(l2["LZ_RECEIVE_GAS"]),
+            int(l2.get("LZ_RECEIVE_VALUE", "0") or 0),
+        )
+
     l1_side = _snapshot_side(
         label="L1 messenger (send->L2, recv<-L2)",
         rpc_url=l1["RPC_URL"],
@@ -254,6 +320,8 @@ def main(
         remote_eid=l1_to_l2_eid,
         source_eid=l2_to_l1_eid,
         expected_peer_b32=l1_expected_peer,
+        expected_remote_eid=l1_to_l2_eid,
+        expected_default_options=l1_expected_options,
     )
     l2_side = _snapshot_side(
         label="L2 receiver (send->L1, recv<-L1)",
@@ -263,6 +331,8 @@ def main(
         remote_eid=l2_to_l1_eid,
         source_eid=l1_to_l2_eid,
         expected_peer_b32=l2_expected_peer,
+        expected_remote_eid=l2_to_l1_eid,
+        expected_default_options=l2_expected_options,
     )
 
     summary = {

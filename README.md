@@ -116,6 +116,7 @@ uv run python script/check_lz_uln.py --env testnet
 uv run python script/check_lz_uln.py --env testnet --json
 
 # Apply ULN config to both OApps using current effective endpoint configs (dry-run by default)
+# Also enforces OApp remoteEid + defaultOptions from env (LZ_RECEIVE_GAS/LZ_RECEIVE_VALUE)
 uv run python script/apply_lz_uln_config.py --env testnet
 uv run python script/apply_lz_uln_config.py --env testnet --broadcast
 

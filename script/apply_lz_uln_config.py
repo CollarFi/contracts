@@ -61,6 +61,23 @@ def _must_non_empty_hex(name: str, value: str) -> str:
     return value.strip()
 
 
+def _encode_lz_receive_option(gas: int, value: int) -> str:
+    if value == 0:
+        return "0x000301001101" + f"{gas:032x}"
+    return "0x000301001102" + f"{gas:032x}" + f"{value:032x}"
+
+
+def _parse_uint(value: str) -> int | None:
+    s = value.strip()
+    if not s or s == "N/A":
+        return None
+    token = s.split()[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
 def _collect_side(
     *,
     label: str,
@@ -68,6 +85,7 @@ def _collect_side(
     oapp: str,
     dst_eid: str,
     src_eid: str,
+    desired_remote_eid: str,
 ) -> dict[str, Any]:
     rpc = env["RPC_URL"]
     endpoint = env["LZ_ENDPOINT"]
@@ -91,6 +109,13 @@ def _collect_side(
     send_params = f"[({dst_eid},1,{send_cfg_exec}),({dst_eid},2,{send_cfg_uln})]"
     recv_params = f"[({src_eid},2,{recv_cfg_uln})]"
 
+    desired_default_options = None
+    if env.get("LZ_RECEIVE_GAS"):
+        desired_default_options = _encode_lz_receive_option(
+            int(env["LZ_RECEIVE_GAS"]),
+            int(env.get("LZ_RECEIVE_VALUE", "0") or 0),
+        )
+
     return {
         "label": label,
         "rpc": rpc,
@@ -103,6 +128,8 @@ def _collect_side(
         "recvLib": recv_lib,
         "sendParams": send_params,
         "recvParams": recv_params,
+        "desiredRemoteEid": str(desired_remote_eid),
+        "desiredDefaultOptions": desired_default_options,
     }
 
 
@@ -122,11 +149,20 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     print(f"  recv lib: {recv_lib}")
 
     sig = "setConfig(address,address,(uint32,uint32,bytes)[])"
+    desired_remote_eid = side["desiredRemoteEid"]
+    desired_default_options = side.get("desiredDefaultOptions")
+
+    current_remote_eid = cast_call(side["rpc"], oapp, "remoteEid()(uint32)", allow_fail=True)
+    current_default_options = cast_call(side["rpc"], oapp, "defaultOptions()(bytes)", allow_fail=True)
 
     if not broadcast:
         print("  [yellow]dry-run[/yellow] would call:")
         print(f"    setConfig({oapp}, {send_lib}, {send_params})")
         print(f"    setConfig({oapp}, {recv_lib}, {recv_params})")
+        if _parse_uint(current_remote_eid) != int(desired_remote_eid):
+            print(f"    setRemoteEid({desired_remote_eid}) on {oapp}")
+        if desired_default_options and current_default_options.lower() != desired_default_options.lower():
+            print(f"    setDefaultOptions({desired_default_options}) on {oapp}")
         return
 
     cast_send(
@@ -147,6 +183,24 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
         recv_lib,
         recv_params,
     )
+
+    if _parse_uint(current_remote_eid) != int(desired_remote_eid):
+        cast_send(
+            side["rpc"],
+            side["account"],
+            oapp,
+            "setRemoteEid(uint32)",
+            desired_remote_eid,
+        )
+
+    if desired_default_options and current_default_options.lower() != desired_default_options.lower():
+        cast_send(
+            side["rpc"],
+            side["account"],
+            oapp,
+            "setDefaultOptions(bytes)",
+            desired_default_options,
+        )
 
     print("  [green]applied[/green]")
 
@@ -194,6 +248,7 @@ def main(
         oapp=l1_messenger,
         dst_eid=l1_to_l2_eid,
         src_eid=l2_to_l1_eid,
+        desired_remote_eid=l1_to_l2_eid,
     )
     l2_side = _collect_side(
         label="L2 receiver",
@@ -201,6 +256,7 @@ def main(
         oapp=l2_receiver,
         dst_eid=l2_to_l1_eid,
         src_eid=l1_to_l2_eid,
+        desired_remote_eid=l2_to_l1_eid,
     )
 
     if json_out:
