@@ -115,6 +115,10 @@ uv run python script/wire_lz_peers.py --env testnet --broadcast
 uv run python script/check_lz_uln.py --env testnet
 uv run python script/check_lz_uln.py --env testnet --json
 
+# Apply ULN config to both OApps using current effective endpoint configs (dry-run by default)
+uv run python script/apply_lz_uln_config.py --env testnet
+uv run python script/apply_lz_uln_config.py --env testnet --broadcast
+
 # Enable ETH collateral on L1 CollarVault (dry-run default; resolves vault from deployments/<CHAIN_ID>/l1.json)
 uv run python script/management/enable_collateral.py --env testnet
 uv run python script/management/enable_collateral.py --env testnet --broadcast

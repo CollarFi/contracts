@@ -104,16 +104,6 @@ def _snapshot_side(
         allow_fail=True,
     ) if send_lib != "N/A" else "N/A"
 
-    recv_cfg_1 = cast_call(
-        rpc_url,
-        endpoint,
-        "getConfig(address,address,uint32,uint32)(bytes)",
-        oapp,
-        recv_lib,
-        source_eid,
-        "1",
-        allow_fail=True,
-    ) if recv_lib != "N/A" else "N/A"
     recv_cfg_2 = cast_call(
         rpc_url,
         endpoint,
@@ -188,18 +178,10 @@ def _snapshot_side(
     )
     checks.append(
         {
-            "name": "receive ULN config (type 1) present",
-            "ok": recv_cfg_1 not in {"N/A"} and not _is_empty_hex(recv_cfg_1),
-            "actual": recv_cfg_1,
-            "hint": "Likely missing ULN config on receive path.",
-        }
-    )
-    checks.append(
-        {
-            "name": "receive Executor config (type 2) present",
+            "name": "receive ULN config (type 2) present",
             "ok": recv_cfg_2 not in {"N/A"} and not _is_empty_hex(recv_cfg_2),
             "actual": recv_cfg_2,
-            "hint": "Likely missing executor config on receive path.",
+            "hint": "Likely missing ULN config on receive path.",
         }
     )
 
@@ -218,7 +200,6 @@ def _snapshot_side(
         "receiveLibrary": recv_lib,
         "sendConfigType1": send_cfg_1,
         "sendConfigType2": send_cfg_2,
-        "receiveConfigType1": recv_cfg_1,
         "receiveConfigType2": recv_cfg_2,
         "receiveLibraryTimeout": receive_timeout,
         "checks": checks,
