@@ -78,6 +78,23 @@ def _parse_uint(value: str) -> int | None:
         return None
 
 
+def _decode_send_executor_config(cfg_hex: str) -> tuple[int | None, str | None]:
+    """Decode abi.encode(ExecutorConfig{uint32 maxMessageSize,address executor})."""
+    s = cfg_hex.strip().lower()
+    if not s.startswith("0x"):
+        return None, None
+    raw = s[2:]
+    if len(raw) < 128:
+        return None, None
+    try:
+        max_message_size = int(raw[:64], 16)
+    except ValueError:
+        return None, None
+    addr_word = raw[64:128]
+    executor = "0x" + addr_word[-40:]
+    return max_message_size, executor
+
+
 def _snapshot_side(
     *,
     label: str,
@@ -137,6 +154,8 @@ def _snapshot_side(
         "2",
         allow_fail=True,
     ) if recv_lib != "N/A" else "N/A"
+
+    send_max_message_size, send_executor = _decode_send_executor_config(send_cfg_1 if send_cfg_1 != "N/A" else "")
 
     receive_timeout = cast_call(
         rpc_url,
@@ -212,18 +231,34 @@ def _snapshot_side(
 
     checks.append(
         {
-            "name": "send ULN config (type 1) present",
+            "name": "send Executor config (type 1) present",
             "ok": send_cfg_1 not in {"N/A"} and not _is_empty_hex(send_cfg_1),
             "actual": send_cfg_1,
-            "hint": "Likely missing ULN config (DVN/confirmations) for send path.",
+            "hint": "Likely missing executor config for send path.",
         }
     )
     checks.append(
         {
-            "name": "send Executor config (type 2) present",
+            "name": "send executor address set (non-zero)",
+            "ok": bool(send_executor) and not _is_zero_address(send_executor),
+            "actual": send_executor or "N/A",
+            "hint": "Send executor is empty; set endpoint send executor config for this OApp/eid route.",
+        }
+    )
+    checks.append(
+        {
+            "name": "send maxMessageSize > 0",
+            "ok": (send_max_message_size or 0) > 0,
+            "actual": str(send_max_message_size) if send_max_message_size is not None else "N/A",
+            "hint": "Set a non-zero maxMessageSize in send executor config.",
+        }
+    )
+    checks.append(
+        {
+            "name": "send ULN config (type 2) present",
             "ok": send_cfg_2 not in {"N/A"} and not _is_empty_hex(send_cfg_2),
             "actual": send_cfg_2,
-            "hint": "Likely missing executor config for send path.",
+            "hint": "Likely missing ULN config (DVN/confirmations) for send path.",
         }
     )
     checks.append(
@@ -252,6 +287,8 @@ def _snapshot_side(
         "receiveLibrary": recv_lib,
         "sendConfigType1": send_cfg_1,
         "sendConfigType2": send_cfg_2,
+        "sendExecutor": send_executor,
+        "sendMaxMessageSize": send_max_message_size,
         "receiveConfigType2": recv_cfg_2,
         "receiveLibraryTimeout": receive_timeout,
         "checks": checks,
