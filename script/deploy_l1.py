@@ -52,6 +52,9 @@ def main(
         "OUTPUT_JSON": l1["OUTPUT_JSON"],
     }
 
+    if l1.get("WETH_ASSET") and not l1.get("L2_WRAPPED_WETH_ASSET"):
+        raise ValueError("L2_WRAPPED_WETH_ASSET is required when WETH_ASSET is set")
+
     for opt in (
         "VAULT_OWNER",
         "PERMIT2",
@@ -68,6 +71,7 @@ def main(
         "WETH_MSG_GAS_LIMIT",
         "WETH_PAYLOAD_SIZE",
         "WETH_STRIKE_SCALE",
+        "L2_WRAPPED_WETH_ASSET",
     ):
         if l1.get(opt):
             env_overrides[opt] = l1[opt]

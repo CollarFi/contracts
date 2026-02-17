@@ -96,6 +96,7 @@ contract CollarVault is
     event OriginationFeeAprUpdated(uint256 feeApr);
     event MaxTotalPrincipalUpdated(uint256 maxTotalPrincipal);
     event CollateralConfigUpdated(address indexed asset, bool allowed, uint256 strikeScale);
+    event L2MessageAssetUpdated(address indexed l1Asset, address indexed l2MessageAsset);
     event BridgeConfigUpdated(address indexed asset, address indexed adapter);
     event L2RecipientUpdated(address indexed recipient);
     event EulerAdapterUpdated(address indexed adapter);
@@ -352,6 +353,11 @@ contract CollarVault is
     function strikeScale(address asset) external view returns (uint256) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.strikeScale[asset];
+    }
+
+    function l2MessageAsset(address l1Asset) external view returns (address) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.l2MessageAsset[l1Asset];
     }
 
     function lzMessenger() external view returns (ICollarVaultMessenger) {
@@ -774,6 +780,16 @@ contract CollarVault is
         emit CollateralConfigUpdated(asset, allowed, scale);
     }
 
+    /// @notice Map an L1 collateral asset to the L2 asset address encoded in LayerZero deposit messages.
+    function setL2MessageAsset(address l1Asset, address l2Asset) external onlyRole(PARAMETER_ROLE) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        if (l1Asset == address(0) || l2Asset == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        $.l2MessageAsset[l1Asset] = l2Asset;
+        emit L2MessageAssetUpdated(l1Asset, l2Asset);
+    }
+
     /// @notice Estimate the Socket bridge fees for a transfer.
     function estimateBridgeFees(address asset, address, uint256) public view returns (uint256) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
@@ -973,10 +989,15 @@ contract CollarVault is
             revert CV_InsufficientValue();
         }
 
+        address l2MessageAsset_ = $.l2MessageAsset[params.collateralAsset];
+        if (l2MessageAsset_ == address(0)) {
+            revert CV_InvalidConfig();
+        }
+
         _bridgeToL2(params.collateralAsset, params.collateralAmount, $.l2Recipient);
         lzGuid = $.lzMessenger.sendDepositIntentAutoFee{value: msg.value - bridgeFee}(
             loanId,
-            params.collateralAsset,
+            l2MessageAsset_,
             params.collateralAmount,
             address(this),
             $.deriveSubaccountId,

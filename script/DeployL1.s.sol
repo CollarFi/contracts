@@ -48,6 +48,7 @@ import {OptionsBuilder} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/libs/
 /// - LZ_RECEIVE_VALUE (uint256, default 0; used with LZ_RECEIVE_GAS)
 /// - WETH_ASSET enables WETH collateral in CollarVault
 /// - WETH_STRIKE_SCALE (uint256, default 1e30) strike scale for WETH collateral
+/// - L2_WRAPPED_WETH_ASSET (address) required when WETH_ASSET is set; used in L1->L2 deposit messages
 /// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
     using OptionsBuilder for bytes;
@@ -81,6 +82,7 @@ contract DeployL1 is Script {
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
         uint256 wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
+        address l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
 
         // Always execute the flow in broadcast context so msg.sender is the configured
         // deployer/account even during dry-run simulations (no --broadcast).
@@ -131,7 +133,9 @@ contract DeployL1 is Script {
         vault.setSettleModule(address(settleModule));
 
         if (wethAsset != address(0)) {
+            if (l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
             vault.setCollateralConfig(wethAsset, true, wethStrikeScale);
+            vault.setL2MessageAsset(wethAsset, l2WrappedWethAsset);
         }
 
         address wethAdapter = address(0);
@@ -187,6 +191,7 @@ contract DeployL1 is Script {
         if (wethAsset != address(0)) {
             console2.log("L1 collateral enabled", wethAsset);
             console2.log("L1 collateral strike scale", wethStrikeScale);
+            console2.log("L1->L2 message asset", l2WrappedWethAsset);
         }
         if (wethAdapter != address(0)) {
             console2.log("L1 WETH adapter", wethAdapter);

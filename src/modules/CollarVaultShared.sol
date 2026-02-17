@@ -88,6 +88,8 @@ library CollarVaultShared {
         mapping(uint256 => bool) returnRequested;
         mapping(address => bool) collateralAllowed;
         mapping(address => uint256) strikeScale;
+        // L1 collateral asset -> L2 asset address to place into LayerZero message payloads.
+        mapping(address => address) l2MessageAsset;
         ICollarVaultMessenger lzMessenger;
         mapping(bytes32 => bool) lzMessageConsumed;
         address finalizeModule;

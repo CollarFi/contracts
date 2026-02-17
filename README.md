@@ -128,6 +128,14 @@ uv run python script/ensure_lz_route.py --env testnet --broadcast
 uv run python script/management/enable_collateral.py --env testnet
 uv run python script/management/enable_collateral.py --env testnet --broadcast
 
+# Configure L1->L2 message asset mapping (L1 collateral -> L2 wrapped asset used by TSA)
+uv run python script/management/set_l2_message_asset.py --env testnet --l1-asset <L1_ASSET> --l2-asset <L2_WRAPPED_ASSET>
+uv run python script/management/set_l2_message_asset.py --env testnet --broadcast
+
+# Preflight L1->L2 message asset mapping vs TSA wrappedDepositAsset
+uv run python script/management/l1_l2_message_asset_preflight.py --env testnet
+uv run python script/management/l1_l2_message_asset_preflight.py --env testnet --json
+
 # L2 preflight: inspect pending message guids before handleMessage (asset/subaccount/socket/balance checks)
 uv run python script/management/l2_message_preflight.py --env testnet --guid <GUID>
 uv run python script/management/l2_message_preflight.py --env testnet --json
