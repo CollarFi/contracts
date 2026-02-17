@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 from rich import print
 
-from lz_harness.common import ROOT_DIR, address_to_peer_bytes32, cast_send, load_env, must, run
+from lz_harness.common import ROOT_DIR, address_to_peer_bytes32, cast_call, cast_send, load_env, must, run
 
 app = typer.Typer(add_completion=False)
 
@@ -49,6 +49,14 @@ def _resolve_oapp_addr(*, env: dict[str, str], env_key: str, output_key: str, ou
     return _read_addr_from_output(output_json, output_key)
 
 
+def _must_uint(name: str, raw: str) -> int:
+    token = raw.strip().split()[0]
+    try:
+        return int(token)
+    except Exception as exc:
+        raise ValueError(f"failed to parse {name} from: {raw}") from exc
+
+
 @app.command()
 def main(
     l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
@@ -63,15 +71,21 @@ def main(
     l2 = load_env(l2_env_file)
 
     for env in (l1, l2):
-        for k in ("RPC_URL", "ACCOUNT"):
+        for k in ("RPC_URL", "ACCOUNT", "LZ_ENDPOINT"):
             must(env, k)
 
-    l1_eid = l1.get("L2_EID") or l1.get("REMOTE_EID")
-    l2_eid = l2.get("L1_EID") or l2.get("REMOTE_EID")
-    if not l1_eid:
-        raise ValueError("missing L2_EID in L1 env (or legacy REMOTE_EID)")
-    if not l2_eid:
-        raise ValueError("missing L1_EID in L2 env (or legacy REMOTE_EID)")
+    l1_chain_eid = _must_uint(
+        "L1 endpoint eid",
+        cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)"),
+    )
+    l2_chain_eid = _must_uint(
+        "L2 endpoint eid",
+        cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)"),
+    )
+
+    # Route EIDs are opposite endpoint EIDs.
+    l1_eid = str(l2_chain_eid)
+    l2_eid = str(l1_chain_eid)
 
     l1_messenger = _resolve_oapp_addr(
         env=l1,

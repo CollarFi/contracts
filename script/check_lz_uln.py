@@ -312,12 +312,16 @@ def main(
         for k in ("RPC_URL", "LZ_ENDPOINT"):
             must(env, k)
 
-    l1_to_l2_eid = l1.get("L2_EID") or l1.get("REMOTE_EID")
-    l2_to_l1_eid = l2.get("L1_EID") or l2.get("REMOTE_EID")
-    if not l1_to_l2_eid:
-        raise ValueError("missing L2_EID in L1 env (or legacy REMOTE_EID)")
-    if not l2_to_l1_eid:
-        raise ValueError("missing L1_EID in L2 env (or legacy REMOTE_EID)")
+    l1_chain_eid = _parse_uint(cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)"))
+    l2_chain_eid = _parse_uint(cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)"))
+    if l1_chain_eid is None:
+        raise ValueError("failed to resolve L1 endpoint eid()")
+    if l2_chain_eid is None:
+        raise ValueError("failed to resolve L2 endpoint eid()")
+
+    # Route EIDs are opposite endpoint EIDs.
+    l1_to_l2_eid = str(l2_chain_eid)
+    l2_to_l1_eid = str(l1_chain_eid)
 
     l1_messenger = _resolve_oapp_addr(
         env=l1,
@@ -378,6 +382,8 @@ def main(
         "l2Env": str(l2_env_file),
         "l1Messenger": l1_messenger,
         "l2Receiver": l2_receiver,
+        "l1EndpointEid": str(l1_chain_eid),
+        "l2EndpointEid": str(l2_chain_eid),
         "l1ToL2Eid": l1_to_l2_eid,
         "l2ToL1Eid": l2_to_l1_eid,
         "sides": [l1_side, l2_side],
