@@ -31,7 +31,20 @@ fi
 # Idempotent: running multiple times is safe.
 
 echo "[fix-local-deps] Rewriting v2-core lyra-utils imports (src/ -> lyra-utils/)"
-# shellcheck disable=SC2016
-find "$CANON" -name '*.sol' -print0 | xargs -0 sed -i 's/\("\)src\//\1lyra-utils\//g'
+
+# GNU sed (Linux): sed -i 's/.../.../g' file
+# BSD sed (macOS): sed -i '' 's/.../.../g' file
+sed_in_place() {
+  local file="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' 's/\("\)src\//\1lyra-utils\//g' "$file"
+  else
+    sed -i 's/\("\)src\//\1lyra-utils\//g' "$file"
+  fi
+}
+
+while IFS= read -r -d '' f; do
+  sed_in_place "$f"
+done < <(find "$CANON" -name '*.sol' -print0)
 
 echo "[fix-local-deps] Done. You can now run: forge build / forge test"
