@@ -119,7 +119,15 @@ contract CollarTSATestUtils is TSATestUtils {
         // Generous collateral amount for tests; TSA enforces that spot sells don't exceed this.
         loanStore.recordCollateral(loanId, address(markets[MARKET].base), 1_000_000e18);
         loanStore.recordMandate(
-            loanId, address(0xB0B0), address(markets[MARKET].base), 0, 0, 0, maturity, uint64(block.timestamp + 1 days)
+            loanId,
+            address(0xB0B0),
+            address(markets[MARKET].base),
+            0,
+            0,
+            0,
+            0,
+            maturity,
+            uint64(block.timestamp + 1 days)
         );
     }
 }
