@@ -151,11 +151,25 @@ contract CollarTSAReceiver is AccessControl, OApp {
         }
 
         if (message.action == CollarLZMessages.Action.MandateCreated) {
-            (address borrower, uint256 minCallStrike, uint256 maxPutStrike, uint64 maturity, uint64 deadline) =
-                abi.decode(message.data, (address, uint256, uint256, uint64, uint64));
+            (
+                address borrower,
+                uint256 minCallStrike,
+                uint256 maxPutStrike,
+                uint256 maxInterestApr,
+                uint64 maturity,
+                uint64 deadline
+            ) = abi.decode(message.data, (address, uint256, uint256, uint256, uint64, uint64));
 
             loanStore.recordMandate(
-                message.loanId, borrower, message.asset, message.amount, minCallStrike, maxPutStrike, maturity, deadline
+                message.loanId,
+                borrower,
+                message.asset,
+                message.amount,
+                minCallStrike,
+                maxPutStrike,
+                maxInterestApr,
+                maturity,
+                deadline
             );
 
             handledMessages[guid] = true;

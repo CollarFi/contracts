@@ -9,6 +9,7 @@ interface ICollarLoanStore {
         uint256 borrowAmount;
         uint256 minCallStrike;
         uint256 maxPutStrike;
+        uint256 maxInterestApr;
         uint64 maturity;
         uint64 deadline;
 
@@ -28,6 +29,7 @@ interface ICollarLoanStore {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
+        uint256 maxInterestApr,
         uint64 maturity,
         uint64 deadline
     ) external;

@@ -48,6 +48,9 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         if (block.timestamp > mandate.deadline) {
             revert CV_InvalidState();
         }
+        if ($.originationFeeApr > mandate.maxInterestApr) {
+            revert CV_InvalidState();
+        }
 
         CollarLZMessages.Message memory depositMessage = _loadLZMessage(depositGuid);
         CollarLZMessages.Message memory tradeMessage = _loadLZMessage(tradeGuid);
@@ -74,11 +77,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
                 mandate.maturity
             );
 
-        $.lzMessenger
-            .validateOriginationFee(
-                tradeMessage, _quoteOriginationFee(pending.borrowAmount, pending.maturity), address($.usdc)
-            );
-
         $.tradeConfirmed[finalizedLoanId] = true;
         $.collateralActivated[finalizedLoanId] = true;
         $.returnRequested[finalizedLoanId] = false;
@@ -99,21 +97,10 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             subaccountId: $.deriveSubaccountId,
             state: CollarVaultShared.LoanState.ACTIVE_ZERO_COST,
             startTime: block.timestamp,
-            originationFeeApr: $.originationFeeApr,
+            interestApr: $.originationFeeApr,
+            interestOwed: _quoteOriginationFee(pending.borrowAmount, pending.maturity),
             variableDebt: 0
         });
-
-        uint256 feeAmount = _quoteOriginationFee(pending.borrowAmount, pending.maturity);
-        if (feeAmount > 0) {
-            uint256 treasuryCut = Math.mulDiv(feeAmount, $.treasuryBps, CollarVaultShared.MAX_BPS);
-            uint256 vaultCut = feeAmount - treasuryCut;
-            if (treasuryCut > 0) {
-                $.usdc.safeTransfer($.treasury, treasuryCut);
-            }
-            if (vaultCut > 0) {
-                $.usdc.safeTransfer(address($.liquidityVault), vaultCut);
-            }
-        }
 
         $.liquidityVault.borrow(pending.borrowAmount);
         $.usdc.safeTransfer(mandate.borrower, pending.borrowAmount);

@@ -55,13 +55,18 @@ contract CollarVault is
         uint256 putStrike;
         uint256 callStrike;
         uint256 borrowAmount;
+        uint256 maxInterestApr;
         uint64 rfqExpiry;
         address borrower;
         uint256 nonce;
     }
 
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
-        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint64 rfqExpiry,address borrower,uint256 nonce)"
+        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 maxInterestApr,uint64 rfqExpiry,address borrower,uint256 nonce)"
+    );
+
+    bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
+        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 maxInterestApr,uint64 deadline,uint256 nonce)"
     );
 
     function _getCollarVaultStorage() private pure returns (CollarVaultShared.CollarVaultStorage storage $) {
@@ -133,8 +138,21 @@ contract CollarVault is
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
+        uint256 maxInterestApr,
         uint64 deadline,
         bytes32 lzGuid
+    );
+    event LoanRolledOver(
+        uint256 indexed loanId,
+        uint256 oldMaturity,
+        uint256 newMaturity,
+        uint256 oldInterestOwed,
+        uint256 newInterestOwed,
+        uint256 oldCallStrike,
+        uint256 newCallStrike,
+        uint256 oldPutStrike,
+        uint256 newPutStrike,
+        uint256 newInterestApr
     );
 
     constructor() {
@@ -250,7 +268,8 @@ contract CollarVault is
             uint256 subaccountId,
             CollarVaultShared.LoanState state,
             uint256 startTime,
-            uint256 loanOriginationFeeApr,
+            uint256 loanInterestApr,
+            uint256 interestOwed,
             uint256 variableDebt
         )
     {
@@ -267,7 +286,8 @@ contract CollarVault is
             loan.subaccountId,
             loan.state,
             loan.startTime,
-            loan.originationFeeApr,
+            loan.interestApr,
+            loan.interestOwed,
             loan.variableDebt
         );
     }
@@ -308,6 +328,7 @@ contract CollarVault is
             uint256 borrowAmount,
             uint256 minCallStrike,
             uint256 maxPutStrike,
+            uint256 maxInterestApr,
             bool sentToL2
         )
     {
@@ -322,6 +343,7 @@ contract CollarVault is
             mandate.borrowAmount,
             mandate.minCallStrike,
             mandate.maxPutStrike,
+            mandate.maxInterestApr,
             mandate.sentToL2
         );
     }
@@ -422,9 +444,27 @@ contract CollarVault is
                 rfq.putStrike,
                 rfq.callStrike,
                 rfq.borrowAmount,
+                rfq.maxInterestApr,
                 rfq.rfqExpiry,
                 rfq.borrower,
                 rfq.nonce
+            )
+        );
+        return _hashTypedDataV4(structHash);
+    }
+
+    function hashRolloverMandate(CollarVaultShared.RolloverMandate memory mandate) public view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ROLLOVER_MANDATE_TYPEHASH,
+                mandate.borrower,
+                mandate.loanId,
+                mandate.newMaturity,
+                mandate.minCallStrike,
+                mandate.maxPutStrike,
+                mandate.maxInterestApr,
+                mandate.deadline,
+                mandate.nonce
             )
         );
         return _hashTypedDataV4(structHash);
@@ -482,7 +522,7 @@ contract CollarVault is
         ) {
             revert CV_InvalidMessage();
         }
-        if (rfq.callStrike == 0) {
+        if (rfq.callStrike == 0 || rfq.maxInterestApr < $.originationFeeApr) {
             revert CV_InvalidInput();
         }
 
@@ -516,10 +556,11 @@ contract CollarVault is
             borrowAmount: pending.borrowAmount,
             minCallStrike: minCallStrike,
             maxPutStrike: maxPutStrike,
+            maxInterestApr: rfq.maxInterestApr,
             sentToL2: true
         });
 
-        lzGuid = _sendMandateCreated(loanId, pending, minCallStrike, maxPutStrike, deadline);
+        lzGuid = _sendMandateCreated(loanId, pending, minCallStrike, maxPutStrike, rfq.maxInterestApr, deadline);
 
         emit MandateAccepted(
             loanId,
@@ -528,6 +569,7 @@ contract CollarVault is
             pending.borrowAmount,
             minCallStrike,
             maxPutStrike,
+            rfq.maxInterestApr,
             deadline,
             lzGuid
         );
@@ -538,11 +580,13 @@ contract CollarVault is
         CollarVaultShared.PendingDeposit memory pending,
         uint256 minCallStrike,
         uint256 maxPutStrike,
+        uint256 maxInterestApr,
         uint64 deadline
     ) internal returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        bytes memory mandateData =
-            abi.encode(pending.borrower, minCallStrike, maxPutStrike, uint64(pending.maturity), deadline);
+        bytes memory mandateData = abi.encode(
+            pending.borrower, minCallStrike, maxPutStrike, maxInterestApr, uint64(pending.maturity), deadline
+        );
 
         lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: msg.value}(
             loanId,
@@ -671,6 +715,78 @@ contract CollarVault is
         _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.settleLoan, (loanId, uint8(outcome), lzGuid)));
     }
 
+    /// @notice Execute a pre-maturity rollover for an active loan using a borrower-signed mandate.
+    function executeRollover(
+        uint256 loanId,
+        CollarVaultShared.RolloverMandate calldata mandate,
+        bytes calldata mandateSig,
+        uint256 newCallStrike,
+        uint256 newPutStrike
+    ) external nonReentrant whenNotPaused onlyKeeper {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.ACTIVE_ZERO_COST) {
+            revert CV_InvalidState();
+        }
+        if (block.timestamp >= loan.maturity) {
+            revert CV_InvalidState();
+        }
+        if (mandate.loanId != loanId || mandate.borrower != loan.borrower) {
+            revert CV_InvalidMessage();
+        }
+        if (mandate.deadline < block.timestamp || mandate.newMaturity <= block.timestamp) {
+            revert CV_InvalidState();
+        }
+        if (mandate.newMaturity <= block.timestamp || mandate.newMaturity <= loan.maturity) {
+            revert CV_InvalidInput();
+        }
+        if (newCallStrike < mandate.minCallStrike || newPutStrike > mandate.maxPutStrike) {
+            revert CV_InvalidInput();
+        }
+        if (mandate.maxInterestApr < $.originationFeeApr) {
+            revert CV_InvalidInput();
+        }
+
+        bytes32 mandateHash = hashRolloverMandate(mandate);
+        if ($.usedRolloverMandates[mandateHash]) {
+            revert CV_InvalidMessage();
+        }
+        address signer = ECDSA.recover(mandateHash, mandateSig);
+        if (signer != loan.borrower) {
+            revert CV_Unauthorized();
+        }
+        $.usedRolloverMandates[mandateHash] = true;
+
+        uint256 oldInterest = loan.interestOwed;
+        uint256 accrued = _quoteInterest(loan.principal, loan.interestApr, loan.startTime, block.timestamp);
+        uint256 rolledInterest = oldInterest > accrued ? oldInterest - accrued : 0;
+        uint256 newInterest = _quoteInterest(loan.principal, $.originationFeeApr, block.timestamp, mandate.newMaturity);
+
+        uint256 oldMaturity = loan.maturity;
+        uint256 oldCallStrike = loan.callStrike;
+        uint256 oldPutStrike = loan.putStrike;
+
+        loan.maturity = mandate.newMaturity;
+        loan.callStrike = newCallStrike;
+        loan.putStrike = newPutStrike;
+        loan.startTime = block.timestamp;
+        loan.interestApr = $.originationFeeApr;
+        loan.interestOwed = rolledInterest + newInterest;
+
+        emit LoanRolledOver(
+            loanId,
+            oldMaturity,
+            mandate.newMaturity,
+            oldInterest,
+            loan.interestOwed,
+            oldCallStrike,
+            newCallStrike,
+            oldPutStrike,
+            newPutStrike,
+            $.originationFeeApr
+        );
+    }
+
     /// @notice Convert a neutral-expiry loan into a variable-rate Euler position.
     function convertToVariable(uint256 loanId, bytes32 lzGuid) external nonReentrant whenNotPaused {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
@@ -710,7 +826,8 @@ contract CollarVault is
             subaccountId: loan.subaccountId,
             state: CollarVaultShared.LoanState(uint8(loan.state)),
             startTime: loan.startTime,
-            originationFeeApr: loan.originationFeeApr,
+            interestApr: loan.interestApr,
+            interestOwed: loan.interestOwed,
             variableDebt: loan.variableDebt
         });
     }
@@ -722,12 +839,7 @@ contract CollarVault is
         if (loan.state == CollarVaultShared.LoanState.NONE) {
             revert CV_InvalidState();
         }
-        if (loan.maturity <= loan.startTime) {
-            return 0;
-        }
-        uint256 annualFee = Math.mulDiv(loan.principal, loan.originationFeeApr, 1e18);
-        uint256 duration = loan.maturity - loan.startTime;
-        return Math.mulDiv(annualFee, duration, YEAR);
+        return loan.interestOwed;
     }
 
     /// @notice Update the L2 recipient for bridge transfers.
@@ -912,15 +1024,19 @@ contract CollarVault is
 
     function _quoteOriginationFee(uint256 borrowAmount, uint256 maturity) internal view returns (uint256) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if ($.originationFeeApr == 0) {
+        return _quoteInterest(borrowAmount, $.originationFeeApr, block.timestamp, maturity);
+    }
+
+    function _quoteInterest(uint256 principal, uint256 apr, uint256 start, uint256 end)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (apr == 0 || end <= start) {
             return 0;
         }
-        if (maturity <= block.timestamp) {
-            return 0;
-        }
-        uint256 duration = maturity - block.timestamp;
-        uint256 annualFee = Math.mulDiv(borrowAmount, $.originationFeeApr, 1e18);
-        return Math.mulDiv(annualFee, duration, YEAR);
+        uint256 annualFee = Math.mulDiv(principal, apr, 1e18);
+        return Math.mulDiv(annualFee, end - start, YEAR);
     }
 
     function _commitPrincipal(uint256 amount) internal {
@@ -1017,12 +1133,16 @@ contract CollarVault is
         _releaseCommittedPrincipal(loan.principal);
         IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.eulerAdapter), collateralAmount);
         $.eulerAdapter.depositCollateral(loan.collateralAsset, collateralAmount, loan.borrower);
-        $.eulerAdapter.borrow(address($.usdc), loan.principal, loan.borrower, address(this));
+        uint256 totalDue = loan.principal + loan.interestOwed;
+        $.eulerAdapter.borrow(address($.usdc), totalDue, loan.borrower, address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
+        if (loan.interestOwed > 0) {
+            $.usdc.safeTransfer(address($.liquidityVault), loan.interestOwed);
+        }
         loan.state = CollarVaultShared.LoanState.CLOSED;
         loan.variableDebt = 0;
-        emit LoanConverted(loanId, loan.principal);
+        emit LoanConverted(loanId, totalDue);
         emit LoanClosed(loanId);
     }
 

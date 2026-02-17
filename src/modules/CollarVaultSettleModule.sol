@@ -45,22 +45,31 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
 
         settlementAmount = $.lzMessenger.validateSettlementReport(lzMessage, loanId, address($.usdc), address(this));
 
-        uint256 shortfall = 0;
-        if (settlementAmount < loan.principal) {
-            shortfall = loan.principal - settlementAmount;
+        uint256 totalDue = loan.principal + loan.interestOwed;
+        uint256 shortfall = settlementAmount < totalDue ? totalDue - settlementAmount : 0;
+
+        uint256 principalRepay = settlementAmount > loan.principal ? loan.principal : settlementAmount;
+        if (principalRepay > 0) {
+            $.usdc.safeIncreaseAllowance(address($.liquidityVault), principalRepay);
+            $.liquidityVault.repay(principalRepay);
+        }
+        if (principalRepay < loan.principal) {
+            uint256 principalShortfall = loan.principal - principalRepay;
+            $.liquidityVault.writeOff(principalShortfall);
+            emit SettlementShortfall(loanId, principalShortfall);
         }
 
-        uint256 repayAmount = settlementAmount > loan.principal ? loan.principal : settlementAmount;
-        if (repayAmount > 0) {
-            $.usdc.safeIncreaseAllowance(address($.liquidityVault), repayAmount);
-            $.liquidityVault.repay(repayAmount);
+        uint256 interestPaid =
+            settlementAmount > loan.principal ? Math.min(settlementAmount - loan.principal, loan.interestOwed) : 0;
+        if (interestPaid > 0) {
+            $.usdc.safeTransfer(address($.liquidityVault), interestPaid);
         }
+
         if (shortfall > 0) {
-            $.liquidityVault.writeOff(shortfall);
             emit SettlementShortfall(loanId, shortfall);
         }
 
-        uint256 excess = settlementAmount > loan.principal ? settlementAmount - loan.principal : 0;
+        uint256 excess = settlementAmount > totalDue ? settlementAmount - totalDue : 0;
 
         if (excess > 0) {
             if (outcome == CollarVaultShared.SettlementOutcome.PutITM) {
@@ -92,12 +101,16 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         _releaseCommittedPrincipal(loan.principal);
         IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.eulerAdapter), collateralAmount);
         $.eulerAdapter.depositCollateral(loan.collateralAsset, collateralAmount, loan.borrower);
-        $.eulerAdapter.borrow(address($.usdc), loan.principal, loan.borrower, address(this));
+        uint256 totalDue = loan.principal + loan.interestOwed;
+        $.eulerAdapter.borrow(address($.usdc), totalDue, loan.borrower, address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
+        if (loan.interestOwed > 0) {
+            $.usdc.safeTransfer(address($.liquidityVault), loan.interestOwed);
+        }
         loan.state = CollarVaultShared.LoanState.CLOSED;
         loan.variableDebt = 0;
-        emit LoanConverted(loanId, loan.principal);
+        emit LoanConverted(loanId, totalDue);
         emit LoanClosed(loanId);
     }
 

@@ -36,6 +36,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
+        uint256 maxInterestApr,
         uint64 maturity,
         uint64 deadline
     ) external onlyRole(WRITER_ROLE) {
@@ -67,6 +68,9 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maxPutStrike != 0 && loan.maxPutStrike != maxPutStrike) {
             revert CLS_Mismatch();
         }
+        if (loan.maxInterestApr != 0 && loan.maxInterestApr != maxInterestApr) {
+            revert CLS_Mismatch();
+        }
 
         // Collateral asset can be set either by deposit or mandate. Require consistency.
         if (loan.collateralAsset != address(0) && loan.collateralAsset != collateralAsset) {
@@ -77,6 +81,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.borrowAmount = borrowAmount;
         loan.minCallStrike = minCallStrike;
         loan.maxPutStrike = maxPutStrike;
+        loan.maxInterestApr = maxInterestApr;
         loan.maturity = maturity;
         loan.deadline = deadline;
         if (loan.collateralAsset == address(0)) {

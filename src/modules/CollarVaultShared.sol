@@ -36,7 +36,8 @@ library CollarVaultShared {
         uint256 subaccountId;
         LoanState state;
         uint256 startTime;
-        uint256 originationFeeApr;
+        uint256 interestApr;
+        uint256 interestOwed;
         uint256 variableDebt;
     }
 
@@ -62,7 +63,19 @@ library CollarVaultShared {
         uint256 borrowAmount;
         uint256 minCallStrike;
         uint256 maxPutStrike;
+        uint256 maxInterestApr;
         bool sentToL2;
+    }
+
+    struct RolloverMandate {
+        address borrower;
+        uint256 loanId;
+        uint64 newMaturity;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        uint256 maxInterestApr;
+        uint64 deadline;
+        uint256 nonce;
     }
 
     struct CollarVaultStorage {
@@ -83,6 +96,7 @@ library CollarVaultShared {
         mapping(uint256 => PendingDeposit) pendingDeposits;
         mapping(uint256 => Mandate) mandates;
         mapping(bytes32 => bool) usedBaselineRfqs;
+        mapping(bytes32 => bool) usedRolloverMandates;
         mapping(uint256 => bool) tradeConfirmed;
         mapping(uint256 => bool) collateralActivated;
         mapping(uint256 => bool) returnRequested;
