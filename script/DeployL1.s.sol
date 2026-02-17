@@ -14,6 +14,7 @@ import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
+import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
 import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
@@ -56,6 +57,7 @@ contract DeployL1 is Script {
         CollarVaultMessenger messenger;
         CollarVaultFinalizeModule finalizeModule;
         CollarVaultSettleModule settleModule;
+        CollarVaultRolloverModule rolloverModule;
         address liquidityVault;
         address eulerAdapter;
         address lzEndpoint;
@@ -113,10 +115,12 @@ contract DeployL1 is Script {
 
         dep.finalizeModule = new CollarVaultFinalizeModule();
         dep.settleModule = new CollarVaultSettleModule();
+        dep.rolloverModule = new CollarVaultRolloverModule();
 
         dep.vault.setLZMessenger(ICollarVaultMessenger(address(dep.messenger)));
         dep.vault.setFinalizeModule(address(dep.finalizeModule));
         dep.vault.setSettleModule(address(dep.settleModule));
+        dep.vault.setRolloverModule(address(dep.rolloverModule));
 
         if (cfg.wethAsset != address(0)) {
             if (cfg.l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
@@ -168,8 +172,8 @@ contract DeployL1 is Script {
     {
         messenger = new CollarVaultMessenger(cfg.admin, address(vault), lzEndpoint, cfg.l2Eid);
         if (cfg.lzReceiveGas > 0) {
-            bytes memory lzOptions =
-                OptionsBuilder.newOptions().addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
+            bytes memory lzOptions = OptionsBuilder.newOptions()
+                .addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
             messenger.setDefaultOptions(lzOptions);
         }
     }
@@ -208,6 +212,7 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1Messenger", address(dep.messenger));
         json = vm.serializeAddress("addrs", "l1FinalizeModule", address(dep.finalizeModule));
         json = vm.serializeAddress("addrs", "l1SettleModule", address(dep.settleModule));
+        json = vm.serializeAddress("addrs", "l1RolloverModule", address(dep.rolloverModule));
         json = vm.serializeAddress("addrs", "l1LiquidityVault", dep.liquidityVault);
         json = vm.serializeAddress("addrs", "l1EulerAdapter", dep.eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", cfg.permit2);
@@ -221,6 +226,7 @@ contract DeployL1 is Script {
         console2.log("L1 messenger", address(dep.messenger));
         console2.log("L1 finalizeModule", address(dep.finalizeModule));
         console2.log("L1 settleModule", address(dep.settleModule));
+        console2.log("L1 rolloverModule", address(dep.rolloverModule));
         console2.log("L1 liquidityVault", dep.liquidityVault);
         console2.log("L1 eulerAdapter placeholder", dep.eulerAdapter);
         console2.log("L1 permit2", cfg.permit2);

@@ -92,6 +92,24 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         emit LoanClosed(loanId);
     }
 
+    function convertToVariable(uint256 loanId, bytes32 lzGuid) external {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.ACTIVE_ZERO_COST) {
+            revert CV_InvalidState();
+        }
+        if (block.timestamp < loan.maturity) {
+            revert CV_InvalidState();
+        }
+
+        CollarLZMessages.Message memory lzMessage = _consumeLZMessage(lzGuid);
+        $.lzMessenger
+            .validateCollateralReturned(
+                lzMessage, loanId, loan.collateralAsset, loan.collateralAmount, address(this), $.deriveSubaccountId
+            );
+        _convertToVariable(loanId, lzMessage.amount);
+    }
+
     function _convertToVariable(uint256 loanId, uint256 collateralAmount) internal {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];

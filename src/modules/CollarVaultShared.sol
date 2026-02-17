@@ -108,6 +108,7 @@ library CollarVaultShared {
         mapping(bytes32 => bool) lzMessageConsumed;
         address finalizeModule;
         address settleModule;
+        address rolloverModule;
     }
 
     // keccak256(abi.encode(uint256(keccak256("collar.storage.CollarVault")) - 1)) & ~bytes32(uint256(0xff))
