@@ -128,6 +128,11 @@ uv run python script/ensure_lz_route.py --env testnet --broadcast
 uv run python script/management/enable_collateral.py --env testnet
 uv run python script/management/enable_collateral.py --env testnet --broadcast
 
+# L2 keeper: watch MessageReceived on CollarTSAReceiver and handle DepositIntent messages
+# (dry-run default; stores cursor in deployments/keeper_l2_state.json)
+uv run python script/management/l2_keeper_handle_messages.py --env testnet --once
+uv run python script/management/l2_keeper_handle_messages.py --env testnet --broadcast
+
 # In auto-init mode (no TSA_INIT_DATA), provide TSA init env inputs:
 # SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING,
 # BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET.
