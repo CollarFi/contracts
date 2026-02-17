@@ -67,6 +67,7 @@ def main(
         "WETH_SOCKET_CONNECTOR",
         "WETH_MSG_GAS_LIMIT",
         "WETH_PAYLOAD_SIZE",
+        "WETH_STRIKE_SCALE",
     ):
         if l1.get(opt):
             env_overrides[opt] = l1[opt]
