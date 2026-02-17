@@ -8,74 +8,12 @@ from typing import Any
 import typer
 from rich import print
 
-from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run
+from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must
+from py_lib.deployments import resolve_addr
+from py_lib.envs import resolve_l1_l2_env_paths
+from py_lib.lz import encode_lz_receive_option, first_line, must_non_empty_hex, norm_hex, parse_uint
 
 app = typer.Typer(add_completion=False)
-
-
-def _resolve_env_paths(env_profile: str, l1_env_file: Path, l2_env_file: Path) -> tuple[Path, Path]:
-    profile = env_profile.strip().lower()
-    if profile and l1_env_file == (ROOT_DIR / ".env.l1.testnet"):
-        l1_env_file = ROOT_DIR / f".env.l1.{profile}"
-    if profile and l2_env_file == (ROOT_DIR / ".env.l2.testnet"):
-        l2_env_file = ROOT_DIR / f".env.l2.{profile}"
-    return l1_env_file, l2_env_file
-
-
-def _read_addr_from_output(path_value: str, key: str) -> str:
-    path = Path(path_value)
-    if not path.is_absolute():
-        path = ROOT_DIR / path
-    if not path.is_file():
-        raise FileNotFoundError(f"deployment output not found: {path}")
-
-    data = json.loads(path.read_text(encoding="utf-8"))
-    addrs = data.get("addrs", data)
-    val = addrs.get(key)
-    if not val:
-        raise ValueError(f"missing {key} in deployment output: {path}")
-    return str(val)
-
-
-def _default_output_json(rpc_url: str, side: str) -> str:
-    chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
-    return str(ROOT_DIR / "deployments" / chain_id / f"{side}.json")
-
-
-def _resolve_oapp_addr(*, env: dict[str, str], env_key: str, output_key: str, output_side: str) -> str:
-    if env.get(env_key):
-        return str(env[env_key])
-
-    output_json = env.get("OUTPUT_JSON") or _default_output_json(must(env, "RPC_URL"), output_side)
-    return _read_addr_from_output(output_json, output_key)
-
-
-def _first_line(s: str) -> str:
-    return s.splitlines()[0].strip()
-
-
-def _must_non_empty_hex(name: str, value: str) -> str:
-    v = value.strip().lower()
-    if v in {"", "0x", "n/a"}:
-        raise ValueError(f"{name} is empty or unavailable: {value}")
-    return value.strip()
-
-
-def _encode_lz_receive_option(gas: int, value: int) -> str:
-    if value == 0:
-        return "0x000301001101" + f"{gas:032x}"
-    return "0x000301001102" + f"{gas:032x}" + f"{value:032x}"
-
-
-def _parse_uint(value: str) -> int | None:
-    s = value.strip()
-    if not s or s == "N/A":
-        return None
-    token = s.split()[0]
-    try:
-        return int(token)
-    except ValueError:
-        return None
 
 
 def _collect_side(
@@ -90,18 +28,18 @@ def _collect_side(
     rpc = env["RPC_URL"]
     endpoint = env["LZ_ENDPOINT"]
 
-    send_lib = _first_line(cast_call(rpc, endpoint, "getSendLibrary(address,uint32)(address)", oapp, dst_eid))
-    recv_lib = _first_line(cast_call(rpc, endpoint, "getReceiveLibrary(address,uint32)(address,bool)", oapp, src_eid))
+    send_lib = first_line(cast_call(rpc, endpoint, "getSendLibrary(address,uint32)(address)", oapp, dst_eid))
+    recv_lib = first_line(cast_call(rpc, endpoint, "getReceiveLibrary(address,uint32)(address,bool)", oapp, src_eid))
 
-    send_cfg_exec = _must_non_empty_hex(
+    send_cfg_exec = must_non_empty_hex(
         f"{label} send config type1",
         cast_call(rpc, endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, send_lib, dst_eid, "1"),
     )
-    send_cfg_uln = _must_non_empty_hex(
+    send_cfg_uln = must_non_empty_hex(
         f"{label} send config type2",
         cast_call(rpc, endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, send_lib, dst_eid, "2"),
     )
-    recv_cfg_uln = _must_non_empty_hex(
+    recv_cfg_uln = must_non_empty_hex(
         f"{label} receive config type2",
         cast_call(rpc, endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, recv_lib, src_eid, "2"),
     )
@@ -111,7 +49,7 @@ def _collect_side(
 
     desired_default_options = None
     if env.get("LZ_RECEIVE_GAS"):
-        desired_default_options = _encode_lz_receive_option(
+        desired_default_options = encode_lz_receive_option(
             int(env["LZ_RECEIVE_GAS"]),
             int(env.get("LZ_RECEIVE_VALUE", "0") or 0),
         )
@@ -134,10 +72,6 @@ def _collect_side(
         "desiredRemoteEid": str(desired_remote_eid),
         "desiredDefaultOptions": desired_default_options,
     }
-
-
-def _norm_hex(value: str) -> str:
-    return value.strip().lower()
 
 
 def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
@@ -168,16 +102,13 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     desired_send_cfg_2 = side["desiredSendCfg2"]
     desired_recv_cfg_2 = side["desiredRecvCfg2"]
 
-    need_send_cfg = (
-        _norm_hex(current_send_cfg_1) != _norm_hex(desired_send_cfg_1)
-        or _norm_hex(current_send_cfg_2) != _norm_hex(desired_send_cfg_2)
-    )
-    need_recv_cfg = _norm_hex(current_recv_cfg_2) != _norm_hex(desired_recv_cfg_2)
+    need_send_cfg = norm_hex(current_send_cfg_1) != norm_hex(desired_send_cfg_1) or norm_hex(current_send_cfg_2) != norm_hex(desired_send_cfg_2)
+    need_recv_cfg = norm_hex(current_recv_cfg_2) != norm_hex(desired_recv_cfg_2)
 
     current_remote_eid = cast_call(side["rpc"], oapp, "remoteEid()(uint32)", allow_fail=True)
     current_default_options = cast_call(side["rpc"], oapp, "defaultOptions()(bytes)", allow_fail=True)
-    need_remote_eid = _parse_uint(current_remote_eid) != int(desired_remote_eid)
-    need_default_options = bool(desired_default_options) and _norm_hex(current_default_options) != _norm_hex(desired_default_options)
+    need_remote_eid = parse_uint(current_remote_eid) != int(desired_remote_eid)
+    need_default_options = bool(desired_default_options) and norm_hex(current_default_options) != norm_hex(desired_default_options)
 
     if not broadcast:
         print("  [yellow]dry-run[/yellow] would call:")
@@ -258,7 +189,7 @@ def main(
     broadcast: bool = typer.Option(False, help="Execute onchain txs (default: dry-run)"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
-    l1_env_file, l2_env_file = _resolve_env_paths(env_profile, l1_env_file, l2_env_file)
+    l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
 
     l1 = load_env(l1_env_file)
     l2 = load_env(l2_env_file)
@@ -267,8 +198,8 @@ def main(
         for k in ("RPC_URL", "ACCOUNT", "LZ_ENDPOINT"):
             must(env, k)
 
-    l1_chain_eid = _parse_uint(cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)"))
-    l2_chain_eid = _parse_uint(cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)"))
+    l1_chain_eid = parse_uint(cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)"))
+    l2_chain_eid = parse_uint(cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)"))
     if l1_chain_eid is None:
         raise ValueError("failed to resolve L1 endpoint eid()")
     if l2_chain_eid is None:
@@ -278,18 +209,8 @@ def main(
     l1_to_l2_eid = str(l2_chain_eid)
     l2_to_l1_eid = str(l1_chain_eid)
 
-    l1_messenger = _resolve_oapp_addr(
-        env=l1,
-        env_key="L1_MESSENGER",
-        output_key="l1Messenger",
-        output_side="l1",
-    )
-    l2_receiver = _resolve_oapp_addr(
-        env=l2,
-        env_key="L2_RECEIVER",
-        output_key="l2Receiver",
-        output_side="l2",
-    )
+    l1_messenger = resolve_addr(l1, "L1_MESSENGER", "l1Messenger", "l1")
+    l2_receiver = resolve_addr(l2, "L2_RECEIVER", "l2Receiver", "l2")
 
     l1_side = _collect_side(
         label="L1 messenger",
