@@ -95,8 +95,9 @@ contract CollarVault is
     event TreasuryUpdated(address indexed treasury, uint256 bps);
     event OriginationFeeAprUpdated(uint256 feeApr);
     event MaxTotalPrincipalUpdated(uint256 maxTotalPrincipal);
-    event CollateralConfigUpdated(address indexed asset, bool allowed, uint256 strikeScale);
-    event L2MessageAssetUpdated(address indexed l1Asset, address indexed l2MessageAsset);
+    event CollateralConfigUpdated(
+        address indexed asset, bool allowed, uint256 strikeScale, address indexed l2MessageAsset
+    );
     event BridgeConfigUpdated(address indexed asset, address indexed adapter);
     event L2RecipientUpdated(address indexed recipient);
     event EulerAdapterUpdated(address indexed adapter);
@@ -769,25 +770,20 @@ contract CollarVault is
         emit SubaccountUpdated(subaccountId);
     }
 
-    /// @notice Update collateral allowlist and strike scale.
-    function setCollateralConfig(address asset, bool allowed, uint256 scale) external onlyRole(PARAMETER_ROLE) {
+    /// @notice Update collateral allowlist, strike scale, and L2 message asset mapping.
+    /// @dev When `allowed == true`, `l2Asset` must be non-zero.
+    function setCollateralConfig(address asset, bool allowed, uint256 scale, address l2Asset)
+        external
+        onlyRole(PARAMETER_ROLE)
+    {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if (asset == address(0)) {
+        if (asset == address(0) || (allowed && l2Asset == address(0))) {
             revert CV_InvalidConfig();
         }
         $.collateralAllowed[asset] = allowed;
         $.strikeScale[asset] = scale;
-        emit CollateralConfigUpdated(asset, allowed, scale);
-    }
-
-    /// @notice Map an L1 collateral asset to the L2 asset address encoded in LayerZero deposit messages.
-    function setL2MessageAsset(address l1Asset, address l2Asset) external onlyRole(PARAMETER_ROLE) {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if (l1Asset == address(0) || l2Asset == address(0)) {
-            revert CV_InvalidConfig();
-        }
-        $.l2MessageAsset[l1Asset] = l2Asset;
-        emit L2MessageAssetUpdated(l1Asset, l2Asset);
+        $.l2MessageAsset[asset] = l2Asset;
+        emit CollateralConfigUpdated(asset, allowed, scale, l2Asset);
     }
 
     /// @notice Estimate the Socket bridge fees for a transfer.

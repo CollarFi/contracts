@@ -120,6 +120,8 @@ def main(
         raise ValueError("set --l1-asset and provide --l2-asset or L2 TSA must be resolvable")
 
     current = cast_call(rpc_url, vault, "l2MessageAsset(address)(address)", l1_asset, allow_fail=True)
+    allowed = cast_call(rpc_url, vault, "collateralAllowed(address)(bool)", l1_asset, allow_fail=True)
+    scale = cast_call(rpc_url, vault, "strikeScale(address)(uint256)", l1_asset, allow_fail=True)
     needs_update = current.lower() != l2_asset.lower()
 
     tx = None
@@ -127,13 +129,24 @@ def main(
         if not account:
             raise ValueError("missing ACCOUNT in env for --broadcast")
         if needs_update:
-            tx = cast_send(rpc_url, account, vault, "setL2MessageAsset(address,address)", l1_asset, l2_asset)
+            tx = cast_send(
+                rpc_url,
+                account,
+                vault,
+                "setCollateralConfig(address,bool,uint256,address)",
+                l1_asset,
+                allowed,
+                scale,
+                l2_asset,
+            )
 
     out = {
         "vault": vault,
         "l1Asset": l1_asset,
         "targetL2Asset": l2_asset,
         "current": current,
+        "currentAllowed": allowed,
+        "currentStrikeScale": scale,
         "needsUpdate": needs_update,
         "broadcast": broadcast,
         "tx": tx,

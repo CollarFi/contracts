@@ -44,6 +44,7 @@ def main(
     env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env>."),
     asset: str = typer.Option("", "--asset", help="Collateral ERC20 address (defaults to WETH_ASSET from env)."),
     scale: int = typer.Option(10**30, "--scale", help="strikeScale for this asset (default: 1e30 for ETH collateral and 1e18 strike)."),
+    l2_asset: str = typer.Option("", "--l2-asset", help="L2 asset encoded in LZ payload (default: env L2_WRAPPED_WETH_ASSET or existing mapping)."),
     broadcast: bool = typer.Option(False, help="Send onchain tx (default: dry-run)."),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary."),
 ) -> None:
@@ -65,6 +66,14 @@ def main(
 
     allowed_now = cast_call(rpc_url, vault, "collateralAllowed(address)(bool)", collateral_asset)
     scale_now = cast_call(rpc_url, vault, "strikeScale(address)(uint256)", collateral_asset)
+    l2_asset_now = cast_call(rpc_url, vault, "l2MessageAsset(address)(address)", collateral_asset)
+
+    target_l2_asset = l2_asset or env.get("L2_WRAPPED_WETH_ASSET", "")
+    if not target_l2_asset or target_l2_asset.lower() == "0x0000000000000000000000000000000000000000":
+        if l2_asset_now and l2_asset_now.lower() != "0x0000000000000000000000000000000000000000":
+            target_l2_asset = l2_asset_now
+        else:
+            raise ValueError("missing L2 asset: pass --l2-asset or set L2_WRAPPED_WETH_ASSET")
 
     tx_hash = None
     if broadcast:
@@ -73,10 +82,11 @@ def main(
             rpc_url,
             account,
             vault,
-            "setCollateralConfig(address,bool,uint256)",
+            "setCollateralConfig(address,bool,uint256,address)",
             collateral_asset,
             "true",
             str(scale),
+            target_l2_asset,
         )
 
     if json_out:
@@ -91,10 +101,12 @@ def main(
                     "current": {
                         "allowed": allowed_now,
                         "strikeScale": scale_now,
+                        "l2MessageAsset": l2_asset_now,
                     },
                     "target": {
                         "allowed": True,
                         "strikeScale": str(scale),
+                        "l2MessageAsset": target_l2_asset,
                     },
                     "broadcast": broadcast,
                     "tx": tx_hash,
@@ -107,10 +119,16 @@ def main(
     print(f"[cyan][info][/cyan] chain_id: {chain_id}")
     print(f"[cyan][info][/cyan] CollarVault: {vault}")
     print(f"[cyan][info][/cyan] asset: {collateral_asset}")
-    print(f"[cyan][info][/cyan] current config -> allowed={allowed_now}, strikeScale={scale_now}")
+    print(
+        f"[cyan][info][/cyan] current config -> allowed={allowed_now}, strikeScale={scale_now},"
+        f" l2MessageAsset={l2_asset_now}"
+    )
 
     if broadcast:
-        print(f"[green][ok][/green] setCollateralConfig sent (allowed=true, scale={scale})")
+        print(
+            "[green][ok][/green] setCollateralConfig sent"
+            f" (allowed=true, scale={scale}, l2Asset={target_l2_asset})"
+        )
         if tx_hash:
             print(f"  tx: {tx_hash}")
     else:
@@ -118,7 +136,8 @@ def main(
         print("  rerun with --broadcast to apply")
         print(
             "  cast send"
-            f" {vault} 'setCollateralConfig(address,bool,uint256)' {collateral_asset} true {scale}"
+            f" {vault} 'setCollateralConfig(address,bool,uint256,address)'"
+            f" {collateral_asset} true {scale} {target_l2_asset}"
             f" --rpc-url {rpc_url} --account {env.get('ACCOUNT', '<ACCOUNT>')}"
         )
 

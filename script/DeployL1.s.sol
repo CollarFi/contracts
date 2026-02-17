@@ -134,8 +134,7 @@ contract DeployL1 is Script {
 
         if (wethAsset != address(0)) {
             if (l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
-            vault.setCollateralConfig(wethAsset, true, wethStrikeScale);
-            vault.setL2MessageAsset(wethAsset, l2WrappedWethAsset);
+            vault.setCollateralConfig(wethAsset, true, wethStrikeScale, l2WrappedWethAsset);
         }
 
         address wethAdapter = address(0);

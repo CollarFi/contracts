@@ -86,9 +86,8 @@ contract CollarVaultTest is Test {
         vault.setFinalizeModule(address(finalizeModule));
         vault.setSettleModule(address(settleModule));
 
-        vault.setCollateralConfig(address(wbtc), true, 1e8);
         // Unit-test setup uses same asset on both sides.
-        vault.setL2MessageAsset(address(wbtc), address(wbtc));
+        vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));
         vault.setSocketVaultConfig(address(wbtc), IBridgeAdapter(address(adapter)));
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);
