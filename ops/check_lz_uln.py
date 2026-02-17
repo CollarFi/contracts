@@ -174,7 +174,7 @@ def _snapshot_side(
             "ok": peer.lower() == expected_peer_b32.lower(),
             "actual": peer,
             "expected": expected_peer_b32,
-            "hint": "Run script/wire_lz_peers.py --broadcast if mismatch.",
+            "hint": "Run ops/wire_lz_peers.py --broadcast if mismatch.",
         }
     )
     checks.append(

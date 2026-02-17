@@ -92,61 +92,61 @@ Examples:
 
 ```bash
 # Deploy both sides (dry-run by default)
-uv run python script/lz_harness/deploy.py
+uv run python ops/lz_harness/deploy.py
 
 # Broadcast deploy + set options + wire peers
-uv run python script/lz_harness/deploy.py --broadcast
+uv run python ops/lz_harness/deploy.py --broadcast
 
 # Dry-run L1 deployment (safe default, named foundry account/keystore)
 # ADMIN is optional; deploy runner derives it from ACCOUNT (foundry keystore) if unset.
-uv run python script/deploy_l1.py --env testnet
+uv run python ops/deploy_l1.py --env testnet
 
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
 # If WETH_ASSET is set and L2_WRAPPED_WETH_ASSET is empty in L1 env,
 # deploy_l1.py auto-resolves it from L2 TSA via --l2-env-file (default: .env.l2.<env>).
 # L2 receiver lookup order: L2_RECEIVER env -> L2 OUTPUT_JSON -> DeployL2 broadcast run-latest artifact.
-uv run python script/deploy_l1.py --env testnet --broadcast
+uv run python ops/deploy_l1.py --env testnet --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
-uv run python script/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
+uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
 # Wire L1<->L2 LayerZero peers after both sides are deployed
-uv run python script/wire_lz_peers.py --env testnet --broadcast
+uv run python ops/wire_lz_peers.py --env testnet --broadcast
 
 # Check LayerZero ULN/route config for deployed messenger/receiver using current env files
-uv run python script/check_lz_uln.py --env testnet
-uv run python script/check_lz_uln.py --env testnet --json
+uv run python ops/check_lz_uln.py --env testnet
+uv run python ops/check_lz_uln.py --env testnet --json
 
 # Apply ULN config to both OApps using current effective endpoint configs (dry-run by default)
 # Also enforces OApp remoteEid + defaultOptions from env (LZ_RECEIVE_GAS/LZ_RECEIVE_VALUE)
-uv run python script/apply_lz_uln_config.py --env testnet
-uv run python script/apply_lz_uln_config.py --env testnet --broadcast
+uv run python ops/apply_lz_uln_config.py --env testnet
+uv run python ops/apply_lz_uln_config.py --env testnet --broadcast
 
 # Unified route sync: wire peers + apply ULN config + run final check
-uv run python script/ensure_lz_route.py --env testnet
-uv run python script/ensure_lz_route.py --env testnet --broadcast
+uv run python ops/ensure_lz_route.py --env testnet
+uv run python ops/ensure_lz_route.py --env testnet --broadcast
 
 # Enable ETH collateral on L1 CollarVault (dry-run default; resolves vault from deployments/<CHAIN_ID>/l1.json)
-uv run python script/management/enable_collateral.py --env testnet
-uv run python script/management/enable_collateral.py --env testnet --broadcast
+uv run python ops/management/enable_collateral.py --env testnet
+uv run python ops/management/enable_collateral.py --env testnet --broadcast
 
 # Configure L1->L2 message asset mapping (L1 collateral -> L2 wrapped asset used by TSA)
-uv run python script/management/set_l2_message_asset.py --env testnet --l1-asset <L1_ASSET> --l2-asset <L2_WRAPPED_ASSET>
-uv run python script/management/set_l2_message_asset.py --env testnet --broadcast
+uv run python ops/management/set_l2_message_asset.py --env testnet --l1-asset <L1_ASSET> --l2-asset <L2_WRAPPED_ASSET>
+uv run python ops/management/set_l2_message_asset.py --env testnet --broadcast
 
 # Preflight L1->L2 message asset mapping vs TSA wrappedDepositAsset
-uv run python script/management/l1_l2_message_asset_preflight.py --env testnet
-uv run python script/management/l1_l2_message_asset_preflight.py --env testnet --json
+uv run python ops/management/l1_l2_message_asset_preflight.py --env testnet
+uv run python ops/management/l1_l2_message_asset_preflight.py --env testnet --json
 
 # L2 preflight: inspect pending message guids before handleMessage (asset/subaccount/socket/balance checks)
-uv run python script/management/l2_message_preflight.py --env testnet --guid <GUID>
-uv run python script/management/l2_message_preflight.py --env testnet --json
+uv run python ops/management/l2_message_preflight.py --env testnet --guid <GUID>
+uv run python ops/management/l2_message_preflight.py --env testnet --json
 
 # L2 keeper: watch MessageReceived on CollarTSAReceiver and handle DepositIntent messages
 # (dry-run default; stores cursor in deployments/keeper_l2_state.json)
-uv run python script/management/l2_keeper_handle_messages.py --env testnet --once
-uv run python script/management/l2_keeper_handle_messages.py --env testnet --broadcast
+uv run python ops/management/l2_keeper_handle_messages.py --env testnet --once
+uv run python ops/management/l2_keeper_handle_messages.py --env testnet --broadcast
 
 # In auto-init mode (no TSA_INIT_DATA), provide TSA init env inputs:
 # SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING,
@@ -159,13 +159,13 @@ uv run python script/management/l2_keeper_handle_messages.py --env testnet --bro
 # - If WETH_ASSET is set, deploy enables it as allowed collateral via setCollateralConfig(WETH_ASSET, true, WETH_STRIKE_SCALE).
 
 # Check harness wiring/state
-uv run python script/lz_harness/status.py
-uv run python script/lz_harness/status.py --json
+uv run python ops/lz_harness/status.py
+uv run python ops/lz_harness/status.py --json
 
 # Send ping and wait for relay
-uv run python script/lz_harness/send_ping.py --from l1 --nonce 1
+uv run python ops/lz_harness/send_ping.py --from l1 --nonce 1
 
 # Inspect route/config details (delegate/libs/config/initializable)
-uv run python script/lz_harness/route_check.py
-uv run python script/lz_harness/route_check.py --json
+uv run python ops/lz_harness/route_check.py
+uv run python ops/lz_harness/route_check.py --json
 ```

@@ -38,16 +38,16 @@ def main(
     peer_args = [*env_arg]
     if broadcast:
         peer_args.append("--broadcast")
-    peer_out = _run_py("script/wire_lz_peers.py", peer_args)
+    peer_out = _run_py("ops/wire_lz_peers.py", peer_args)
     steps.append({"step": "wire_lz_peers", "mode": mode, "output": peer_out})
 
     uln_args = [*env_arg]
     if broadcast:
         uln_args.append("--broadcast")
-    uln_out = _run_py("script/apply_lz_uln_config.py", uln_args)
+    uln_out = _run_py("ops/apply_lz_uln_config.py", uln_args)
     steps.append({"step": "apply_lz_uln_config", "mode": mode, "output": uln_out})
 
-    check_out = _run_py("script/check_lz_uln.py", env_arg)
+    check_out = _run_py("ops/check_lz_uln.py", env_arg)
     steps.append({"step": "check_lz_uln", "mode": "read-only", "output": check_out})
 
     ok = "LayerZero ULN/route check OK" in check_out
