@@ -128,6 +128,10 @@ uv run python script/ensure_lz_route.py --env testnet --broadcast
 uv run python script/management/enable_collateral.py --env testnet
 uv run python script/management/enable_collateral.py --env testnet --broadcast
 
+# L2 preflight: inspect pending message guids before handleMessage (asset/subaccount/socket/balance checks)
+uv run python script/management/l2_message_preflight.py --env testnet --guid <GUID>
+uv run python script/management/l2_message_preflight.py --env testnet --json
+
 # L2 keeper: watch MessageReceived on CollarTSAReceiver and handle DepositIntent messages
 # (dry-run default; stores cursor in deployments/keeper_l2_state.json)
 uv run python script/management/l2_keeper_handle_messages.py --env testnet --once
