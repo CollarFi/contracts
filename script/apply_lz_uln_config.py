@@ -128,9 +128,16 @@ def _collect_side(
         "recvLib": recv_lib,
         "sendParams": send_params,
         "recvParams": recv_params,
+        "desiredSendCfg1": send_cfg_exec,
+        "desiredSendCfg2": send_cfg_uln,
+        "desiredRecvCfg2": recv_cfg_uln,
         "desiredRemoteEid": str(desired_remote_eid),
         "desiredDefaultOptions": desired_default_options,
     }
+
+
+def _norm_hex(value: str) -> str:
+    return value.strip().lower()
 
 
 def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
@@ -152,39 +159,73 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     desired_remote_eid = side["desiredRemoteEid"]
     desired_default_options = side.get("desiredDefaultOptions")
 
+    # Read current values and only send txs on mismatches.
+    current_send_cfg_1 = cast_call(side["rpc"], endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, send_lib, side["dstEid"], "1")
+    current_send_cfg_2 = cast_call(side["rpc"], endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, send_lib, side["dstEid"], "2")
+    current_recv_cfg_2 = cast_call(side["rpc"], endpoint, "getConfig(address,address,uint32,uint32)(bytes)", oapp, recv_lib, side["srcEid"], "2")
+
+    desired_send_cfg_1 = side["desiredSendCfg1"]
+    desired_send_cfg_2 = side["desiredSendCfg2"]
+    desired_recv_cfg_2 = side["desiredRecvCfg2"]
+
+    need_send_cfg = (
+        _norm_hex(current_send_cfg_1) != _norm_hex(desired_send_cfg_1)
+        or _norm_hex(current_send_cfg_2) != _norm_hex(desired_send_cfg_2)
+    )
+    need_recv_cfg = _norm_hex(current_recv_cfg_2) != _norm_hex(desired_recv_cfg_2)
+
     current_remote_eid = cast_call(side["rpc"], oapp, "remoteEid()(uint32)", allow_fail=True)
     current_default_options = cast_call(side["rpc"], oapp, "defaultOptions()(bytes)", allow_fail=True)
+    need_remote_eid = _parse_uint(current_remote_eid) != int(desired_remote_eid)
+    need_default_options = bool(desired_default_options) and _norm_hex(current_default_options) != _norm_hex(desired_default_options)
 
     if not broadcast:
         print("  [yellow]dry-run[/yellow] would call:")
-        print(f"    setConfig({oapp}, {send_lib}, {send_params})")
-        print(f"    setConfig({oapp}, {recv_lib}, {recv_params})")
-        if _parse_uint(current_remote_eid) != int(desired_remote_eid):
+        if need_send_cfg:
+            print(f"    setConfig({oapp}, {send_lib}, {send_params})")
+        else:
+            print("    skip send setConfig (already correct)")
+        if need_recv_cfg:
+            print(f"    setConfig({oapp}, {recv_lib}, {recv_params})")
+        else:
+            print("    skip receive setConfig (already correct)")
+        if need_remote_eid:
             print(f"    setRemoteEid({desired_remote_eid}) on {oapp}")
-        if desired_default_options and current_default_options.lower() != desired_default_options.lower():
+        else:
+            print("    skip setRemoteEid (already correct)")
+        if need_default_options:
             print(f"    setDefaultOptions({desired_default_options}) on {oapp}")
+        elif desired_default_options:
+            print("    skip setDefaultOptions (already correct)")
         return
 
-    cast_send(
-        side["rpc"],
-        side["account"],
-        endpoint,
-        sig,
-        oapp,
-        send_lib,
-        send_params,
-    )
-    cast_send(
-        side["rpc"],
-        side["account"],
-        endpoint,
-        sig,
-        oapp,
-        recv_lib,
-        recv_params,
-    )
+    if need_send_cfg:
+        cast_send(
+            side["rpc"],
+            side["account"],
+            endpoint,
+            sig,
+            oapp,
+            send_lib,
+            send_params,
+        )
+    else:
+        print("  [green][skip][/green] send setConfig already correct")
 
-    if _parse_uint(current_remote_eid) != int(desired_remote_eid):
+    if need_recv_cfg:
+        cast_send(
+            side["rpc"],
+            side["account"],
+            endpoint,
+            sig,
+            oapp,
+            recv_lib,
+            recv_params,
+        )
+    else:
+        print("  [green][skip][/green] receive setConfig already correct")
+
+    if need_remote_eid:
         cast_send(
             side["rpc"],
             side["account"],
@@ -192,8 +233,10 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
             "setRemoteEid(uint32)",
             desired_remote_eid,
         )
+    else:
+        print("  [green][skip][/green] remoteEid already correct")
 
-    if desired_default_options and current_default_options.lower() != desired_default_options.lower():
+    if need_default_options:
         cast_send(
             side["rpc"],
             side["account"],
@@ -201,6 +244,8 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
             "setDefaultOptions(bytes)",
             desired_default_options,
         )
+    elif desired_default_options:
+        print("  [green][skip][/green] defaultOptions already correct")
 
     print("  [green]applied[/green]")
 

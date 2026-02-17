@@ -103,42 +103,64 @@ def main(
     l1_peer = address_to_peer_bytes32(l2_receiver)
     l2_peer = address_to_peer_bytes32(l1_messenger)
 
+    l1_current_peer = cast_call(l1["RPC_URL"], l1_messenger, "peers(uint32)(bytes32)", l1_eid, allow_fail=True)
+    l2_current_peer = cast_call(l2["RPC_URL"], l2_receiver, "peers(uint32)(bytes32)", l2_eid, allow_fail=True)
+
+    l1_needs_update = l1_current_peer.lower() != l1_peer.lower()
+    l2_needs_update = l2_current_peer.lower() != l2_peer.lower()
+
     summary = {
         "l1Messenger": l1_messenger,
         "l2Receiver": l2_receiver,
         "l1L2Eid": l1_eid,
         "l2L1Eid": l2_eid,
+        "l1CurrentPeer": l1_current_peer,
+        "l2CurrentPeer": l2_current_peer,
         "l1SetPeerArg": l1_peer,
         "l2SetPeerArg": l2_peer,
+        "l1NeedsUpdate": l1_needs_update,
+        "l2NeedsUpdate": l2_needs_update,
         "mode": "broadcast" if broadcast else "dry-run",
     }
 
     if broadcast:
-        print("[cyan][info][/cyan] wiring L1 messenger -> L2 receiver")
-        cast_send(
-            l1["RPC_URL"],
-            l1["ACCOUNT"],
-            l1_messenger,
-            "setPeer(uint32,bytes32)",
-            l1_eid,
-            l1_peer,
-        )
+        if l1_needs_update:
+            print("[cyan][info][/cyan] wiring L1 messenger -> L2 receiver")
+            cast_send(
+                l1["RPC_URL"],
+                l1["ACCOUNT"],
+                l1_messenger,
+                "setPeer(uint32,bytes32)",
+                l1_eid,
+                l1_peer,
+            )
+        else:
+            print("[green][skip][/green] L1 peer already correct")
 
-        print("[cyan][info][/cyan] wiring L2 receiver -> L1 messenger")
-        cast_send(
-            l2["RPC_URL"],
-            l2["ACCOUNT"],
-            l2_receiver,
-            "setPeer(uint32,bytes32)",
-            l2_eid,
-            l2_peer,
-        )
+        if l2_needs_update:
+            print("[cyan][info][/cyan] wiring L2 receiver -> L1 messenger")
+            cast_send(
+                l2["RPC_URL"],
+                l2["ACCOUNT"],
+                l2_receiver,
+                "setPeer(uint32,bytes32)",
+                l2_eid,
+                l2_peer,
+            )
+        else:
+            print("[green][skip][/green] L2 peer already correct")
 
-        print("[green][ok][/green] peers wired")
+        print("[green][ok][/green] peer wiring checked")
     else:
         print("[yellow][dry-run][/yellow] no onchain txs sent")
-        print(f"  L1 call: setPeer({l1_eid}, {l1_peer}) on {l1_messenger}")
-        print(f"  L2 call: setPeer({l2_eid}, {l2_peer}) on {l2_receiver}")
+        if l1_needs_update:
+            print(f"  L1 call: setPeer({l1_eid}, {l1_peer}) on {l1_messenger}")
+        else:
+            print("  L1 peer already correct")
+        if l2_needs_update:
+            print(f"  L2 call: setPeer({l2_eid}, {l2_peer}) on {l2_receiver}")
+        else:
+            print("  L2 peer already correct")
 
     if json_out:
         print(json.dumps(summary, indent=2))
