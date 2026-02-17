@@ -23,184 +23,222 @@ import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 import {OptionsBuilder} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/libs/OptionsBuilder.sol";
 
 /// @dev Deploy L1 components.
-///
-/// Safe defaults:
-/// - env-driven inputs only
-/// - use CLI --broadcast to send transactions onchain (without it, script simulates)
-///
-/// Required env vars:
-/// - TREASURY (address)
-/// - OUTPUT_JSON (string)
-///
-/// Optional env vars:
-/// - ADMIN (address, default broadcaster; deploy runner derives from ACCOUNT keystore)
-///
-/// Optional env vars:
-/// - VAULT_OWNER (address, default ADMIN)
-/// - PERMIT2 (address, default mainnet Permit2)
-/// - L2_RECIPIENT (address, default ADMIN)
-/// - LIQUIDITY_VAULT (address, if unset script deploys CollarLiquidityVault)
-/// - USDC_ASSET (address, required only when LIQUIDITY_VAULT unset)
-/// - EULER_ADAPTER (address, if unset script deploys EulerAdapterMock as placeholder)
-/// - LZ_ENDPOINT (address, if unset script deploys LZEndpointV2Mock)
-/// - L2_EID (uint32, default 0)
-/// - LZ_RECEIVE_GAS (uint256, if >0 sets messenger defaultOptions with executor receive option)
-/// - LZ_RECEIVE_VALUE (uint256, default 0; used with LZ_RECEIVE_GAS)
-/// - WETH_ASSET enables WETH collateral in CollarVault
-/// - WETH_STRIKE_SCALE (uint256, default 1e30) strike scale for WETH collateral
-/// - L2_WRAPPED_WETH_ASSET (address) required when WETH_ASSET is set; used in L1->L2 deposit messages
-/// - WETH_ASSET/WETH_SOCKET_* + WETH_MSG_GAS_LIMIT/WETH_PAYLOAD_SIZE for optional socket config
 contract DeployL1 is Script {
     using OptionsBuilder for bytes;
 
-    function run() external {
-        address admin = vm.envOr("ADMIN", msg.sender);
-        address treasury = vm.envAddress("TREASURY");
+    struct EnvConfig {
+        address admin;
+        address treasury;
+        address vaultOwner;
+        address permit2;
+        address l2Recipient;
+        address liquidityVault;
+        address usdcAsset;
+        address eulerAdapter;
+        address lzEndpoint;
+        uint32 l2Eid;
+        uint256 lzReceiveGas;
+        uint256 lzReceiveValue;
+        address wethAsset;
+        address wethSocketVault;
+        address wethSocketBridge;
+        address wethSocketConnector;
+        uint256 wethMsgGasLimit;
+        uint256 wethPayloadSize;
+        uint256 wethStrikeScale;
+        address l2WrappedWethAsset;
+        string outputJson;
+    }
 
-        address vaultOwner = vm.envOr("VAULT_OWNER", admin);
+    struct Deployed {
+        CollarVault vault;
+        address vaultImpl;
+        CollarVaultMessenger messenger;
+        CollarVaultFinalizeModule finalizeModule;
+        CollarVaultSettleModule settleModule;
+        address liquidityVault;
+        address eulerAdapter;
+        address lzEndpoint;
+        address wethAdapter;
+    }
+
+    function run() external {
+        EnvConfig memory cfg = _loadConfig();
+
+        vm.startBroadcast();
+        Deployed memory dep = _deploy(cfg);
+        vm.stopBroadcast();
+
+        _writeOutput(cfg, dep);
+        _logSummary(cfg, dep);
+    }
+
+    function _loadConfig() internal view returns (EnvConfig memory cfg) {
+        cfg.admin = vm.envOr("ADMIN", msg.sender);
+        cfg.treasury = vm.envAddress("TREASURY");
+        cfg.vaultOwner = vm.envOr("VAULT_OWNER", cfg.admin);
 
         address defaultPermit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-        address permit2 = vm.envOr("PERMIT2", defaultPermit2);
+        cfg.permit2 = vm.envOr("PERMIT2", defaultPermit2);
+        cfg.l2Recipient = vm.envOr("L2_RECIPIENT", cfg.admin);
 
-        address l2Recipient = vm.envOr("L2_RECIPIENT", admin);
+        cfg.liquidityVault = vm.envOr("LIQUIDITY_VAULT", address(0));
+        cfg.usdcAsset = vm.envOr("USDC_ASSET", address(0));
+        cfg.eulerAdapter = vm.envOr("EULER_ADAPTER", address(0));
+        cfg.lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
 
-        address liquidityVault = vm.envOr("LIQUIDITY_VAULT", address(0));
-        address usdcAsset = vm.envOr("USDC_ASSET", address(0));
+        cfg.l2Eid = uint32(vm.envOr("L2_EID", vm.envOr("REMOTE_EID", uint256(0))));
+        cfg.lzReceiveGas = vm.envOr("LZ_RECEIVE_GAS", uint256(0));
+        cfg.lzReceiveValue = vm.envOr("LZ_RECEIVE_VALUE", uint256(0));
 
-        // Placeholder adapter only; no Euler deploy/integration in this flow.
-        address eulerAdapter = vm.envOr("EULER_ADAPTER", address(0));
+        cfg.wethAsset = vm.envOr("WETH_ASSET", address(0));
+        cfg.wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
+        cfg.wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
+        cfg.wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
+        cfg.wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        cfg.wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
+        cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
+        cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
 
-        address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
-        uint32 l2Eid = uint32(vm.envOr("L2_EID", vm.envOr("REMOTE_EID", uint256(0))));
-        uint256 lzReceiveGas = vm.envOr("LZ_RECEIVE_GAS", uint256(0));
-        uint256 lzReceiveValue = vm.envOr("LZ_RECEIVE_VALUE", uint256(0));
+        cfg.outputJson = vm.envString("OUTPUT_JSON");
+    }
 
-        address wethAsset = vm.envOr("WETH_ASSET", address(0));
-        address wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
-        address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
-        address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
-        uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
-        uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
-        uint256 wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
-        address l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
+    function _deploy(EnvConfig memory cfg) internal returns (Deployed memory dep) {
+        dep.liquidityVault = _ensureLiquidityVault(cfg);
+        dep.eulerAdapter = _ensureEulerAdapter(cfg);
+        dep.lzEndpoint = _ensureLzEndpoint(cfg);
 
-        // Always execute the flow in broadcast context so msg.sender is the configured
-        // deployer/account even during dry-run simulations (no --broadcast).
-        vm.startBroadcast();
+        (dep.vault, dep.vaultImpl) = _deployVault(cfg, dep.liquidityVault, dep.eulerAdapter);
+        dep.messenger = _deployMessenger(cfg, dep.vault, dep.lzEndpoint);
 
-        if (liquidityVault == address(0)) {
-            if (usdcAsset == address(0)) revert("USDC_ASSET required when LIQUIDITY_VAULT is unset");
-            CollarLiquidityVault lv =
-                new CollarLiquidityVault(IERC20(usdcAsset), "Collar Liquidity Vault", "cLV", admin);
-            liquidityVault = address(lv);
+        dep.finalizeModule = new CollarVaultFinalizeModule();
+        dep.settleModule = new CollarVaultSettleModule();
+
+        dep.vault.setLZMessenger(ICollarVaultMessenger(address(dep.messenger)));
+        dep.vault.setFinalizeModule(address(dep.finalizeModule));
+        dep.vault.setSettleModule(address(dep.settleModule));
+
+        if (cfg.wethAsset != address(0)) {
+            if (cfg.l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
+            dep.vault.setCollateralConfig(cfg.wethAsset, true, cfg.wethStrikeScale, cfg.l2WrappedWethAsset);
         }
 
-        if (eulerAdapter == address(0)) {
-            eulerAdapter = address(new EulerAdapterMock());
-        }
+        dep.wethAdapter = _maybeDeployWethAdapter(cfg, dep.vault);
+    }
 
-        if (lzEndpoint == address(0)) {
-            lzEndpoint = address(new LZEndpointV2Mock());
-        }
+    function _ensureLiquidityVault(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.liquidityVault != address(0)) return cfg.liquidityVault;
+        if (cfg.usdcAsset == address(0)) revert("USDC_ASSET required when LIQUIDITY_VAULT is unset");
+        return address(new CollarLiquidityVault(IERC20(cfg.usdcAsset), "Collar Liquidity Vault", "cLV", cfg.admin));
+    }
 
-        // Deploy implementation + atomically initialize proxy in constructor calldata.
-        address vaultImpl = address(new CollarVault());
+    function _ensureEulerAdapter(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.eulerAdapter != address(0)) return cfg.eulerAdapter;
+        return address(new EulerAdapterMock());
+    }
+
+    function _ensureLzEndpoint(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.lzEndpoint != address(0)) return cfg.lzEndpoint;
+        return address(new LZEndpointV2Mock());
+    }
+
+    function _deployVault(EnvConfig memory cfg, address liquidityVault, address eulerAdapter)
+        internal
+        returns (CollarVault vault, address vaultImpl)
+    {
+        vaultImpl = address(new CollarVault());
         bytes memory initData = abi.encodeCall(
             CollarVault.initialize,
             (
-                vaultOwner,
+                cfg.vaultOwner,
                 ILiquidityVault(liquidityVault),
                 IEulerAdapter(eulerAdapter),
-                IAllowanceTransfer(permit2),
-                l2Recipient,
-                treasury
+                IAllowanceTransfer(cfg.permit2),
+                cfg.l2Recipient,
+                cfg.treasury
             )
         );
         address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
-        CollarVault vault = CollarVault(payable(vaultProxy));
+        vault = CollarVault(payable(vaultProxy));
+    }
 
-        CollarVaultMessenger messenger = new CollarVaultMessenger(admin, address(vault), lzEndpoint, l2Eid);
-        if (lzReceiveGas > 0) {
+    function _deployMessenger(EnvConfig memory cfg, CollarVault vault, address lzEndpoint)
+        internal
+        returns (CollarVaultMessenger messenger)
+    {
+        messenger = new CollarVaultMessenger(cfg.admin, address(vault), lzEndpoint, cfg.l2Eid);
+        if (cfg.lzReceiveGas > 0) {
             bytes memory lzOptions =
-                OptionsBuilder.newOptions().addExecutorLzReceiveOption(uint128(lzReceiveGas), uint128(lzReceiveValue));
+                OptionsBuilder.newOptions().addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
             messenger.setDefaultOptions(lzOptions);
         }
+    }
 
-        CollarVaultFinalizeModule finalizeModule = new CollarVaultFinalizeModule();
-        CollarVaultSettleModule settleModule = new CollarVaultSettleModule();
-        vault.setLZMessenger(ICollarVaultMessenger(address(messenger)));
-        vault.setFinalizeModule(address(finalizeModule));
-        vault.setSettleModule(address(settleModule));
+    function _maybeDeployWethAdapter(EnvConfig memory cfg, CollarVault vault) internal returns (address) {
+        if (cfg.wethAsset == address(0) || cfg.wethSocketConnector == address(0)) return address(0);
 
-        if (wethAsset != address(0)) {
-            if (l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
-            vault.setCollateralConfig(wethAsset, true, wethStrikeScale, l2WrappedWethAsset);
+        SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
+        if (cfg.wethSocketVault != address(0)) {
+            bridgeType = SocketBridgeAdapter.BridgeType.OLD;
+        } else if (cfg.wethSocketBridge != address(0)) {
+            bridgeType = SocketBridgeAdapter.BridgeType.NEW;
         }
 
-        address wethAdapter = address(0);
-        if (wethAsset != address(0) && wethSocketConnector != address(0)) {
-            SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
-            if (wethSocketVault != address(0)) {
-                bridgeType = SocketBridgeAdapter.BridgeType.OLD;
-            } else if (wethSocketBridge != address(0)) {
-                bridgeType = SocketBridgeAdapter.BridgeType.NEW;
-            }
+        if (bridgeType == SocketBridgeAdapter.BridgeType.NONE) return address(0);
 
-            if (bridgeType != SocketBridgeAdapter.BridgeType.NONE) {
-                SocketBridgeAdapter adapter = new SocketBridgeAdapter(
-                    bridgeType,
-                    wethSocketBridge,
-                    wethSocketVault,
-                    wethSocketConnector,
-                    wethMsgGasLimit,
-                    wethPayloadSize,
-                    "",
-                    ""
-                );
-                wethAdapter = address(adapter);
-                vault.setSocketVaultConfig(wethAsset, IBridgeAdapter(wethAdapter));
-            }
-        }
+        SocketBridgeAdapter adapter = new SocketBridgeAdapter(
+            bridgeType,
+            cfg.wethSocketBridge,
+            cfg.wethSocketVault,
+            cfg.wethSocketConnector,
+            cfg.wethMsgGasLimit,
+            cfg.wethPayloadSize,
+            "",
+            ""
+        );
+        vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
+        return address(adapter);
+    }
 
-        vm.stopBroadcast();
-
-        string memory outPath = vm.envString("OUTPUT_JSON");
-
+    function _writeOutput(EnvConfig memory cfg, Deployed memory dep) internal {
         string memory json;
-        json = vm.serializeAddress("addrs", "l1Vault", address(vault));
-        json = vm.serializeAddress("addrs", "l1VaultProxy", address(vault));
-        json = vm.serializeAddress("addrs", "l1VaultImplementation", vaultImpl);
-        json = vm.serializeAddress("addrs", "l1Messenger", address(messenger));
-        json = vm.serializeAddress("addrs", "l1FinalizeModule", address(finalizeModule));
-        json = vm.serializeAddress("addrs", "l1SettleModule", address(settleModule));
-        json = vm.serializeAddress("addrs", "l1LiquidityVault", liquidityVault);
-        json = vm.serializeAddress("addrs", "l1EulerAdapter", eulerAdapter);
-        json = vm.serializeAddress("addrs", "l1Permit2", permit2);
-        json = vm.serializeAddress("addrs", "l1WethAdapter", wethAdapter);
-        vm.writeJson(json, outPath);
+        json = vm.serializeAddress("addrs", "l1Vault", address(dep.vault));
+        json = vm.serializeAddress("addrs", "l1VaultProxy", address(dep.vault));
+        json = vm.serializeAddress("addrs", "l1VaultImplementation", dep.vaultImpl);
+        json = vm.serializeAddress("addrs", "l1Messenger", address(dep.messenger));
+        json = vm.serializeAddress("addrs", "l1FinalizeModule", address(dep.finalizeModule));
+        json = vm.serializeAddress("addrs", "l1SettleModule", address(dep.settleModule));
+        json = vm.serializeAddress("addrs", "l1LiquidityVault", dep.liquidityVault);
+        json = vm.serializeAddress("addrs", "l1EulerAdapter", dep.eulerAdapter);
+        json = vm.serializeAddress("addrs", "l1Permit2", cfg.permit2);
+        json = vm.serializeAddress("addrs", "l1WethAdapter", dep.wethAdapter);
+        vm.writeJson(json, cfg.outputJson);
+    }
 
-        console2.log("L1 vault proxy", address(vault));
-        console2.log("L1 vault implementation", vaultImpl);
-        console2.log("L1 messenger", address(messenger));
-        console2.log("L1 finalizeModule", address(finalizeModule));
-        console2.log("L1 settleModule", address(settleModule));
-        console2.log("L1 liquidityVault", liquidityVault);
-        console2.log("L1 eulerAdapter placeholder", eulerAdapter);
-        console2.log("L1 permit2", permit2);
-        if (wethAsset != address(0)) {
-            console2.log("L1 collateral enabled", wethAsset);
-            console2.log("L1 collateral strike scale", wethStrikeScale);
-            console2.log("L1->L2 message asset", l2WrappedWethAsset);
+    function _logSummary(EnvConfig memory cfg, Deployed memory dep) internal view {
+        console2.log("L1 vault proxy", address(dep.vault));
+        console2.log("L1 vault implementation", dep.vaultImpl);
+        console2.log("L1 messenger", address(dep.messenger));
+        console2.log("L1 finalizeModule", address(dep.finalizeModule));
+        console2.log("L1 settleModule", address(dep.settleModule));
+        console2.log("L1 liquidityVault", dep.liquidityVault);
+        console2.log("L1 eulerAdapter placeholder", dep.eulerAdapter);
+        console2.log("L1 permit2", cfg.permit2);
+
+        if (cfg.wethAsset != address(0)) {
+            console2.log("L1 collateral enabled", cfg.wethAsset);
+            console2.log("L1 collateral strike scale", cfg.wethStrikeScale);
+            console2.log("L1->L2 message asset", cfg.l2WrappedWethAsset);
         }
-        if (wethAdapter != address(0)) {
-            console2.log("L1 WETH adapter", wethAdapter);
+        if (dep.wethAdapter != address(0)) {
+            console2.log("L1 WETH adapter", dep.wethAdapter);
         }
-        if (lzReceiveGas > 0) {
-            console2.log("L1 messenger defaultOptions receive gas", lzReceiveGas);
-            console2.log("L1 messenger defaultOptions receive value", lzReceiveValue);
+        if (cfg.lzReceiveGas > 0) {
+            console2.log("L1 messenger defaultOptions receive gas", cfg.lzReceiveGas);
+            console2.log("L1 messenger defaultOptions receive value", cfg.lzReceiveValue);
         } else {
             console2.log("L1 messenger defaultOptions not set (LZ_RECEIVE_GAS=0)");
         }
-        console2.log("Wrote", outPath);
+        console2.log("Wrote", cfg.outputJson);
     }
 }
