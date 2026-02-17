@@ -10,82 +10,12 @@ from rich import print
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
+from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must  # noqa: E402
+from py_lib.deployments import default_output_json, read_addr_from_output  # noqa: E402
+from py_lib.envs import resolve_l1_l2_env_paths  # noqa: E402
+from py_lib.l2_discovery import resolve_l2_wrapped_asset_from_tsa  # noqa: E402
 
 app = typer.Typer(add_completion=False)
-
-
-def _resolve_env_paths(env_profile: str, l1_env_file: Path, l2_env_file: Path) -> tuple[Path, Path]:
-    profile = env_profile.strip().lower()
-    if profile and l1_env_file == (ROOT_DIR / ".env.l1.testnet"):
-        l1_env_file = ROOT_DIR / f".env.l1.{profile}"
-    if profile and l2_env_file == (ROOT_DIR / ".env.l2.testnet"):
-        l2_env_file = ROOT_DIR / f".env.l2.{profile}"
-    return l1_env_file, l2_env_file
-
-
-def _read_addr_from_output(path_value: str, key: str) -> str:
-    path = Path(path_value)
-    if not path.is_absolute():
-        path = ROOT_DIR / path
-    if not path.is_file():
-        raise FileNotFoundError(f"deployment output not found: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    addrs = data.get("addrs", data)
-    val = addrs.get(key)
-    if not val:
-        raise ValueError(f"missing {key} in deployment output: {path}")
-    return str(val)
-
-
-def _default_output_json(rpc_url: str) -> str:
-    chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
-    return str(ROOT_DIR / "deployments" / chain_id / "l1.json")
-
-
-def _receiver_from_broadcast(rpc_url: str) -> str:
-    chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
-    run_path = ROOT_DIR / "broadcast" / "DeployL2.s.sol" / str(chain_id) / "run-latest.json"
-    if not run_path.is_file():
-        raise FileNotFoundError(f"missing L2 broadcast artifact: {run_path}")
-    data = json.loads(run_path.read_text(encoding="utf-8"))
-    for tx in data.get("transactions", []):
-        if tx.get("transactionType") == "CREATE" and tx.get("contractName") == "CollarTSAReceiver":
-            addr = tx.get("contractAddress")
-            if addr:
-                return str(addr)
-    raise ValueError(f"CollarTSAReceiver CREATE not found in {run_path}")
-
-
-def _resolve_l2_receiver(l2: dict[str, str]) -> str:
-    if l2.get("L2_RECEIVER"):
-        return str(l2["L2_RECEIVER"])
-
-    output_json = l2.get("OUTPUT_JSON")
-    if output_json:
-        out_path = Path(output_json)
-        if not out_path.is_absolute():
-            out_path = ROOT_DIR / out_path
-        if out_path.is_file():
-            data = json.loads(out_path.read_text(encoding="utf-8"))
-            addrs = data.get("addrs", data)
-            if addrs.get("l2Receiver"):
-                return str(addrs["l2Receiver"])
-
-    return _receiver_from_broadcast(must(l2, "RPC_URL"))
-
-
-def _resolve_l2_wrapped_asset_from_tsa(l2_env_file: Path) -> str:
-    l2 = load_env(l2_env_file)
-    rpc_url = must(l2, "RPC_URL")
-    receiver = _resolve_l2_receiver(l2)
-
-    tsa = cast_call(rpc_url, receiver, "tsa()(address)")
-    base = cast_call(rpc_url, tsa, "getBaseTSAAddresses()(address,address,address,address,address,address,address)")
-    lines = [ln.strip() for ln in base.splitlines() if ln.strip()]
-    if len(lines) < 3:
-        raise ValueError("failed to parse getBaseTSAAddresses() output")
-    return lines[2]
 
 
 @app.command()
@@ -99,7 +29,7 @@ def main(
     broadcast: bool = typer.Option(False, help="Send onchain tx"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    l1_env_file, l2_env_file = _resolve_env_paths(env_profile, l1_env_file, l2_env_file)
+    l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
     env = load_env(l1_env_file)
 
     rpc_url = must(env, "RPC_URL")
@@ -108,13 +38,13 @@ def main(
     if not vault:
         vault = env.get("L1_VAULT", "")
     if not vault:
-        output_json = env.get("OUTPUT_JSON") or _default_output_json(rpc_url)
-        vault = _read_addr_from_output(output_json, "l1Vault")
+        output_json = env.get("OUTPUT_JSON") or default_output_json(rpc_url, "l1")
+        vault = read_addr_from_output(output_json, "l1Vault")
 
     l1_asset = l1_asset or env.get("WETH_ASSET", "")
     l2_asset = l2_asset or env.get("L2_WRAPPED_WETH_ASSET", "")
     if not l2_asset:
-        l2_asset = _resolve_l2_wrapped_asset_from_tsa(l2_env_file)
+        l2_asset = resolve_l2_wrapped_asset_from_tsa(l2_env_file)
         print(f"[cyan][info][/cyan] resolved L2 asset from TSA: {l2_asset}")
     if not l1_asset or not l2_asset:
         raise ValueError("set --l1-asset and provide --l2-asset or L2 TSA must be resolvable")

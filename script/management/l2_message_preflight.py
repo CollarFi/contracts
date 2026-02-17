@@ -13,6 +13,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, load_env, must, run  # noqa: E402
+from py_lib.deployments import resolve_addr  # noqa: E402
+from py_lib.envs import resolve_l2_env_path  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
@@ -114,11 +116,11 @@ def main(
     lookback_blocks: int = typer.Option(50000, "--lookback-blocks", min=1),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    l2_env_file = _resolve_env_path(env_profile, l2_env_file)
+    l2_env_file = resolve_l2_env_path(env_profile, l2_env_file)
     env = load_env(l2_env_file)
 
     rpc_url = must(env, "RPC_URL")
-    receiver_addr = receiver or _resolve_receiver_addr(env)
+    receiver_addr = receiver or resolve_addr(env, "L2_RECEIVER", "l2Receiver", "l2")
 
     latest = int(run(["cast", "block-number", "--rpc-url", rpc_url]))
     from_block = max(0, latest - lookback_blocks)

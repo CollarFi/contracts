@@ -13,6 +13,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
+from py_lib.deployments import resolve_addr  # noqa: E402
+from py_lib.envs import resolve_l2_env_path  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
@@ -124,12 +126,12 @@ def main(
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
-    l2_env_file = _resolve_env_path(env_profile, l2_env_file)
+    l2_env_file = resolve_l2_env_path(env_profile, l2_env_file)
     env = load_env(l2_env_file)
 
     rpc_url = must(env, "RPC_URL")
     account = env.get("ACCOUNT", "")
-    receiver_addr = receiver or _resolve_receiver_addr(env)
+    receiver_addr = receiver or resolve_addr(env, "L2_RECEIVER", "l2Receiver", "l2")
     if broadcast and not account:
         raise ValueError("missing ACCOUNT in env for --broadcast")
 
