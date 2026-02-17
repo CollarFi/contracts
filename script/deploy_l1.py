@@ -7,23 +7,52 @@ from pathlib import Path
 import typer
 from rich import print
 
-from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
+from lz_harness.common import ROOT_DIR, cast_call, forge_script, load_env, must, require_cmd, resolve_output_json, run
 
 app = typer.Typer(add_completion=False)
+
+
+def _resolve_env_paths(env_profile: str, l1_env_file: Path, l2_env_file: Path) -> tuple[Path, Path]:
+    profile = env_profile.strip().lower()
+    if profile and l1_env_file == (ROOT_DIR / ".env.l1.testnet"):
+        l1_env_file = ROOT_DIR / f".env.l1.{profile}"
+    if profile and l2_env_file == (ROOT_DIR / ".env.l2.testnet"):
+        l2_env_file = ROOT_DIR / f".env.l2.{profile}"
+    return l1_env_file, l2_env_file
+
+
+def _resolve_l2_wrapped_asset_from_tsa(l2_env_file: Path) -> str:
+    l2 = load_env(l2_env_file)
+    rpc_url = must(l2, "RPC_URL")
+
+    receiver = l2.get("L2_RECEIVER")
+    if not receiver:
+        raise ValueError("L2_RECEIVER required in L2 env to auto-resolve wrapped asset")
+
+    tsa = cast_call(rpc_url, receiver, "tsa()(address)")
+    base = cast_call(
+        rpc_url,
+        tsa,
+        "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+    )
+    lines = [ln.strip() for ln in base.splitlines() if ln.strip()]
+    if len(lines) < 3:
+        raise ValueError("failed to parse getBaseTSAAddresses() output from TSA")
+    return lines[2]
 
 
 @app.command()
 def main(
     l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
-    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env>."),
+    l2_env_file: Path = typer.Option(ROOT_DIR / ".env.l2.testnet", "--l2-env-file", help="L2 env file used for TSA lookup"),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env> and .env.l2.<env>."),
     broadcast: bool = typer.Option(False, help="Execute onchain txs (default: dry-run/simulation)"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
     require_cmd("forge")
     require_cmd("cast")
 
-    if env_profile and l1_env_file == (ROOT_DIR / ".env.l1.testnet"):
-        l1_env_file = ROOT_DIR / f".env.l1.{env_profile.strip().lower()}"
+    l1_env_file, l2_env_file = _resolve_env_paths(env_profile, l1_env_file, l2_env_file)
 
     l1 = load_env(l1_env_file)
 
@@ -53,7 +82,11 @@ def main(
     }
 
     if l1.get("WETH_ASSET") and not l1.get("L2_WRAPPED_WETH_ASSET"):
-        raise ValueError("L2_WRAPPED_WETH_ASSET is required when WETH_ASSET is set")
+        l1["L2_WRAPPED_WETH_ASSET"] = _resolve_l2_wrapped_asset_from_tsa(l2_env_file)
+        print(
+            "[cyan][info][/cyan] resolved L2_WRAPPED_WETH_ASSET from L2 TSA:",
+            l1["L2_WRAPPED_WETH_ASSET"],
+        )
 
     for opt in (
         "VAULT_OWNER",
@@ -93,6 +126,9 @@ def main(
                     "broadcast": broadcast,
                     "account": l1["ACCOUNT"],
                     "envProfile": (env_profile.strip().lower() or None),
+                    "l1Env": str(l1_env_file),
+                    "l2Env": str(l2_env_file),
+                    "l2WrappedWethAsset": l1.get("L2_WRAPPED_WETH_ASSET"),
                 },
                 indent=2,
             )
