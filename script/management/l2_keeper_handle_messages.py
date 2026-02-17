@@ -204,9 +204,15 @@ def main(
             if attempts >= max_per_tick:
                 break
 
-        next_block = latest + 1
-        state["nextBlock"] = next_block
-        _save_state(state_file, state)
+        # Advance cursor only when safe:
+        # - dry-run: never advance (no onchain effects)
+        # - broadcast: advance only if all attempted txs were sent successfully
+        advanced = False
+        if broadcast and attempts == sent:
+            next_block = latest + 1
+            state["nextBlock"] = next_block
+            _save_state(state_file, state)
+            advanced = True
 
         return {
             "fromBlock": scan_from,
@@ -214,6 +220,8 @@ def main(
             "logs": len(logs),
             "attempted": attempts,
             "sent": sent,
+            "advancedCursor": advanced,
+            "nextBlock": next_block,
         }
 
     if once:
@@ -241,7 +249,8 @@ def main(
             if result["attempted"]:
                 print(
                     f"[cyan][tick][/cyan] blocks {result['fromBlock']}..{result['toBlock']} "
-                    f"logs={result['logs']} attempted={result['attempted']} sent={result['sent']}"
+                    f"logs={result['logs']} attempted={result['attempted']} sent={result['sent']} "
+                    f"advanced={result['advancedCursor']}"
                 )
                 for item in handled[-result["attempted"] :]:
                     print(f"  - {item['action']} loan={item['loanId']} guid={item['guid']} -> {item['status']}")
