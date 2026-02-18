@@ -23,6 +23,15 @@ import {IOptionRiskVerifier} from "../interfaces/IOptionRiskVerifier.sol";
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
 
 contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
+    struct ActiveCollarPosition {
+        uint96 callSubId;
+        uint64 callExpiry;
+        uint256 callStrike;
+        uint256 amount;
+        uint96 putSubId;
+        uint64 putExpiry;
+        uint256 putStrike;
+    }
     using IntLib for int256;
     using SafeCast for int256;
     using SafeCast for uint256;
@@ -91,51 +100,143 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         if (loan.borrower == address(0) || loan.consumed) {
             revert CTSA_InvalidRfqTradeDetails();
         }
-        uint64 expectedMaturity = loan.rolloverPending ? loan.rolloverMaturity : loan.maturity;
         uint64 expectedDeadline = loan.rolloverPending ? loan.rolloverDeadline : loan.deadline;
-        uint256 expectedMinCallStrike = loan.rolloverPending ? loan.rolloverMinCallStrike : loan.minCallStrike;
-        uint256 expectedMaxPutStrike = loan.rolloverPending ? loan.rolloverMaxPutStrike : loan.maxPutStrike;
+        if (expectedDeadline != 0 && block.timestamp > expectedDeadline) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        int256 expectedC;
+        int256 cashDelta;
+
+        (uint256 shortCalls, uint256 baseBalance, int256 cashBalance) = _getSubAccountStats(wrappedDepositAsset, cash);
+
+        if (!loan.rolloverPending) {
+            uint64 expectedMaturity = loan.maturity;
+            uint256 expectedMinCallStrike = loan.minCallStrike;
+            uint256 expectedMaxPutStrike = loan.maxPutStrike;
+
+            if (expectedMaturity != 0 && parsed.callExpiry != expectedMaturity) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+            if (expectedMinCallStrike != 0 && parsed.callStrike < expectedMinCallStrike) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+            if (expectedMaxPutStrike != 0 && parsed.putStrike > expectedMaxPutStrike) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+
+            int256 callAmount = parsed.isTaker ? -parsed.callTrade.amount : parsed.callTrade.amount;
+            int256 putAmount = parsed.isTaker ? -parsed.putTrade.amount : parsed.putTrade.amount;
+
+            if (callAmount >= 0) {
+                revert CTSA_CanOnlyOpenShortCalls();
+            }
+            if (putAmount <= 0) {
+                revert CTSA_OnlyLongPutsAllowed();
+            }
+            if (callAmount.abs() != putAmount.abs()) {
+                revert CTSA_InvalidTradeAmount();
+            }
+            if (shortCalls + callAmount.abs() > baseBalance) {
+                revert CTSA_SellingTooManyCalls();
+            }
+
+            _validateCallDetails(parsed.callExpiry, parsed.callStrike, parsed.callTrade.price);
+            _validatePutDetails(parsed.putExpiry, parsed.putStrike, parsed.putTrade.price);
+
+            expectedC =
+            -(parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
+                    + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount));
+            cashDelta = parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
+                + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount);
+        } else {
+            if (parsed.optionTrades.length != 4) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+
+            ActiveCollarPosition memory activePosition = _getActiveCollarPosition();
+            uint256 newNotional = loan.collateralAmount;
+            if (newNotional == 0) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+
+            bool hasCloseCall;
+            bool hasClosePut;
+            bool hasOpenCall;
+            bool hasOpenPut;
+
+            for (uint256 i = 0; i < parsed.optionTrades.length; i++) {
+                IRfqModule.TradeData memory trade = parsed.optionTrades[i];
+                (uint256 expiry, uint256 strike, bool isCall) = OptionEncoding.fromSubId(trade.subId.toUint96());
+                int256 takerAmount = parsed.isTaker ? -trade.amount : trade.amount;
+
+                expectedC += trade.price.toInt256().multiplyDecimal(takerAmount);
+                cashDelta += trade.price.toInt256().multiplyDecimal(trade.amount);
+
+                if (expiry == loan.maturity) {
+                    if (isCall) {
+                        if (hasCloseCall || takerAmount <= 0 || uint96(trade.subId) != activePosition.callSubId) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (takerAmount.abs() != activePosition.amount) {
+                            revert CTSA_InvalidTradeAmount();
+                        }
+                        hasCloseCall = true;
+                    } else {
+                        if (hasClosePut || takerAmount >= 0 || uint96(trade.subId) != activePosition.putSubId) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (takerAmount.abs() != activePosition.amount) {
+                            revert CTSA_InvalidTradeAmount();
+                        }
+                        hasClosePut = true;
+                    }
+                } else if (expiry == loan.rolloverMaturity) {
+                    if (isCall) {
+                        if (hasOpenCall || takerAmount >= 0) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (loan.rolloverMinCallStrike != 0 && strike < loan.rolloverMinCallStrike) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (takerAmount.abs() != newNotional) {
+                            revert CTSA_InvalidTradeAmount();
+                        }
+                        _validateCallDetails(expiry, strike, trade.price);
+                        hasOpenCall = true;
+                    } else {
+                        if (hasOpenPut || takerAmount <= 0) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (loan.rolloverMaxPutStrike != 0 && strike > loan.rolloverMaxPutStrike) {
+                            revert CTSA_InvalidRfqTradeDetails();
+                        }
+                        if (takerAmount.abs() != newNotional) {
+                            revert CTSA_InvalidTradeAmount();
+                        }
+                        _validatePutDetails(expiry, strike, trade.price);
+                        hasOpenPut = true;
+                    }
+                } else {
+                    revert CTSA_InvalidRfqTradeDetails();
+                }
+            }
+
+            if (!hasCloseCall || !hasClosePut || !hasOpenCall || !hasOpenPut) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+            if (shortCalls < activePosition.amount) {
+                revert CTSA_InvalidRfqTradeDetails();
+            }
+            if (shortCalls - activePosition.amount + newNotional > baseBalance) {
+                revert CTSA_SellingTooManyCalls();
+            }
+        }
+
         uint256 fixedInterest = loan.rolloverPending ? loan.rolloverFixedInterest : loan.fixedInterest;
         uint256 minNetInterest = loan.rolloverPending ? loan.rolloverMinNetInterest : loan.minNetInterest;
         uint256 maxNegativeC = loan.rolloverPending ? loan.rolloverMaxNegativeC : loan.maxNegativeC;
 
-        if (expectedDeadline != 0 && block.timestamp > expectedDeadline) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (expectedMaturity != 0 && parsed.callExpiry != expectedMaturity) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (expectedMinCallStrike != 0 && parsed.callStrike < expectedMinCallStrike) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (expectedMaxPutStrike != 0 && parsed.putStrike > expectedMaxPutStrike) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-
-        int256 callAmount = parsed.isTaker ? -parsed.callTrade.amount : parsed.callTrade.amount;
-        int256 putAmount = parsed.isTaker ? -parsed.putTrade.amount : parsed.putTrade.amount;
-
-        if (callAmount >= 0) {
-            revert CTSA_CanOnlyOpenShortCalls();
-        }
-        if (putAmount <= 0) {
-            revert CTSA_OnlyLongPutsAllowed();
-        }
-        if (callAmount.abs() != putAmount.abs()) {
-            revert CTSA_InvalidTradeAmount();
-        }
-
-        (uint256 shortCalls, uint256 baseBalance, int256 cashBalance) = _getSubAccountStats(wrappedDepositAsset, cash);
-        if (shortCalls + callAmount.abs() > baseBalance) {
-            revert CTSA_SellingTooManyCalls();
-        }
-
-        _validateCallDetails(parsed.callExpiry, parsed.callStrike, parsed.callTrade.price);
-        _validatePutDetails(parsed.putExpiry, parsed.putStrike, parsed.putTrade.price);
-
-        int256 expectedC =
-            -(parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
-                + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount));
         int256 expectedTotal = int256(fixedInterest) + expectedC;
         if (expectedTotal < int256(minNetInterest)) {
             revert CTSA_InsufficientCash();
@@ -145,8 +246,6 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
             revert CTSA_InsufficientCash();
         }
 
-        int256 cashDelta = parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
-            + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount);
         int256 postTradeCash = cashBalance + (parsed.isTaker ? cashDelta : -cashDelta);
         if (postTradeCash < $.params.maxNegCash) {
             revert CTSA_InsufficientCash();
@@ -236,6 +335,52 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
                     optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
                 })
             );
+    }
+
+    function _getActiveCollarPosition() private view returns (ActiveCollarPosition memory position) {
+        CollarTSAStorage storage $ = _getCollarTSAStorage();
+
+        uint256 accountId = ICollarTSA(address(this)).subAccount();
+        (address subAccounts,,,,,,) = ICollarTSA(address(this)).getBaseTSAAddresses();
+        ISubAccounts.AssetBalance[] memory balances = ISubAccounts(subAccounts).getAccountBalances(accountId);
+
+        bool hasShortCall;
+        bool hasLongPut;
+
+        for (uint256 i = 0; i < balances.length; i++) {
+            if (balances[i].asset != $.optionAsset || balances[i].balance == 0) {
+                continue;
+            }
+
+            (uint256 expiry, uint256 strike, bool isCall) = OptionEncoding.fromSubId(uint96(balances[i].subId));
+            if (balances[i].balance < 0) {
+                if (!isCall || hasShortCall) {
+                    revert CTSA_InvalidOptionBalance();
+                }
+                hasShortCall = true;
+                position.callSubId = uint96(balances[i].subId);
+                position.callExpiry = uint64(expiry);
+                position.callStrike = strike;
+                position.amount = balances[i].balance.abs();
+            } else {
+                if (isCall || hasLongPut) {
+                    revert CTSA_InvalidOptionBalance();
+                }
+                hasLongPut = true;
+                position.putSubId = uint96(balances[i].subId);
+                position.putExpiry = uint64(expiry);
+                position.putStrike = strike;
+                uint256 longPutAmount = balances[i].balance.toUint256();
+                if (position.amount != 0 && position.amount != longPutAmount) {
+                    revert CTSA_InvalidOptionBalance();
+                }
+                position.amount = longPutAmount;
+            }
+        }
+
+        if (!hasShortCall || !hasLongPut || position.callExpiry != position.putExpiry || position.amount == 0) {
+            revert CTSA_InvalidOptionBalance();
+        }
     }
 
     function _getSubAccountStats(address depositAsset, address cash)

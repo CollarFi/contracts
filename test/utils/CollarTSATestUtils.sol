@@ -120,7 +120,7 @@ contract CollarTSATestUtils is TSATestUtils {
 
     function _seedLoan(uint256 loanId, uint64 maturity) internal {
         // Generous collateral amount for tests; TSA enforces that spot sells don't exceed this.
-        loanStore.recordCollateral(loanId, address(markets[MARKET].base), 1_000_000e18);
+        loanStore.recordCollateral(loanId, address(markets[MARKET].base), 1e18);
         loanStore.recordMandate(
             loanId,
             address(0xB0B0),
@@ -129,7 +129,7 @@ contract CollarTSATestUtils is TSATestUtils {
             0,
             0,
             0,
-            0,
+            100e18,
             type(uint256).max,
             maturity,
             uint64(block.timestamp + 1 days)
