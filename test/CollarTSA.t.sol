@@ -307,13 +307,13 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[2] = IRfqModule.TradeData({
             asset: address(0), // overwritten by caller
             subId: OptionEncoding.toSubId(newExpiry, 2200e18, true),
-            price: 110e18,
+            price: 150e18,
             amount: 1e18
         });
         trades[3] = IRfqModule.TradeData({
             asset: address(0), // overwritten by caller
             subId: OptionEncoding.toSubId(newExpiry, 1800e18, false),
-            price: 2e18,
+            price: 50e18,
             amount: -1e18
         });
     }
@@ -354,7 +354,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, newExpiry);
 
-        _openCollarPosition(1e18);
+        _openCollarPosition(1e18, oldExpiry);
         _prepareRollover(1, oldExpiry, newExpiry, 10e18);
 
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
@@ -375,7 +375,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, newExpiry);
 
-        _openCollarPosition(1e18);
+        _openCollarPosition(1e18, oldExpiry);
         _prepareRollover(1, oldExpiry, newExpiry, 10e18);
 
         IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](3);
@@ -385,7 +385,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[1] = full[2];
         trades[2] = full[3];
 
-        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
+        vm.expectRevert(bytes4(keccak256("CTSA_InvalidRfqTradeLength()")));
         _signRolloverRfq(1, trades);
     }
 
@@ -401,7 +401,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, newExpiry);
 
-        _openCollarPosition(1e18);
+        _openCollarPosition(1e18, oldExpiry);
         _prepareRollover(1, oldExpiry, newExpiry, 10e18);
 
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
@@ -424,7 +424,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, newExpiry);
 
-        _openCollarPosition(1e18);
+        _openCollarPosition(1e18, oldExpiry);
         _prepareRollover(1, oldExpiry, newExpiry, 10e18);
 
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
@@ -447,7 +447,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, newExpiry);
 
-        _openCollarPosition(1e18);
+        _openCollarPosition(1e18, oldExpiry);
         _prepareRollover(1, oldExpiry, newExpiry, 100e18);
 
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
@@ -457,8 +457,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _signRolloverRfq(1, trades);
     }
 
-    function _openCollarPosition(int256 amount) internal {
-        uint64 expiry = uint64(block.timestamp + 7 days);
+    function _openCollarPosition(int256 amount, uint64 expiry) internal {
         _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, expiry);
 
