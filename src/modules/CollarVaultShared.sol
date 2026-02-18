@@ -75,7 +75,7 @@ library CollarVaultShared {
         uint64 newMaturity;
         uint256 minCallStrike;
         uint256 maxPutStrike;
-        uint256 maxInterestApr;
+        uint256 minNetInterest;
         uint256 maxNegativeC;
         uint64 deadline;
         uint256 nonce;
@@ -87,7 +87,7 @@ library CollarVaultShared {
         uint64 newMaturity;
         uint256 minCallStrike;
         uint256 maxPutStrike;
-        uint256 maxInterestApr;
+        uint256 minNetInterest;
         uint256 maxNegativeC;
         uint64 deadline;
         uint256 requestedAt;

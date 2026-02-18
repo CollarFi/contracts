@@ -20,7 +20,7 @@ library CollarLZMessages {
     /// - loanId: identifies the loan/mandate
     /// - asset: collateral asset
     /// - amount: borrowAmount (mandate size)
-    /// - data: abi.encode(borrower, minCallStrike, maxPutStrike, maxInterestApr, maturity, deadline)
+    /// - data: abi.encode(borrower, minCallStrike, maxPutStrike, minNetInterest, maturity, deadline)
     struct Message {
         Action action;
         uint256 loanId;

@@ -9,7 +9,7 @@ interface ICollarLoanStore {
         uint256 borrowAmount;
         uint256 minCallStrike;
         uint256 maxPutStrike;
-        uint256 maxInterestApr;
+        uint256 minNetInterest;
         uint256 fixedInterest;
         uint256 maxNegativeC;
         uint64 maturity;
@@ -24,7 +24,7 @@ interface ICollarLoanStore {
         bytes32 rolloverMandateHash;
         uint256 rolloverMinCallStrike;
         uint256 rolloverMaxPutStrike;
-        uint256 rolloverMaxInterestApr;
+        uint256 rolloverMinNetInterest;
         uint256 rolloverFixedInterest;
         uint256 rolloverMaxNegativeC;
         uint64 rolloverMaturity;
@@ -42,7 +42,7 @@ interface ICollarLoanStore {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
         uint64 maturity,
@@ -57,7 +57,7 @@ interface ICollarLoanStore {
         bytes32 mandateHash,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
         uint64 maturity,

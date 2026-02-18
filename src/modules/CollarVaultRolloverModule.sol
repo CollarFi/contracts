@@ -16,6 +16,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
     error CV_InvalidInput();
     error CV_InvalidMessage();
     error CV_Unauthorized();
+    error CV_InsufficientValue();
 
     event LoanRolledOver(
         uint256 indexed loanId,
@@ -45,7 +46,6 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         if (mandate.loanId != loanId || mandate.borrower != loan.borrower) revert CV_InvalidMessage();
         if (mandate.deadline < block.timestamp || mandate.newMaturity <= block.timestamp) revert CV_InvalidState();
         if (mandate.newMaturity <= loan.maturity) revert CV_InvalidInput();
-        if (mandate.maxInterestApr < $.originationFeeApr) revert CV_InvalidInput();
 
         bytes32 mandateHash = ICollateralVaultRolloverHash(address(this)).hashRolloverMandate(mandate);
         if ($.usedRolloverMandates[mandateHash]) revert CV_InvalidMessage();
@@ -62,7 +62,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             newMaturity: mandate.newMaturity,
             minCallStrike: mandate.minCallStrike,
             maxPutStrike: mandate.maxPutStrike,
-            maxInterestApr: mandate.maxInterestApr,
+            minNetInterest: mandate.minNetInterest,
             maxNegativeC: mandate.maxNegativeC,
             deadline: mandate.deadline,
             requestedAt: block.timestamp
@@ -74,7 +74,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             mandate.newMaturity,
             mandate.minCallStrike,
             mandate.maxPutStrike,
-            mandate.maxInterestApr,
+            mandate.minNetInterest,
             fixedInterest,
             mandate.maxNegativeC,
             mandate.deadline,
@@ -100,7 +100,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         {
             CollarLZMessages.Message memory lzMessage = $.lzMessenger.receivedMessage(confirmationGuid);
             if (lzMessage.loanId == 0) revert CV_InvalidMessage();
-            (uint256 callStrike, uint256 putStrike, uint256 interestApr) = $.lzMessenger
+            (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) = $.lzMessenger
                 .validateRolloverConfirmed(
                     lzMessage,
                     loanId,
@@ -110,8 +110,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
                     pending.borrower,
                     pending.newMaturity,
                     pending.minCallStrike,
-                    pending.maxPutStrike,
-                    pending.maxInterestApr
+                    pending.maxPutStrike
                 );
 
             if (interestApr < $.originationFeeApr) revert CV_InvalidInput();
@@ -120,6 +119,11 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             uint256 accrued = _quoteInterest(loan.principal, loan.interestApr, loan.startTime, block.timestamp);
             uint256 rolledInterest = oldInterest > accrued ? oldInterest - accrued : 0;
             uint256 newInterest = _quoteInterest(loan.principal, interestApr, block.timestamp, pending.newMaturity);
+
+            int256 totalEconomics = int256(newInterest) + realizedC;
+            if (totalEconomics < int256(pending.minNetInterest)) revert CV_InsufficientValue();
+            uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
+            if (realizedDeficit > pending.maxNegativeC) revert CV_InsufficientValue();
 
             uint256 oldMaturity = loan.maturity;
             uint256 oldCallStrike = loan.callStrike;

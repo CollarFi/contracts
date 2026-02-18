@@ -52,7 +52,7 @@ contract CollarVault is
     );
 
     bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
-        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 maxInterestApr,uint256 maxNegativeC,uint64 deadline,uint256 nonce)"
+        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 minNetInterest,uint256 maxNegativeC,uint64 deadline,uint256 nonce)"
     );
 
     function _getCollarVaultStorage() private pure returns (CollarVaultShared.CollarVaultStorage storage $) {
@@ -430,7 +430,7 @@ contract CollarVault is
                 mandate.newMaturity,
                 mandate.minCallStrike,
                 mandate.maxPutStrike,
-                mandate.maxInterestApr,
+                mandate.minNetInterest,
                 mandate.maxNegativeC,
                 mandate.deadline,
                 mandate.nonce

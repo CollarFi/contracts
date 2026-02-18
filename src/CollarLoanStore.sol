@@ -38,7 +38,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
         uint64 maturity,
@@ -72,7 +72,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maxPutStrike != 0 && loan.maxPutStrike != maxPutStrike) {
             revert CLS_Mismatch();
         }
-        if (loan.maxInterestApr != 0 && loan.maxInterestApr != maxInterestApr) {
+        if (loan.minNetInterest != 0 && loan.minNetInterest != minNetInterest) {
             revert CLS_Mismatch();
         }
         if (loan.fixedInterest != 0 && loan.fixedInterest != fixedInterest) {
@@ -91,7 +91,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.borrowAmount = borrowAmount;
         loan.minCallStrike = minCallStrike;
         loan.maxPutStrike = maxPutStrike;
-        loan.maxInterestApr = maxInterestApr;
+        loan.minNetInterest = minNetInterest;
         loan.fixedInterest = fixedInterest;
         loan.maxNegativeC = maxNegativeC;
         loan.maturity = maturity;
@@ -135,7 +135,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         bytes32 mandateHash,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
         uint64 maturity,
@@ -157,7 +157,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMandateHash = mandateHash;
         loan.rolloverMinCallStrike = minCallStrike;
         loan.rolloverMaxPutStrike = maxPutStrike;
-        loan.rolloverMaxInterestApr = maxInterestApr;
+        loan.rolloverMinNetInterest = minNetInterest;
         loan.rolloverFixedInterest = fixedInterest;
         loan.rolloverMaxNegativeC = maxNegativeC;
         loan.rolloverMaturity = maturity;
@@ -176,7 +176,7 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMandateHash = bytes32(0);
         loan.rolloverMinCallStrike = 0;
         loan.rolloverMaxPutStrike = 0;
-        loan.rolloverMaxInterestApr = 0;
+        loan.rolloverMinNetInterest = 0;
         loan.rolloverFixedInterest = 0;
         loan.rolloverMaxNegativeC = 0;
         loan.rolloverMaturity = 0;

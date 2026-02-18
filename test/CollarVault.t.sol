@@ -275,7 +275,7 @@ contract CollarVaultTest is Test {
             newMaturity: uint64(block.timestamp + 30 days),
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 77
@@ -338,7 +338,7 @@ contract CollarVaultTest is Test {
             newMaturity: uint64(block.timestamp + 30 days),
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 88
@@ -362,7 +362,7 @@ contract CollarVaultTest is Test {
             newMaturity: uint64(block.timestamp + 30 days),
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 99
@@ -386,7 +386,7 @@ contract CollarVaultTest is Test {
             newMaturity: uint64(block.timestamp + 30 days),
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 100
@@ -413,7 +413,7 @@ contract CollarVaultTest is Test {
             newMaturity: uint64(block.timestamp + 30 days),
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 101
@@ -740,7 +740,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            minNetInterest: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: maxNegativeC,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -818,7 +818,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            minNetInterest: 0.2e18,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -1201,9 +1201,8 @@ contract MockLZMessenger {
         address expectedBorrower,
         uint64 expectedMaturity,
         uint256 minCallStrike,
-        uint256 maxPutStrike,
-        uint256 maxInterestApr
-    ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr) {
+        uint256 maxPutStrike
+    ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) {
         require(lzMessage.action == CollarLZMessages.Action.RolloverConfirmed, "bad action");
         require(lzMessage.loanId == loanId, "bad loan");
         require(lzMessage.recipient == expectedRecipient, "bad recipient");
@@ -1211,13 +1210,12 @@ contract MockLZMessenger {
         bytes32 mandateHash;
         address borrower;
         uint64 expiry;
-        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry,) =
+        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry, realizedC) =
             abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
         require(mandateHash == expectedMandateHash, "bad mandate hash");
         require(borrower == expectedBorrower, "bad borrower");
         require(expiry == expectedMaturity, "bad maturity");
         require(callStrike >= minCallStrike && putStrike <= maxPutStrike, "bad strikes");
-        require(interestApr <= maxInterestApr, "bad apr");
     }
 
     function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)

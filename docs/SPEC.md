@@ -448,7 +448,7 @@ By leveraging Derive's vault architecture and fast bridge, CollarFi can implemen
 
 Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
 
-1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `maxInterestApr`, `deadline`, `nonce`.
+1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `maxNegativeC`, `deadline`, `nonce`.
 2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
 3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
 4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields.
