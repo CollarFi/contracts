@@ -550,6 +550,330 @@ contract CollarVaultTest is Test {
         vault.finalizeLoan(loanId, bytes32(uint256(100 + loanId)), bytes32(uint256(200 + loanId)));
     }
 
+    function testFuzzFixedInterestSnapshotUnaffectedByAprDrop(uint8 tenorDays, uint256 newApr) public {
+        tenorDays = uint8(bound(uint256(tenorDays), 7, 120));
+
+        uint256 initialApr = 0.12e18;
+        vault.setOriginationFeeApr(initialApr);
+
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + uint256(tenorDays) * 1 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 901
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        uint256 acceptTs = block.timestamp;
+        uint256 expectedInterest = ((params.borrowAmount * initialApr) / 1e18) * (params.maturity - acceptTs) / 365 days;
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+
+        newApr = bound(newApr, 0, 0.2e18);
+        vm.assume(newApr != initialApr);
+        vault.setOriginationFeeApr(newApr);
+
+        bytes32 depositGuid = bytes32(uint256(8100 + loanId));
+        bytes32 tradeGuid = bytes32(uint256(8200 + loanId));
+
+        messenger.setMessage(
+            depositGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.DepositConfirmed,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: params.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        messenger.setMessage(
+            tradeGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 1,
+                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(0))
+            })
+        );
+
+        vm.prank(keeper);
+        vault.finalizeLoan(loanId, depositGuid, tradeGuid);
+
+        CollarVaultShared.Loan memory loan = vault.getLoan(loanId);
+        assertEq(loan.interestOwed, expectedInterest, "fixed interest snapshot must remain unchanged");
+    }
+
+    function testFuzzFinalizeRevertsIfAprRaisedAboveMandateBound(uint256 raisedApr) public {
+        vault.setOriginationFeeApr(0.05e18);
+
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            maxInterestApr: 0.1e18,
+            maxNegativeC: 500e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 902
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+
+        raisedApr = bound(raisedApr, 0.1e18 + 1, 2e18);
+        vault.setOriginationFeeApr(raisedApr);
+
+        bytes32 depositGuid = bytes32(uint256(8300 + loanId));
+        bytes32 tradeGuid = bytes32(uint256(8400 + loanId));
+
+        messenger.setMessage(
+            depositGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.DepositConfirmed,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: params.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        messenger.setMessage(
+            tradeGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 1,
+                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(0))
+            })
+        );
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.finalizeLoan(loanId, depositGuid, tradeGuid);
+    }
+
+    function testFuzzFinalizeRejectsRealizedDeficitOverReserve(uint256 maxNegativeC, uint256 extraDeficit) public {
+        maxNegativeC = bound(maxNegativeC, 1e6, 5_000e6);
+        extraDeficit = bound(extraDeficit, 1, 5_000e6);
+
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            maxInterestApr: 0.2e18,
+            maxNegativeC: maxNegativeC,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 903
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+
+        bytes32 depositGuid = bytes32(uint256(8500 + loanId));
+        bytes32 tradeGuid = bytes32(uint256(8600 + loanId));
+
+        messenger.setMessage(
+            depositGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.DepositConfirmed,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: params.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        int256 realizedC = -int256(maxNegativeC + extraDeficit + 1);
+        messenger.setMessage(
+            tradeGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 1,
+                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), realizedC)
+            })
+        );
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InsufficientValue.selector);
+        vault.finalizeLoan(loanId, depositGuid, tradeGuid);
+    }
+
+    function testFuzzFinalizeLoanRejectsUnknownGuids(bytes32 guidA, bytes32 guidB) public {
+        vm.assume(guidA != bytes32(0) && guidB != bytes32(0));
+
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 904
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vault.finalizeLoan(loanId, guidA, guidB);
+    }
+
+    function testFinalizeDepositReturnRejectsWrongActionGuid() public {
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        vm.prank(borrower);
+        vault.requestCollateralReturn(loanId);
+
+        bytes32 wrongGuid = bytes32(uint256(9900 + loanId));
+        messenger.setMessage(
+            wrongGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.expectRevert(bytes("bad action"));
+        vault.finalizeDepositReturn(loanId, wrongGuid);
+    }
+
     function testSettleConsumesAndReleasesReserve() public {
         vault.setOriginationFeeApr(0.1e18);
         uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
