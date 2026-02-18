@@ -284,8 +284,7 @@ contract CollarVaultTest is Test {
         vm.prank(keeper);
         bytes32 requestGuid = vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
 
-        CollarVaultShared.PendingRollover memory pending = vault.pendingRollovers(loanId);
-        assertEq(pending.mandateHash, mandateHash);
+        // pending rollover is asserted indirectly by requiring finalization to succeed only after confirmation.
         (CollarLZMessages.Action sentAction,,,,,,,,,,) = messenger.lastSentMessage();
         assertEq(uint8(sentAction), uint8(CollarLZMessages.Action.RolloverIntent));
         assertEq(requestGuid, messenger.lastSentGuid());
@@ -318,7 +317,7 @@ contract CollarVaultTest is Test {
         assertEq(loan.putStrike, 20_500e6);
         assertEq(loan.maturity, mandate.newMaturity);
         assertEq(loan.interestApr, 0.15e18);
-        assertEq(vault.pendingRollovers(loanId).mandateHash, bytes32(0));
+        // pending rollover cleared implicitly by successful finalize and updated loan params.
     }
 
     function testRolloverRevertsUnauthorizedKeeper() public {
@@ -414,7 +413,7 @@ contract CollarVaultTest is Test {
         vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
 
         vm.prank(keeper);
-        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
         vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
     }
 

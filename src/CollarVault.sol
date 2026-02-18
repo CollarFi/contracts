@@ -145,7 +145,6 @@ contract CollarVault is
         bytes32 lzGuid
     );
     // LoanRolledOver is emitted by CollarVaultRolloverModule.
-    event RolloverRequested(uint256 indexed loanId, bytes32 indexed mandateHash, bytes32 lzGuid);
 
     constructor() {
         _disableInitializers();
@@ -345,10 +344,7 @@ contract CollarVault is
         return $.usedBaselineRfqs[rfqHash];
     }
 
-    function pendingRollovers(uint256 loanId) external view returns (CollarVaultShared.PendingRollover memory pending) {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        return $.pendingRollovers[loanId];
-    }
+    // pendingRollovers getter intentionally omitted to keep runtime size under EIP-170.
 
     function tradeConfirmed(uint256 loanId) external view returns (bool) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
@@ -732,7 +728,6 @@ contract CollarVault is
             )
         );
         lzGuid = abi.decode(ret, (bytes32));
-        emit RolloverRequested(loanId, $.pendingRollovers[loanId].mandateHash, lzGuid);
     }
 
     function finalizeRollover(uint256 loanId, bytes32 confirmationGuid) external nonReentrant whenNotPaused onlyKeeper {

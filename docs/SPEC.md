@@ -425,3 +425,20 @@ The following items are not yet specified and require clarification before imple
 ## 10. Conclusion
 
 By leveraging Derive's vault architecture and fast bridge, CollarFi can implement a non-custodial lending protocol that hedges collateralized loans with zero-cost collars. An L2 TSA contract owns the Derive subaccount, and the L1 vault coordinates collateral and settlement via rapid bridging. When options expire neutrally, the collateral is bridged back and deposited into Euler V2 to continue earning yield via a variable-rate loan. Careful configuration of signers, nonces, bridge limits and risk parameters ensures solvency and security for lenders and borrowers alike.
+
+### 5.x Async Rollover (pre-maturity)
+
+Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
+
+1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `maxInterestApr`, `deadline`, `nonce`.
+2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
+3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
+4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields.
+5. After successful RFQ execution, L2 receiver sends `RolloverConfirmed` to L1 containing mandate linkage and finalized terms (`callStrike`, `putStrike`, `interestApr`, `expiry`).
+6. Keeper calls `finalizeRollover` on L1. Vault validates `RolloverConfirmed`, applies new loan terms, recomputes interest owed, consumes guid, and clears pending rollover.
+
+Safety invariants:
+- Replay protection: mandate hash can be used only once.
+- Finalization requires matching mandate hash, borrower, maturity/expiry, and bound checks.
+- If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
+- While rollover is pending, a second rollover request for the same loan MUST revert.
