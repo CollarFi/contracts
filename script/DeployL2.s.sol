@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarLoanStore} from "../src/CollarLoanStore.sol";
@@ -61,6 +61,13 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
 /// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
 contract DeployL2 is Script {
+    bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+
+    function _proxyAdminOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
     function _buildTsaInitData(
         address admin,
         address loanStoreAddr,
@@ -155,8 +162,9 @@ contract DeployL2 is Script {
                 );
             }
 
-            // Deploy + initialize atomically in ERC1967Proxy constructor.
-            tsaProxyAddr = address(new ERC1967Proxy(tsaImplementation, tsaInitData));
+            // Deploy + initialize atomically in transparent proxy constructor.
+            // ProxyAdmin owner is ADMIN/deployer for now (can be transferred to multisig later).
+            tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, admin, tsaInitData));
         }
 
         CollarTSAReceiver receiver = new CollarTSAReceiver(
@@ -190,6 +198,7 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2LoanStore", loanStoreAddr);
         json = vm.serializeAddress("addrs", "l2Tsa", tsaProxyAddr);
         json = vm.serializeAddress("addrs", "l2TsaImplementation", tsaImplementation);
+        json = vm.serializeAddress("addrs", "l2TsaProxyAdmin", _proxyAdminOf(tsaProxyAddr));
         json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
@@ -201,6 +210,7 @@ contract DeployL2 is Script {
         console2.log("L2 loanStore", loanStoreAddr);
         console2.log("L2 tsa(proxy)", tsaProxyAddr);
         console2.log("L2 tsaImplementation", tsaImplementation);
+        console2.log("L2 tsa proxy admin", _proxyAdminOf(tsaProxyAddr));
         console2.log("L2 optionRiskVerifier", optionRiskVerifierAddr);
         console2.log("L2 rfqVerifier", rfqVerifierAddr);
         console2.log("L2 lzEndpoint", lzEndpoint);

@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
@@ -26,6 +26,8 @@ import {OptionsBuilder} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/libs/
 /// @dev Deploy L1 components.
 contract DeployL1 is Script {
     using OptionsBuilder for bytes;
+
+    bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
     struct EnvConfig {
         address admin;
@@ -162,7 +164,8 @@ contract DeployL1 is Script {
                 cfg.treasury
             )
         );
-        address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
+        // Transparent proxy with ProxyAdmin owner set to ADMIN/deployer.
+        address vaultProxy = address(new TransparentUpgradeableProxy(vaultImpl, cfg.admin, initData));
         vault = CollarVault(payable(vaultProxy));
     }
 
@@ -204,11 +207,17 @@ contract DeployL1 is Script {
         return address(adapter);
     }
 
+    function _proxyAdminOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
     function _writeOutput(EnvConfig memory cfg, Deployed memory dep) internal {
         string memory json;
         json = vm.serializeAddress("addrs", "l1Vault", address(dep.vault));
         json = vm.serializeAddress("addrs", "l1VaultProxy", address(dep.vault));
         json = vm.serializeAddress("addrs", "l1VaultImplementation", dep.vaultImpl);
+        json = vm.serializeAddress("addrs", "l1VaultProxyAdmin", _proxyAdminOf(address(dep.vault)));
         json = vm.serializeAddress("addrs", "l1Messenger", address(dep.messenger));
         json = vm.serializeAddress("addrs", "l1FinalizeModule", address(dep.finalizeModule));
         json = vm.serializeAddress("addrs", "l1SettleModule", address(dep.settleModule));
@@ -223,6 +232,7 @@ contract DeployL1 is Script {
     function _logSummary(EnvConfig memory cfg, Deployed memory dep) internal view {
         console2.log("L1 vault proxy", address(dep.vault));
         console2.log("L1 vault implementation", dep.vaultImpl);
+        console2.log("L1 vault proxy admin", _proxyAdminOf(address(dep.vault)));
         console2.log("L1 messenger", address(dep.messenger));
         console2.log("L1 finalizeModule", address(dep.finalizeModule));
         console2.log("L1 settleModule", address(dep.settleModule));
