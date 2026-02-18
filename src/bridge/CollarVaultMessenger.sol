@@ -316,9 +316,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         uint256 expectedSubaccountId,
         bytes32 expectedMandateHash,
         address expectedBorrower,
-        uint64 expectedMaturity,
-        uint256 minCallStrike,
-        uint256 maxPutStrike
+        uint64 expectedMaturity
     ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) {
         if (lzMessage.action != CollarLZMessages.Action.RolloverConfirmed || lzMessage.loanId != loanId) {
             revert CV_LZMessageMismatch();
@@ -337,9 +335,6 @@ contract CollarVaultMessenger is AccessControl, OApp {
             abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
 
         if (mandateHash != expectedMandateHash || borrower != expectedBorrower || expiry != expectedMaturity) {
-            revert CV_LZMessageMismatch();
-        }
-        if (callStrike < minCallStrike || putStrike > maxPutStrike) {
             revert CV_LZMessageMismatch();
         }
     }

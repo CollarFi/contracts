@@ -31,6 +31,16 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         uint256 interestApr
     );
 
+    event RolloverFinalizeAnomaly(
+        uint256 indexed loanId,
+        bytes32 indexed confirmationGuid,
+        uint256 anomalyFlags,
+        uint256 callStrike,
+        uint256 putStrike,
+        uint256 interestApr,
+        int256 realizedC
+    );
+
     function executeRollover(
         uint256 loanId,
         CollarVaultShared.RolloverMandate calldata mandate,
@@ -88,65 +98,73 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
 
     function finalizeRollover(uint256 loanId, bytes32 confirmationGuid) external {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        if ($.lzMessageConsumed[confirmationGuid]) return;
+
         CollarVaultShared.Loan storage loan = $.loans[loanId];
         if (loan.state != CollarVaultShared.LoanState.ACTIVE_ZERO_COST) revert CV_InvalidState();
 
         CollarVaultShared.PendingRollover memory pending = $.pendingRollovers[loanId];
         if (pending.mandateHash == bytes32(0)) revert CV_NotFound();
 
-        if ($.lzMessageConsumed[confirmationGuid]) revert CV_InvalidMessage();
-
-        // Read + consume confirmation message.
-        {
-            CollarLZMessages.Message memory lzMessage = $.lzMessenger.receivedMessage(confirmationGuid);
-            if (lzMessage.loanId == 0) revert CV_InvalidMessage();
-            (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) = $.lzMessenger
-                .validateRolloverConfirmed(
-                    lzMessage,
-                    loanId,
-                    address(this),
-                    $.deriveSubaccountId,
-                    pending.mandateHash,
-                    pending.borrower,
-                    pending.newMaturity,
-                    pending.minCallStrike,
-                    pending.maxPutStrike
-                );
-
-            if (interestApr < $.originationFeeApr) revert CV_InvalidInput();
-
-            uint256 oldInterest = loan.interestOwed;
-            uint256 accrued = _quoteInterest(loan.principal, loan.interestApr, loan.startTime, block.timestamp);
-            uint256 rolledInterest = oldInterest > accrued ? oldInterest - accrued : 0;
-            uint256 newInterest = _quoteInterest(loan.principal, interestApr, block.timestamp, pending.newMaturity);
-
-            int256 totalEconomics = int256(newInterest) + realizedC;
-            if (totalEconomics < int256(pending.minNetInterest)) revert CV_InsufficientValue();
-            uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
-            if (realizedDeficit > pending.maxNegativeC) revert CV_InsufficientValue();
-
-            uint256 oldMaturity = loan.maturity;
-            uint256 oldCallStrike = loan.callStrike;
-            uint256 oldPutStrike = loan.putStrike;
-
-            loan.maturity = pending.newMaturity;
-            loan.callStrike = callStrike;
-            loan.putStrike = putStrike;
-            loan.startTime = block.timestamp;
-            loan.interestApr = interestApr;
-            loan.interestOwed = rolledInterest + newInterest;
-
-            emit LoanRolledOver(
+        // Read + validate authenticated confirmation message.
+        CollarLZMessages.Message memory lzMessage = $.lzMessenger.receivedMessage(confirmationGuid);
+        if (lzMessage.loanId == 0) revert CV_InvalidMessage();
+        (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) = $.lzMessenger
+            .validateRolloverConfirmed(
+                lzMessage,
                 loanId,
-                oldMaturity,
-                pending.newMaturity,
-                oldInterest,
-                loan.interestOwed,
-                oldCallStrike,
-                callStrike,
-                oldPutStrike,
-                putStrike,
-                interestApr
+                address(this),
+                $.deriveSubaccountId,
+                pending.mandateHash,
+                pending.borrower,
+                pending.newMaturity
+            );
+
+        uint256 oldInterest = loan.interestOwed;
+        uint256 accrued = _quoteInterest(loan.principal, loan.interestApr, loan.startTime, block.timestamp);
+        uint256 rolledInterest = oldInterest > accrued ? oldInterest - accrued : 0;
+        uint256 newInterest = _quoteInterest(loan.principal, interestApr, block.timestamp, pending.newMaturity);
+
+        uint256 anomalyFlags;
+        if (
+            (pending.minCallStrike != 0 && callStrike < pending.minCallStrike)
+                || (pending.maxPutStrike != 0 && putStrike > pending.maxPutStrike)
+        ) {
+            anomalyFlags |= 1;
+        }
+        if (interestApr < $.originationFeeApr) anomalyFlags |= 2;
+
+        int256 totalEconomics = int256(newInterest) + realizedC;
+        if (totalEconomics < int256(pending.minNetInterest)) anomalyFlags |= 4;
+        uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
+        if (realizedDeficit > pending.maxNegativeC) anomalyFlags |= 8;
+
+        uint256 oldMaturity = loan.maturity;
+        uint256 oldCallStrike = loan.callStrike;
+        uint256 oldPutStrike = loan.putStrike;
+
+        loan.maturity = pending.newMaturity;
+        loan.callStrike = callStrike;
+        loan.putStrike = putStrike;
+        loan.startTime = block.timestamp;
+        loan.interestApr = interestApr;
+        loan.interestOwed = rolledInterest + newInterest;
+
+        emit LoanRolledOver(
+            loanId,
+            oldMaturity,
+            pending.newMaturity,
+            oldInterest,
+            loan.interestOwed,
+            oldCallStrike,
+            callStrike,
+            oldPutStrike,
+            putStrike,
+            interestApr
+        );
+        if (anomalyFlags != 0) {
+            emit RolloverFinalizeAnomaly(
+                loanId, confirmationGuid, anomalyFlags, callStrike, putStrike, interestApr, realizedC
             );
         }
 

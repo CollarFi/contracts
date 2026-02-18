@@ -453,10 +453,12 @@ Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized
 3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
 4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields.
 5. After successful RFQ execution, L2 receiver sends `RolloverConfirmed` to L1 containing mandate linkage and finalized terms (`callStrike`, `putStrike`, `interestApr`, `expiry`).
-6. Keeper calls `finalizeRollover` on L1. Vault validates `RolloverConfirmed`, applies new loan terms, recomputes interest owed, consumes guid, and clears pending rollover.
+6. Keeper calls `finalizeRollover` on L1. Finalization is a trusted, authenticated commit step: once a valid `RolloverConfirmed` is present, it applies the confirmed terms, updates accounting, consumes guid, and clears pending rollover.
 
 Safety invariants:
 - Replay protection: mandate hash can be used only once.
-- Finalization requires matching mandate hash, borrower, maturity/expiry, and bound checks.
+- Hard reverts in `finalizeRollover` are reserved for invalid/forged/mismatched confirmation identity (action, loan, recipient/subaccount, mandate hash, borrower, expiry) or missing pending state.
+- Post-open economic/consistency checks (e.g. strike/economics drift vs mandate bounds) MUST NOT brick the loan at finalization; they are signaled as anomalies and enforced pre-trade in TSA RFQ verification.
+- `finalizeRollover` is idempotent by confirmation guid (duplicate finalize on an already-consumed guid is a no-op).
 - If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
 - While rollover is pending, a second rollover request for the same loan MUST revert.

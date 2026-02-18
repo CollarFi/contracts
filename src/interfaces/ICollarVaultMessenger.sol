@@ -114,9 +114,7 @@ interface ICollarVaultMessenger {
         uint256 expectedSubaccountId,
         bytes32 expectedMandateHash,
         address expectedBorrower,
-        uint64 expectedMaturity,
-        uint256 minCallStrike,
-        uint256 maxPutStrike
+        uint64 expectedMaturity
     ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC);
 
     function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
