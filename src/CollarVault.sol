@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
@@ -47,21 +46,6 @@ contract CollarVault is
     }
 
     // Quote-based RFQ flow has been removed; loans are now created via keeper-signed RFQ baseline + mandate + L2 TradeConfirmed.
-
-    struct BaselineRfq {
-        uint256 loanId;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint64 maturity;
-        uint256 putStrike;
-        uint256 callStrike;
-        uint256 borrowAmount;
-        uint256 maxInterestApr;
-        uint256 maxNegativeC;
-        uint64 rfqExpiry;
-        address borrower;
-        uint256 nonce;
-    }
 
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
         "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 maxInterestApr,uint256 maxNegativeC,uint64 rfqExpiry,address borrower,uint256 nonce)"
@@ -134,17 +118,6 @@ contract CollarVault is
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
     event TradeConfirmedRecorded(uint256 indexed loanId, bytes32 guid);
-    event MandateAccepted(
-        uint256 indexed loanId,
-        address indexed borrower,
-        uint64 maturity,
-        uint256 borrowAmount,
-        uint256 minCallStrike,
-        uint256 maxPutStrike,
-        uint256 maxInterestApr,
-        uint64 deadline,
-        bytes32 lzGuid
-    );
     // LoanRolledOver is emitted by CollarVaultRolloverModule.
 
     constructor() {
@@ -427,7 +400,7 @@ contract CollarVault is
 
     // (removed) acceptQuote: quote-based RFQ flow replaced by keeper-signed RFQ baseline + acceptMandate.
 
-    function hashBaselineRfq(BaselineRfq memory rfq) public view returns (bytes32) {
+    function hashBaselineRfq(ICollarVaultFinalizeModule.BaselineRfq memory rfq) public view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
                 BASELINE_RFQ_TYPEHASH,
@@ -469,149 +442,21 @@ contract CollarVault is
     /// @notice Accept a mandate on L1, constrained by a keeper-signed RFQ baseline.
     /// @dev Mandates must be mirrored L1->L2 via LayerZero since the TSA lives on a different network.
     /// @param deadline Timestamp after which the borrower can request collateral return.
-    function acceptMandate(uint256 loanId, BaselineRfq calldata rfq, bytes calldata rfqSig, uint64 deadline)
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (bytes32 lzGuid)
-    {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        CollarVaultShared.PendingDeposit memory pending = $.pendingDeposits[loanId];
-        if (pending.borrower == address(0)) {
-            revert CV_NotFound();
-        }
-        if (pending.borrower != msg.sender) {
-            revert CV_Unauthorized();
-        }
-        if (address($.lzMessenger) == address(0)) {
-            revert CV_InvalidConfig();
-        }
-        if ($.deriveSubaccountId == 0) {
-            revert CV_InvalidConfig();
-        }
-        if (deadline <= block.timestamp) {
-            revert CV_InvalidState();
-        }
-
-        // Only allow replacing an expired mandate.
-        CollarVaultShared.Mandate memory existing = $.mandates[loanId];
-        bool hadMandate = existing.borrower != address(0);
-        if (hadMandate && block.timestamp < existing.deadline) {
-            revert CV_InvalidState();
-        }
-
-        // Validate keeper-signed baseline RFQ.
-        if (rfq.loanId != loanId) {
-            revert CV_InvalidMessage();
-        }
-        if (rfq.borrower != address(0) && rfq.borrower != msg.sender) {
-            revert CV_Unauthorized();
-        }
-        if (rfq.rfqExpiry < block.timestamp) {
-            revert CV_InvalidState();
-        }
-        if (
-            rfq.collateralAsset != pending.collateralAsset || rfq.collateralAmount != pending.collateralAmount
-                || rfq.maturity != uint64(pending.maturity) || rfq.putStrike != pending.putStrike
-                || rfq.borrowAmount != pending.borrowAmount
-        ) {
-            revert CV_InvalidMessage();
-        }
-        if (rfq.callStrike == 0 || rfq.maxInterestApr < $.originationFeeApr) {
-            revert CV_InvalidInput();
-        }
-
-        bytes32 rfqHash = hashBaselineRfq(rfq);
-        if ($.usedBaselineRfqs[rfqHash]) {
-            revert CV_InvalidMessage();
-        }
-        address signer = ECDSA.recover(rfqHash, rfqSig);
-        if (!hasRole(RFQ_SIGNER_ROLE, signer)) {
-            revert CV_Unauthorized();
-        }
-        $.usedBaselineRfqs[rfqHash] = true;
-
-        // Reserve liquidity once per loanId and refresh reserve on mandate renewal.
-        if (!hadMandate) {
-            _commitPrincipal(pending.borrowAmount);
-        } else if (existing.maxNegativeC > 0) {
-            $.liquidityVault.release(loanId);
-        }
-        if (rfq.maxNegativeC > 0) {
-            $.liquidityVault.reserve(loanId, rfq.maxNegativeC);
-        }
-        if (pending.maturity > type(uint64).max) {
-            revert CV_InvalidInput();
-        }
-
-        uint256 minCallStrike = rfq.callStrike;
-        uint256 maxPutStrike = rfq.putStrike;
-        uint256 fixedInterest = _quoteOriginationFee(pending.borrowAmount, pending.maturity);
-
-        $.mandates[loanId] = CollarVaultShared.Mandate({
-            borrower: pending.borrower,
-            collateralAsset: pending.collateralAsset,
-            collateralAmount: pending.collateralAmount,
-            maturity: uint64(pending.maturity),
-            deadline: deadline,
-            borrowAmount: pending.borrowAmount,
-            minCallStrike: minCallStrike,
-            maxPutStrike: maxPutStrike,
-            maxInterestApr: rfq.maxInterestApr,
-            fixedInterest: fixedInterest,
-            maxNegativeC: rfq.maxNegativeC,
-            sentToL2: true
-        });
-
-        lzGuid = _sendMandateCreated(
-            loanId, pending, minCallStrike, maxPutStrike, rfq.maxInterestApr, fixedInterest, rfq.maxNegativeC, deadline
-        );
-
-        emit MandateAccepted(
-            loanId,
-            pending.borrower,
-            uint64(pending.maturity),
-            pending.borrowAmount,
-            minCallStrike,
-            maxPutStrike,
-            rfq.maxInterestApr,
-            deadline,
-            lzGuid
-        );
-    }
-
-    function _sendMandateCreated(
+    function acceptMandate(
         uint256 loanId,
-        CollarVaultShared.PendingDeposit memory pending,
-        uint256 minCallStrike,
-        uint256 maxPutStrike,
-        uint256 maxInterestApr,
-        uint256 fixedInterest,
-        uint256 maxNegativeC,
+        ICollarVaultFinalizeModule.BaselineRfq calldata rfq,
+        bytes calldata rfqSig,
         uint64 deadline
-    ) internal returns (bytes32 lzGuid) {
+    ) external payable nonReentrant whenNotPaused returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        bytes memory mandateData = abi.encode(
-            pending.borrower,
-            minCallStrike,
-            maxPutStrike,
-            maxInterestApr,
-            fixedInterest,
-            maxNegativeC,
-            uint64(pending.maturity),
-            deadline
+        address module = $.finalizeModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret = _delegateTo(
+            module, abi.encodeCall(ICollarVaultFinalizeModule.acceptMandate, (loanId, rfq, rfqSig, deadline))
         );
-
-        lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: msg.value}(
-            loanId,
-            pending.collateralAsset,
-            pending.borrowAmount,
-            address(this),
-            $.deriveSubaccountId,
-            mandateData,
-            msg.sender
-        );
+        lzGuid = abi.decode(ret, (bytes32));
     }
 
     /// @notice Finalize a loan once deposit and RFQ trades have been confirmed on L2.
@@ -980,35 +825,6 @@ contract CollarVault is
         if (permit.details.amount < collateralAmount) {
             revert CV_InvalidInput();
         }
-    }
-
-    function _quoteOriginationFee(uint256 borrowAmount, uint256 maturity) internal view returns (uint256) {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        return _quoteInterest(borrowAmount, $.originationFeeApr, block.timestamp, maturity);
-    }
-
-    function _quoteInterest(uint256 principal, uint256 apr, uint256 start, uint256 end)
-        internal
-        pure
-        returns (uint256)
-    {
-        if (apr == 0 || end <= start) {
-            return 0;
-        }
-        uint256 annualFee = Math.mulDiv(principal, apr, 1e18);
-        return Math.mulDiv(annualFee, end - start, YEAR);
-    }
-
-    function _commitPrincipal(uint256 amount) internal {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if (amount == 0) {
-            return;
-        }
-        uint256 cap = $.maxTotalPrincipal;
-        if (cap != 0 && $.totalCommittedPrincipal + amount > cap) {
-            revert CV_InvalidState();
-        }
-        $.totalCommittedPrincipal += amount;
     }
 
     function _releaseCommittedPrincipal(uint256 amount) internal {

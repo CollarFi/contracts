@@ -14,6 +14,7 @@ import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
+import {ICollarVaultFinalizeModule} from "../src/interfaces/ICollarVaultFinalizeModule.sol";
 
 import {
     MessagingFee,
@@ -120,7 +121,7 @@ contract CollarVaultTest is Test {
 
         uint256 loanId = _requestDeposit(params);
 
-        CollarVault.BaselineRfq memory rfq = CollarVault.BaselineRfq({
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
             collateralAsset: address(wbtc),
             collateralAmount: params.collateralAmount,
@@ -205,7 +206,7 @@ contract CollarVaultTest is Test {
         });
         uint256 loanId = _requestDeposit(params);
 
-        CollarVault.BaselineRfq memory rfq = CollarVault.BaselineRfq({
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
             collateralAsset: address(wbtc),
             collateralAmount: params.collateralAmount,
@@ -441,7 +442,7 @@ contract CollarVaultTest is Test {
 
         uint256 loanId = _requestDeposit(params);
 
-        CollarVault.BaselineRfq memory rfq = CollarVault.BaselineRfq({
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
             collateralAsset: address(wbtc),
             collateralAmount: params.collateralAmount,
@@ -555,7 +556,7 @@ contract CollarVaultTest is Test {
         });
         loanId = _requestDeposit(params);
 
-        CollarVault.BaselineRfq memory rfq = CollarVault.BaselineRfq({
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
             collateralAsset: address(wbtc),
             collateralAmount: params.collateralAmount,
