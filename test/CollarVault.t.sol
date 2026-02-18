@@ -282,13 +282,43 @@ contract CollarVaultTest is Test {
         bytes memory sig = abi.encodePacked(r, s, v);
 
         vm.prank(keeper);
-        vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+        bytes32 requestGuid = vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+
+        CollarVaultShared.PendingRollover memory pending = vault.pendingRollovers(loanId);
+        assertEq(pending.mandateHash, mandateHash);
+        (CollarLZMessages.Action sentAction,,,,,,,,,,) = messenger.lastSentMessage();
+        assertEq(uint8(sentAction), uint8(CollarLZMessages.Action.RolloverIntent));
+        assertEq(requestGuid, messenger.lastSentGuid());
+
+        bytes32 confirmGuid = bytes32(uint256(9000 + loanId));
+        messenger.setMessage(
+            confirmGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.RolloverConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: abi.encode(
+                    mandateHash, borrower, uint256(26_500e6), uint256(20_500e6), uint256(0.15e18), mandate.newMaturity
+                )
+            })
+        );
+
+        vm.prank(keeper);
+        vault.finalizeRollover(loanId, confirmGuid);
 
         CollarVaultShared.Loan memory loan = vault.getLoan(loanId);
         assertEq(loan.callStrike, 26_500e6);
         assertEq(loan.putStrike, 20_500e6);
         assertEq(loan.maturity, mandate.newMaturity);
-        assertGt(loan.interestOwed, 0);
+        assertEq(loan.interestApr, 0.15e18);
+        assertEq(vault.pendingRollovers(loanId).mandateHash, bytes32(0));
     }
 
     function testRolloverRevertsUnauthorizedKeeper() public {
@@ -333,6 +363,58 @@ contract CollarVaultTest is Test {
 
         vm.prank(keeper);
         vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+    }
+
+    function testRolloverFinalizeRevertsWithoutConfirmation() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        vm.warp(block.timestamp + 5 days);
+
+        CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: uint64(block.timestamp + 30 days),
+            minCallStrike: 26_000e6,
+            maxPutStrike: 21_000e6,
+            maxInterestApr: 0.2e18,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 100
+        });
+        bytes32 mandateHash = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        vm.prank(keeper);
+        vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vault.finalizeRollover(loanId, bytes32(uint256(123456)));
+    }
+
+    function testRolloverRequestRevertsOnReplayMandate() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        vm.warp(block.timestamp + 5 days);
+
+        CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: uint64(block.timestamp + 30 days),
+            minCallStrike: 26_000e6,
+            maxPutStrike: 21_000e6,
+            maxInterestApr: 0.2e18,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 101
+        });
+        bytes32 mandateHash = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        vm.prank(keeper);
+        vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
         vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
     }
 
@@ -555,6 +637,31 @@ contract MockLZMessenger {
         });
     }
 
+    function sendRolloverIntentAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 principal,
+        address recipient,
+        uint256 subaccountId,
+        bytes calldata rolloverData,
+        address
+    ) external payable returns (bytes32 guid) {
+        guid = _nextGuid(loanId, CollarLZMessages.Action.RolloverIntent);
+        lastSentMessage = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.RolloverIntent,
+            loanId: loanId,
+            asset: asset,
+            amount: principal,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: rolloverData
+        });
+    }
+
     function validateDepositConfirmed(
         CollarLZMessages.Message calldata lzMessage,
         address pendingBorrower,
@@ -590,6 +697,34 @@ contract MockLZMessenger {
         (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
         require(expiry == expectedMaturity, "bad maturity");
         require(callStrike >= minCallStrike && putStrike <= maxPutStrike, "bad strikes");
+    }
+
+    function validateRolloverConfirmed(
+        CollarLZMessages.Message calldata lzMessage,
+        uint256 loanId,
+        address expectedRecipient,
+        uint256 expectedSubaccountId,
+        bytes32 expectedMandateHash,
+        address expectedBorrower,
+        uint64 expectedMaturity,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 maxInterestApr
+    ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr) {
+        require(lzMessage.action == CollarLZMessages.Action.RolloverConfirmed, "bad action");
+        require(lzMessage.loanId == loanId, "bad loan");
+        require(lzMessage.recipient == expectedRecipient, "bad recipient");
+        require(expectedSubaccountId == 0 || lzMessage.subaccountId == expectedSubaccountId, "bad subaccount");
+        bytes32 mandateHash;
+        address borrower;
+        uint64 expiry;
+        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry) =
+            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64));
+        require(mandateHash == expectedMandateHash, "bad mandate hash");
+        require(borrower == expectedBorrower, "bad borrower");
+        require(expiry == expectedMaturity, "bad maturity");
+        require(callStrike >= minCallStrike && putStrike <= maxPutStrike, "bad strikes");
+        require(interestApr <= maxInterestApr, "bad apr");
     }
 
     function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)

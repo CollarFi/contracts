@@ -91,16 +91,21 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         if (loan.borrower == address(0) || loan.consumed) {
             revert CTSA_InvalidRfqTradeDetails();
         }
-        if (loan.deadline != 0 && block.timestamp > loan.deadline) {
+        uint64 expectedMaturity = loan.rolloverPending ? loan.rolloverMaturity : loan.maturity;
+        uint64 expectedDeadline = loan.rolloverPending ? loan.rolloverDeadline : loan.deadline;
+        uint256 expectedMinCallStrike = loan.rolloverPending ? loan.rolloverMinCallStrike : loan.minCallStrike;
+        uint256 expectedMaxPutStrike = loan.rolloverPending ? loan.rolloverMaxPutStrike : loan.maxPutStrike;
+
+        if (expectedDeadline != 0 && block.timestamp > expectedDeadline) {
             revert CTSA_InvalidRfqTradeDetails();
         }
-        if (loan.maturity != 0 && parsed.callExpiry != loan.maturity) {
+        if (expectedMaturity != 0 && parsed.callExpiry != expectedMaturity) {
             revert CTSA_InvalidRfqTradeDetails();
         }
-        if (loan.minCallStrike != 0 && parsed.callStrike < loan.minCallStrike) {
+        if (expectedMinCallStrike != 0 && parsed.callStrike < expectedMinCallStrike) {
             revert CTSA_InvalidRfqTradeDetails();
         }
-        if (loan.maxPutStrike != 0 && parsed.putStrike > loan.maxPutStrike) {
+        if (expectedMaxPutStrike != 0 && parsed.putStrike > expectedMaxPutStrike) {
             revert CTSA_InvalidRfqTradeDetails();
         }
 

@@ -10,5 +10,7 @@ interface ICollarVaultRolloverModule {
         bytes calldata mandateSig,
         uint256 newCallStrike,
         uint256 newPutStrike
-    ) external;
+    ) external payable returns (bytes32 guid);
+
+    function finalizeRollover(uint256 loanId, bytes32 confirmationGuid) external;
 }

@@ -145,6 +145,7 @@ contract CollarVault is
         bytes32 lzGuid
     );
     // LoanRolledOver is emitted by CollarVaultRolloverModule.
+    event RolloverRequested(uint256 indexed loanId, bytes32 indexed mandateHash, bytes32 lzGuid);
 
     constructor() {
         _disableInitializers();
@@ -342,6 +343,11 @@ contract CollarVault is
     function usedBaselineRfqs(bytes32 rfqHash) external view returns (bool) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.usedBaselineRfqs[rfqHash];
+    }
+
+    function pendingRollovers(uint256 loanId) external view returns (CollarVaultShared.PendingRollover memory pending) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.pendingRollovers[loanId];
     }
 
     function tradeConfirmed(uint256 loanId) external view returns (bool) {
@@ -713,18 +719,29 @@ contract CollarVault is
         bytes calldata mandateSig,
         uint256 newCallStrike,
         uint256 newPutStrike
-    ) external nonReentrant whenNotPaused onlyKeeper {
+    ) external payable nonReentrant whenNotPaused onlyKeeper returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         address module = $.rolloverModule;
         if (module == address(0)) {
             revert CV_InvalidConfig();
         }
-        _delegateTo(
+        bytes memory ret = _delegateTo(
             module,
             abi.encodeCall(
                 ICollarVaultRolloverModule.executeRollover, (loanId, mandate, mandateSig, newCallStrike, newPutStrike)
             )
         );
+        lzGuid = abi.decode(ret, (bytes32));
+        emit RolloverRequested(loanId, $.pendingRollovers[loanId].mandateHash, lzGuid);
+    }
+
+    function finalizeRollover(uint256 loanId, bytes32 confirmationGuid) external nonReentrant whenNotPaused onlyKeeper {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        address module = $.rolloverModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        _delegateTo(module, abi.encodeCall(ICollarVaultRolloverModule.finalizeRollover, (loanId, confirmationGuid)));
     }
 
     /// @notice Convert a neutral-expiry loan into a variable-rate Euler position.

@@ -17,6 +17,15 @@ interface ICollarLoanStore {
         address collateralAsset;
         uint256 collateralAmount;
 
+        // Active rollover constraints (if rolloverPending=true)
+        bool rolloverPending;
+        bytes32 rolloverMandateHash;
+        uint256 rolloverMinCallStrike;
+        uint256 rolloverMaxPutStrike;
+        uint256 rolloverMaxInterestApr;
+        uint64 rolloverMaturity;
+        uint64 rolloverDeadline;
+
         bool consumed;
     }
 
@@ -35,6 +44,19 @@ interface ICollarLoanStore {
     ) external;
 
     function recordCollateral(uint256 loanId, address collateralAsset, uint256 collateralAmount) external;
+
+    function recordRolloverMandate(
+        uint256 loanId,
+        address borrower,
+        bytes32 mandateHash,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 maxInterestApr,
+        uint64 maturity,
+        uint64 deadline
+    ) external;
+
+    function clearRollover(uint256 loanId) external;
 
     function markConsumed(uint256 loanId) external;
 }

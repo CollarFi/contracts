@@ -177,6 +177,35 @@ contract CollarTSAReceiver is AccessControl, OApp {
             return;
         }
 
+        if (message.action == CollarLZMessages.Action.RolloverIntent) {
+            (
+                bytes32 mandateHash,
+                address borrower,
+                uint64 newMaturity,
+                uint256 minCallStrike,
+                uint256 maxPutStrike,
+                uint256 maxInterestApr,
+                uint64 deadline,
+                uint256 nonce
+            ) = abi.decode(message.data, (bytes32, address, uint64, uint256, uint256, uint256, uint64, uint256));
+            nonce;
+
+            loanStore.recordRolloverMandate(
+                message.loanId,
+                borrower,
+                mandateHash,
+                minCallStrike,
+                maxPutStrike,
+                maxInterestApr,
+                newMaturity,
+                deadline
+            );
+
+            handledMessages[guid] = true;
+            emit MessageHandled(guid, message.action, message.loanId);
+            return;
+        }
+
         if (message.action == CollarLZMessages.Action.DepositIntent) {
             if (message.recipient == address(0)) {
                 revert CTR_InvalidRecipient();
@@ -302,8 +331,21 @@ contract CollarTSAReceiver is AccessControl, OApp {
         }
         _validateTradeConfirmedPreconditions(p.amount, p.socketMessageId, p.takerNonce);
 
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(p.loanId);
+        bool isRollover = loan.rolloverPending;
+        bytes memory payload = isRollover
+            ? abi.encode(
+                loan.rolloverMandateHash,
+                loan.borrower,
+                p.callStrike,
+                p.putStrike,
+                loan.rolloverMaxInterestApr,
+                p.expiry
+            )
+            : abi.encode(p.callStrike, p.putStrike, p.expiry);
+
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
-            action: CollarLZMessages.Action.TradeConfirmed,
+            action: isRollover ? CollarLZMessages.Action.RolloverConfirmed : CollarLZMessages.Action.TradeConfirmed,
             loanId: p.loanId,
             asset: p.asset,
             amount: p.amount,
@@ -313,12 +355,16 @@ contract CollarTSAReceiver is AccessControl, OApp {
             secondaryAmount: 0,
             quoteHash: p.quoteHash,
             takerNonce: p.takerNonce,
-            data: abi.encode(p.callStrike, p.putStrike, p.expiry)
+            data: payload
         });
 
         MessagingReceipt memory receipt = _send(message, defaultOptions);
 
-        loanStore.markConsumed(p.loanId);
+        if (isRollover) {
+            loanStore.clearRollover(p.loanId);
+        } else {
+            loanStore.markConsumed(p.loanId);
+        }
 
         tradeConfirmed[p.loanId] = true;
         return receipt;

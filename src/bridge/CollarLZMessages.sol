@@ -9,7 +9,9 @@ library CollarLZMessages {
         DepositConfirmed,
         CollateralReturned,
         TradeConfirmed,
-        MandateCreated
+        MandateCreated,
+        RolloverIntent,
+        RolloverConfirmed
     }
 
     /// @dev Generic LZ message envelope. Different actions interpret fields differently.

@@ -78,6 +78,17 @@ library CollarVaultShared {
         uint256 nonce;
     }
 
+    struct PendingRollover {
+        bytes32 mandateHash;
+        address borrower;
+        uint64 newMaturity;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        uint256 maxInterestApr;
+        uint64 deadline;
+        uint256 requestedAt;
+    }
+
     struct CollarVaultStorage {
         ILiquidityVault liquidityVault;
         IERC20 usdc;
@@ -97,6 +108,7 @@ library CollarVaultShared {
         mapping(uint256 => Mandate) mandates;
         mapping(bytes32 => bool) usedBaselineRfqs;
         mapping(bytes32 => bool) usedRolloverMandates;
+        mapping(uint256 => PendingRollover) pendingRollovers;
         mapping(uint256 => bool) tradeConfirmed;
         mapping(uint256 => bool) collateralActivated;
         mapping(uint256 => bool) returnRequested;
