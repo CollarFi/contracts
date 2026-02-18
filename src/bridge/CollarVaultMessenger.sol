@@ -231,7 +231,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 expectedMaturity
-    ) external pure returns (uint256 callStrike, uint256 putStrike) {
+    ) external pure returns (uint256 callStrike, uint256 putStrike, int256 realizedC) {
         if (tradeMessage.action != CollarLZMessages.Action.TradeConfirmed || tradeMessage.loanId != expectedLoanId) {
             revert CV_LZMessageMismatch();
         }
@@ -243,7 +243,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         }
 
         uint64 expiry;
-        (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        (callStrike, putStrike, expiry, realizedC) = abi.decode(tradeMessage.data, (uint256, uint256, uint64, int256));
         if (expiry != expectedMaturity) {
             revert CV_LZMessageMismatch();
         }
@@ -334,8 +334,8 @@ contract CollarVaultMessenger is AccessControl, OApp {
         bytes32 mandateHash;
         address borrower;
         uint64 expiry;
-        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry) =
-            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64));
+        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry,) =
+            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
 
         if (mandateHash != expectedMandateHash || borrower != expectedBorrower || expiry != expectedMaturity) {
             revert CV_LZMessageMismatch();

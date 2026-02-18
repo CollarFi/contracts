@@ -129,6 +129,8 @@ contract CollarTSATestUtils is TSATestUtils {
             0,
             0,
             0,
+            0,
+            type(uint256).max,
             maturity,
             uint64(block.timestamp + 1 days)
         );

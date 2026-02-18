@@ -83,7 +83,7 @@ interface ICollarVaultMessenger {
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 expectedMaturity
-    ) external pure returns (uint256 callStrike, uint256 putStrike);
+    ) external pure returns (uint256 callStrike, uint256 putStrike, int256 realizedC);
 
     function validateTradeConfirmedMarker(
         CollarLZMessages.Message calldata lzMessage,

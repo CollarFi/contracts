@@ -57,17 +57,18 @@ contract CollarVault is
         uint256 callStrike;
         uint256 borrowAmount;
         uint256 maxInterestApr;
+        uint256 maxNegativeC;
         uint64 rfqExpiry;
         address borrower;
         uint256 nonce;
     }
 
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
-        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 maxInterestApr,uint64 rfqExpiry,address borrower,uint256 nonce)"
+        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 maxInterestApr,uint256 maxNegativeC,uint64 rfqExpiry,address borrower,uint256 nonce)"
     );
 
     bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
-        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 maxInterestApr,uint64 deadline,uint256 nonce)"
+        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 maxInterestApr,uint256 maxNegativeC,uint64 deadline,uint256 nonce)"
     );
 
     function _getCollarVaultStorage() private pure returns (CollarVaultShared.CollarVaultStorage storage $) {
@@ -438,6 +439,7 @@ contract CollarVault is
                 rfq.callStrike,
                 rfq.borrowAmount,
                 rfq.maxInterestApr,
+                rfq.maxNegativeC,
                 rfq.rfqExpiry,
                 rfq.borrower,
                 rfq.nonce
@@ -456,6 +458,7 @@ contract CollarVault is
                 mandate.minCallStrike,
                 mandate.maxPutStrike,
                 mandate.maxInterestApr,
+                mandate.maxNegativeC,
                 mandate.deadline,
                 mandate.nonce
             )
@@ -529,9 +532,14 @@ contract CollarVault is
         }
         $.usedBaselineRfqs[rfqHash] = true;
 
-        // Reserve liquidity once per loanId. Renewing an expired mandate does not re-commit.
+        // Reserve liquidity once per loanId and refresh reserve on mandate renewal.
         if (!hadMandate) {
             _commitPrincipal(pending.borrowAmount);
+        } else if (existing.maxNegativeC > 0) {
+            $.liquidityVault.release(loanId);
+        }
+        if (rfq.maxNegativeC > 0) {
+            $.liquidityVault.reserve(loanId, rfq.maxNegativeC);
         }
         if (pending.maturity > type(uint64).max) {
             revert CV_InvalidInput();
@@ -539,6 +547,7 @@ contract CollarVault is
 
         uint256 minCallStrike = rfq.callStrike;
         uint256 maxPutStrike = rfq.putStrike;
+        uint256 fixedInterest = _quoteOriginationFee(pending.borrowAmount, pending.maturity);
 
         $.mandates[loanId] = CollarVaultShared.Mandate({
             borrower: pending.borrower,
@@ -550,10 +559,14 @@ contract CollarVault is
             minCallStrike: minCallStrike,
             maxPutStrike: maxPutStrike,
             maxInterestApr: rfq.maxInterestApr,
+            fixedInterest: fixedInterest,
+            maxNegativeC: rfq.maxNegativeC,
             sentToL2: true
         });
 
-        lzGuid = _sendMandateCreated(loanId, pending, minCallStrike, maxPutStrike, rfq.maxInterestApr, deadline);
+        lzGuid = _sendMandateCreated(
+            loanId, pending, minCallStrike, maxPutStrike, rfq.maxInterestApr, fixedInterest, rfq.maxNegativeC, deadline
+        );
 
         emit MandateAccepted(
             loanId,
@@ -574,11 +587,20 @@ contract CollarVault is
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint256 maxInterestApr,
+        uint256 fixedInterest,
+        uint256 maxNegativeC,
         uint64 deadline
     ) internal returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         bytes memory mandateData = abi.encode(
-            pending.borrower, minCallStrike, maxPutStrike, maxInterestApr, uint64(pending.maturity), deadline
+            pending.borrower,
+            minCallStrike,
+            maxPutStrike,
+            maxInterestApr,
+            fixedInterest,
+            maxNegativeC,
+            uint64(pending.maturity),
+            deadline
         );
 
         lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: msg.value}(
@@ -685,6 +707,9 @@ contract CollarVault is
         CollarVaultShared.Mandate memory mandate = $.mandates[loanId];
         if (mandate.borrower != address(0)) {
             _releaseCommittedPrincipal(mandate.borrowAmount);
+            if (mandate.maxNegativeC > 0) {
+                $.liquidityVault.release(loanId);
+            }
             delete $.mandates[loanId];
         }
 

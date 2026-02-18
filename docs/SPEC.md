@@ -193,6 +193,20 @@ sequenceDiagram
   Vault->>Borrower: transfer collateral
 ```
 
+
+### 5.1.1 Mandate economics (fixed-interest + negative-C reserve)
+
+The agreed origination model is:
+
+- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so the borrower knows exact interest to repay.
+- Option net premium is `C = callPremium - putPremium`.
+- Negative `C` (put premium larger than call premium) is allowed; Derive/TSA cash may go temporarily negative.
+- Before RFQ execution, L1 reserves `maxNegativeC` liquidity per loan in the LP vault (non-withdrawable).
+- RFQ/trade confirmation must satisfy `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(I + C))`.
+- On settlement, actual deficit is covered by consuming reserved liquidity; any unused reserve is released.
+
+This makes borrower obligations deterministic (`I` fixed), while allowing option legs to execute under bounded temporary deficit.
+
 ### 5.2 Maturity settlement
 
 At maturity `t`, the executor (or a keeper) settles the collar position on Derive and triggers one of three outcomes. `S_t` is Derive's official expiry settlement price at maturity.
@@ -397,6 +411,7 @@ Monitors for situations such as the bridge being down or fast withdrawal limits 
 - Socket message ID trust: `TradeConfirmed` includes a Socket `messageId` provided by the L2 executor; the system trusts the executor to supply the correct bridge message ID and amount for the origination fee withdrawal.
 - Aggregate coverage withdrawals: Withdrawals from the shared vault subaccount must only be signed when `baseBalance - amount >= shortCalls` and cash stays above `maxNegCash`. This is an aggregate (not per-loan) invariant and relies on correct executor operation.
 - Return/trade mutual exclusion: A `ReturnRequest` is best-effort and does not cancel the loan on its own. The L2 receiver must emit **at most one** of `TradeConfirmed` or `CollateralReturned` for a loan. L1 must reject `finalizeDepositReturn` if `TradeConfirmed` was handled, and must reject `finalizeLoan` if `CollateralReturned` was handled.
+- Mandate deficit reserve invariant: every accepted mandate stores `maxNegativeC`; LP liquidity of this amount is reserved before trade execution, `realizedDeficit` at finalize must not exceed the reserve, settlement consumes only actual deficit, and leftover reserve is released when the loan closes/returns.
 - Borrow amount safety buffer (TODO): `_validateBorrowAmount` should be reworked so loans are constrained by a configurable LTV buffer, not strict parity. Target check: `borrowAmount <= collateralAmount * putStrike / strikeScale * maxLTV` (with `maxLTV < 1e18`). Rationale: even when the put expires ITM, realized unwind/spot execution can suffer slippage, so assuming exact mark-price execution is unsafe.
 - Role-based parameter changes: Strike bounds, slippage tolerances, market allowlists and other risk parameters are adjustable by a role controlled by a multisig; governance modules may replace this role later.
 - Emergency controls: The protocol supports emergency controls to pause new loans and settlement.

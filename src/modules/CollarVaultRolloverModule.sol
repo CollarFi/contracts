@@ -52,6 +52,9 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         address signer = ECDSA.recover(mandateHash, mandateSig);
         if (signer != loan.borrower) revert CV_Unauthorized();
 
+        uint256 fixedInterest =
+            _quoteInterest(loan.principal, $.originationFeeApr, block.timestamp, mandate.newMaturity);
+
         $.usedRolloverMandates[mandateHash] = true;
         $.pendingRollovers[loanId] = CollarVaultShared.PendingRollover({
             mandateHash: mandateHash,
@@ -60,6 +63,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             minCallStrike: mandate.minCallStrike,
             maxPutStrike: mandate.maxPutStrike,
             maxInterestApr: mandate.maxInterestApr,
+            maxNegativeC: mandate.maxNegativeC,
             deadline: mandate.deadline,
             requestedAt: block.timestamp
         });
@@ -71,6 +75,8 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             mandate.minCallStrike,
             mandate.maxPutStrike,
             mandate.maxInterestApr,
+            fixedInterest,
+            mandate.maxNegativeC,
             mandate.deadline,
             mandate.nonce
         );

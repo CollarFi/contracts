@@ -274,7 +274,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 
@@ -315,7 +316,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
     }
@@ -339,7 +341,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
         assertTrue(receiver.tradeConfirmed(1));
@@ -360,7 +363,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 
@@ -375,7 +379,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
     }
@@ -389,6 +394,8 @@ contract LZMessagingTest is Test {
             uint256(26_000e6),
             uint256(21_000e6),
             uint256(0.2e18),
+            uint256(0),
+            uint256(0),
             uint64(block.timestamp + 1 days),
             uint256(1)
         );
@@ -435,7 +442,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 25_000e6,
                 putStrike: 20_000e6,
-                expiry: uint64(block.timestamp + 30 days)
+                expiry: uint64(block.timestamp + 30 days),
+                realizedC: 0
             })
         );
 
@@ -449,11 +457,12 @@ contract LZMessagingTest is Test {
         assertEq(tradeMessage.quoteHash, quoteHash);
         assertEq(tradeMessage.takerNonce, takerNonce);
 
-        (uint256 callStrike, uint256 putStrike, uint64 expiry) =
-            abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        (uint256 callStrike, uint256 putStrike, uint64 expiry, int256 realizedC) =
+            abi.decode(tradeMessage.data, (uint256, uint256, uint64, int256));
         assertEq(callStrike, 25_000e6);
         assertEq(putStrike, 20_000e6);
         assertEq(expiry, uint64(block.timestamp + 30 days));
+        assertEq(realizedC, 0);
 
         _deliverToMessenger(endpointL2.lastGuid(), tradeMessage);
 
@@ -510,7 +519,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 

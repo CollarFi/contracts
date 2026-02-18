@@ -15,6 +15,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
     error CV_Unauthorized();
     error CV_InvalidMessage();
     error CV_NotFound();
+    error CV_InsufficientValue();
 
     event LoanCreated(
         uint256 indexed loanId,
@@ -66,7 +67,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
                 $.deriveSubaccountId
             );
 
-        (uint256 callStrike, uint256 putStrike) = $.lzMessenger
+        (uint256 callStrike, uint256 putStrike, int256 realizedC) = $.lzMessenger
             .validateTradeConfirmedForFinalize(
                 tradeMessage,
                 finalizedLoanId,
@@ -76,6 +77,12 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
                 mandate.maxPutStrike,
                 mandate.maturity
             );
+
+        int256 totalEconomics = int256(mandate.fixedInterest) + realizedC;
+        uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
+        if (realizedDeficit > mandate.maxNegativeC) {
+            revert CV_InsufficientValue();
+        }
 
         $.tradeConfirmed[finalizedLoanId] = true;
         $.collateralActivated[finalizedLoanId] = true;
@@ -98,7 +105,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             state: CollarVaultShared.LoanState.ACTIVE_ZERO_COST,
             startTime: block.timestamp,
             interestApr: $.originationFeeApr,
-            interestOwed: _quoteOriginationFee(pending.borrowAmount, pending.maturity),
+            interestOwed: mandate.fixedInterest,
             variableDebt: 0
         });
 
@@ -116,19 +123,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             pending.borrowAmount,
             $.deriveSubaccountId
         );
-    }
-
-    function _quoteOriginationFee(uint256 borrowAmount, uint256 maturity) internal view returns (uint256) {
-        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
-        if ($.originationFeeApr == 0) {
-            return 0;
-        }
-        if (maturity <= block.timestamp) {
-            return 0;
-        }
-        uint256 duration = maturity - block.timestamp;
-        uint256 annualFee = Math.mulDiv(borrowAmount, $.originationFeeApr, 1e18);
-        return Math.mulDiv(annualFee, duration, CollarVaultShared.YEAR);
     }
 
     function _loadLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {

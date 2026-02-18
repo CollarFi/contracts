@@ -64,6 +64,8 @@ library CollarVaultShared {
         uint256 minCallStrike;
         uint256 maxPutStrike;
         uint256 maxInterestApr;
+        uint256 fixedInterest;
+        uint256 maxNegativeC;
         bool sentToL2;
     }
 
@@ -74,6 +76,7 @@ library CollarVaultShared {
         uint256 minCallStrike;
         uint256 maxPutStrike;
         uint256 maxInterestApr;
+        uint256 maxNegativeC;
         uint64 deadline;
         uint256 nonce;
     }
@@ -85,6 +88,7 @@ library CollarVaultShared {
         uint256 minCallStrike;
         uint256 maxPutStrike;
         uint256 maxInterestApr;
+        uint256 maxNegativeC;
         uint64 deadline;
         uint256 requestedAt;
     }

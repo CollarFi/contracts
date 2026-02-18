@@ -95,6 +95,8 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         uint64 expectedDeadline = loan.rolloverPending ? loan.rolloverDeadline : loan.deadline;
         uint256 expectedMinCallStrike = loan.rolloverPending ? loan.rolloverMinCallStrike : loan.minCallStrike;
         uint256 expectedMaxPutStrike = loan.rolloverPending ? loan.rolloverMaxPutStrike : loan.maxPutStrike;
+        uint256 fixedInterest = loan.rolloverPending ? loan.rolloverFixedInterest : loan.fixedInterest;
+        uint256 maxNegativeC = loan.rolloverPending ? loan.rolloverMaxNegativeC : loan.maxNegativeC;
 
         if (expectedDeadline != 0 && block.timestamp > expectedDeadline) {
             revert CTSA_InvalidRfqTradeDetails();
@@ -129,6 +131,15 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
 
         _validateCallDetails(parsed.callExpiry, parsed.callStrike, parsed.callTrade.price);
         _validatePutDetails(parsed.putExpiry, parsed.putStrike, parsed.putTrade.price);
+
+        int256 expectedC =
+            -(parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
+                + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount));
+        int256 expectedTotal = int256(fixedInterest) + expectedC;
+        uint256 expectedDeficit = expectedTotal < 0 ? uint256(-expectedTotal) : 0;
+        if (expectedDeficit > maxNegativeC) {
+            revert CTSA_InsufficientCash();
+        }
 
         int256 cashDelta = parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
             + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount);

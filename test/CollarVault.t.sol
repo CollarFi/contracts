@@ -129,6 +129,7 @@ contract CollarVaultTest is Test {
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
             maxInterestApr: 0,
+            maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
             nonce: 1
@@ -161,7 +162,7 @@ contract CollarVaultTest is Test {
             })
         );
 
-        bytes memory tradeData = abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity));
+        bytes memory tradeData = abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(0));
 
         messenger.setMessage(
             tradeGuid,
@@ -213,6 +214,7 @@ contract CollarVaultTest is Test {
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
             maxInterestApr: 0.1e18,
+            maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
             nonce: 42
@@ -274,6 +276,7 @@ contract CollarVaultTest is Test {
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
             maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 77
         });
@@ -304,7 +307,13 @@ contract CollarVaultTest is Test {
                 quoteHash: bytes32(0),
                 takerNonce: 0,
                 data: abi.encode(
-                    mandateHash, borrower, uint256(26_500e6), uint256(20_500e6), uint256(0.15e18), mandate.newMaturity
+                    mandateHash,
+                    borrower,
+                    uint256(26_500e6),
+                    uint256(20_500e6),
+                    uint256(0.15e18),
+                    mandate.newMaturity,
+                    int256(0)
                 )
             })
         );
@@ -330,6 +339,7 @@ contract CollarVaultTest is Test {
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
             maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 88
         });
@@ -353,6 +363,7 @@ contract CollarVaultTest is Test {
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
             maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 99
         });
@@ -376,6 +387,7 @@ contract CollarVaultTest is Test {
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
             maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 100
         });
@@ -402,6 +414,7 @@ contract CollarVaultTest is Test {
             minCallStrike: 26_000e6,
             maxPutStrike: 21_000e6,
             maxInterestApr: 0.2e18,
+            maxNegativeC: 500e6,
             deadline: uint64(block.timestamp + 1 days),
             nonce: 101
         });
@@ -415,6 +428,118 @@ contract CollarVaultTest is Test {
         vm.prank(keeper);
         vm.expectRevert(CollarVault.CV_InvalidState.selector);
         vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
+    }
+
+    function testFinalizeLoanRevertsWhenRealizedDeficitExceedsReserve() public {
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        CollarVault.BaselineRfq memory rfq = CollarVault.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            maxInterestApr: 0,
+            maxNegativeC: 10e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 777
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s_, v);
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+
+        bytes32 depositGuid = bytes32(uint256(6100 + loanId));
+        bytes32 tradeGuid = bytes32(uint256(6200 + loanId));
+
+        messenger.setMessage(
+            depositGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.DepositConfirmed,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: params.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        messenger.setMessage(
+            tradeGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 1,
+                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(-1_000e6))
+            })
+        );
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InsufficientValue.selector);
+        vault.finalizeLoan(loanId, depositGuid, tradeGuid);
+    }
+
+    function testSettleConsumesAndReleasesReserve() public {
+        vault.setOriginationFeeApr(0.1e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
+
+        uint256 reservedBefore = liquidityVault.reservedByLoan(loanId);
+        assertGt(reservedBefore, 0);
+
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+        vm.warp(loanBefore.maturity + 1);
+
+        bytes32 settleGuid = bytes32(uint256(7300 + loanId));
+        uint256 settlementAmount = loanBefore.principal + loanBefore.interestOwed - 100e6;
+        usdc.mint(address(vault), settlementAmount);
+        messenger.setMessage(
+            settleGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.SettlementReport,
+                loanId: loanId,
+                asset: address(usdc),
+                amount: settlementAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(uint256(1)),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.PutITM, settleGuid);
+
+        assertEq(liquidityVault.reservedByLoan(loanId), 0);
+        assertLt(liquidityVault.reservedLiquidity(), reservedBefore);
     }
 
     function _createAndFinalizeLoan(uint256 maturity, uint256 callStrike, uint256 putStrike, uint256 maxInterestApr)
@@ -439,6 +564,7 @@ contract CollarVaultTest is Test {
             callStrike: callStrike,
             borrowAmount: params.borrowAmount,
             maxInterestApr: maxInterestApr,
+            maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
             nonce: uint256(keccak256(abi.encodePacked(block.timestamp, maturity, callStrike)))
@@ -470,7 +596,7 @@ contract CollarVaultTest is Test {
             })
         );
 
-        bytes memory tradeData = abi.encode(uint256(callStrike), uint256(putStrike), uint64(params.maturity));
+        bytes memory tradeData = abi.encode(uint256(callStrike), uint256(putStrike), uint64(params.maturity), int256(0));
         messenger.setMessage(
             tradeGuid,
             CollarLZMessages.Message({
@@ -686,14 +812,14 @@ contract MockLZMessenger {
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 expectedMaturity
-    ) external pure returns (uint256 callStrike, uint256 putStrike) {
+    ) external pure returns (uint256 callStrike, uint256 putStrike, int256 realizedC) {
         require(tradeMessage.action == CollarLZMessages.Action.TradeConfirmed, "bad action");
         require(tradeMessage.loanId == expectedLoanId, "bad loan");
         require(tradeMessage.recipient == expectedRecipient, "bad recipient");
         require(expectedSubaccountId == 0 || tradeMessage.subaccountId == expectedSubaccountId, "bad subaccount");
 
         uint64 expiry;
-        (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        (callStrike, putStrike, expiry, realizedC) = abi.decode(tradeMessage.data, (uint256, uint256, uint64, int256));
         require(expiry == expectedMaturity, "bad maturity");
         require(callStrike >= minCallStrike && putStrike <= maxPutStrike, "bad strikes");
     }
@@ -717,8 +843,8 @@ contract MockLZMessenger {
         bytes32 mandateHash;
         address borrower;
         uint64 expiry;
-        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry) =
-            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64));
+        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry,) =
+            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
         require(mandateHash == expectedMandateHash, "bad mandate hash");
         require(borrower == expectedBorrower, "bad borrower");
         require(expiry == expectedMaturity, "bad maturity");

@@ -156,9 +156,11 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 minCallStrike,
                 uint256 maxPutStrike,
                 uint256 maxInterestApr,
+                uint256 fixedInterest,
+                uint256 maxNegativeC,
                 uint64 maturity,
                 uint64 deadline
-            ) = abi.decode(message.data, (address, uint256, uint256, uint256, uint64, uint64));
+            ) = abi.decode(message.data, (address, uint256, uint256, uint256, uint256, uint256, uint64, uint64));
 
             loanStore.recordMandate(
                 message.loanId,
@@ -168,6 +170,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 minCallStrike,
                 maxPutStrike,
                 maxInterestApr,
+                fixedInterest,
+                maxNegativeC,
                 maturity,
                 deadline
             );
@@ -185,9 +189,13 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 minCallStrike,
                 uint256 maxPutStrike,
                 uint256 maxInterestApr,
+                uint256 fixedInterest,
+                uint256 maxNegativeC,
                 uint64 deadline,
                 uint256 nonce
-            ) = abi.decode(message.data, (bytes32, address, uint64, uint256, uint256, uint256, uint64, uint256));
+            ) = abi.decode(
+                message.data, (bytes32, address, uint64, uint256, uint256, uint256, uint256, uint256, uint64, uint256)
+            );
             nonce;
 
             loanStore.recordRolloverMandate(
@@ -197,6 +205,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 minCallStrike,
                 maxPutStrike,
                 maxInterestApr,
+                fixedInterest,
+                maxNegativeC,
                 newMaturity,
                 deadline
             );
@@ -312,6 +322,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         uint256 callStrike;
         uint256 putStrike;
         uint64 expiry;
+        int256 realizedC;
     }
 
     function sendTradeConfirmed(TradeConfirmedParams calldata p)
@@ -340,9 +351,10 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 p.callStrike,
                 p.putStrike,
                 loan.rolloverMaxInterestApr,
-                p.expiry
+                p.expiry,
+                p.realizedC
             )
-            : abi.encode(p.callStrike, p.putStrike, p.expiry);
+            : abi.encode(p.callStrike, p.putStrike, p.expiry, p.realizedC);
 
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
             action: isRollover ? CollarLZMessages.Action.RolloverConfirmed : CollarLZMessages.Action.TradeConfirmed,

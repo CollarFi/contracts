@@ -47,6 +47,11 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
 
         uint256 totalDue = loan.principal + loan.interestOwed;
         uint256 shortfall = settlementAmount < totalDue ? totalDue - settlementAmount : 0;
+        if (shortfall > 0) {
+            $.liquidityVault.consume(loanId, shortfall);
+            settlementAmount += shortfall;
+            emit SettlementShortfall(loanId, shortfall);
+        }
 
         uint256 principalRepay = settlementAmount > loan.principal ? loan.principal : settlementAmount;
         if (principalRepay > 0) {
@@ -63,10 +68,6 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             settlementAmount > loan.principal ? Math.min(settlementAmount - loan.principal, loan.interestOwed) : 0;
         if (interestPaid > 0) {
             $.usdc.safeTransfer(address($.liquidityVault), interestPaid);
-        }
-
-        if (shortfall > 0) {
-            emit SettlementShortfall(loanId, shortfall);
         }
 
         uint256 excess = settlementAmount > totalDue ? settlementAmount - totalDue : 0;
@@ -87,6 +88,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         }
 
         _releaseCommittedPrincipal(loan.principal);
+        _releaseReserve(loanId);
         loan.state = CollarVaultShared.LoanState.CLOSED;
         emit LoanSettled(loanId, outcome, settlementAmount);
         emit LoanClosed(loanId);
@@ -117,6 +119,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             revert CV_InvalidInput();
         }
         _releaseCommittedPrincipal(loan.principal);
+        _releaseReserve(loanId);
         IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.eulerAdapter), collateralAmount);
         $.eulerAdapter.depositCollateral(loan.collateralAsset, collateralAmount, loan.borrower);
         uint256 totalDue = loan.principal + loan.interestOwed;
@@ -138,6 +141,11 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             return;
         }
         $.totalCommittedPrincipal -= amount;
+    }
+
+    function _releaseReserve(uint256 loanId) internal {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        try $.liquidityVault.release(loanId) {} catch {}
     }
 
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {
