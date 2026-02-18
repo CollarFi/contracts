@@ -129,7 +129,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0,
+            minNetInterest: 0,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -195,7 +195,7 @@ contract CollarVaultTest is Test {
         assertEq(loan.callStrike, 25_000e6);
     }
 
-    function testAcceptMandateRevertsWhenInterestAprExceedsBorrowerBound() public {
+    function testAcceptMandateAllowsWhenFixedInterestIsSigned() public {
         vault.setOriginationFeeApr(0.2e18);
         CollarVault.DepositParams memory params = CollarVault.DepositParams({
             collateralAsset: address(wbtc),
@@ -214,7 +214,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0.1e18,
+            minNetInterest: 0.1e18,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -226,13 +226,12 @@ contract CollarVaultTest is Test {
         bytes memory rfqSig = abi.encodePacked(r, s, v);
 
         vm.prank(borrower);
-        vm.expectRevert(CollarVault.CV_InvalidInput.selector);
         vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
     }
 
     function testSettleRepaysPrincipalPlusBulletInterest() public {
         vault.setOriginationFeeApr(0.1e18);
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
 
         CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
         assertGt(loanBefore.interestOwed, 0);
@@ -267,7 +266,7 @@ contract CollarVaultTest is Test {
 
     function testRolloverHappyPath() public {
         vault.setOriginationFeeApr(0.1e18);
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0);
 
         vm.warp(block.timestamp + 5 days);
         CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
@@ -331,7 +330,7 @@ contract CollarVaultTest is Test {
     }
 
     function testRolloverRevertsUnauthorizedKeeper() public {
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0);
 
         CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
             borrower: borrower,
@@ -354,7 +353,7 @@ contract CollarVaultTest is Test {
     }
 
     function testRolloverRevertsPostMaturity() public {
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 2 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 2 days, 25_000e6, 20_000e6, 0);
         vm.warp(block.timestamp + 3 days);
 
         CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
@@ -378,7 +377,7 @@ contract CollarVaultTest is Test {
     }
 
     function testRolloverFinalizeRevertsWithoutConfirmation() public {
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0);
         vm.warp(block.timestamp + 5 days);
 
         CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
@@ -405,7 +404,7 @@ contract CollarVaultTest is Test {
     }
 
     function testRolloverRequestRevertsOnReplayMandate() public {
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 20 days, 25_000e6, 20_000e6, 0);
         vm.warp(block.timestamp + 5 days);
 
         CollarVaultShared.RolloverMandate memory mandate = CollarVaultShared.RolloverMandate({
@@ -450,7 +449,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0,
+            minNetInterest: 0,
             maxNegativeC: 10e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -541,7 +540,7 @@ contract CollarVaultTest is Test {
     }
 
     function testFinalizeLoanCannotConsumeSameGuidTwice() public {
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
         loanId;
 
         // Re-using an already consumed trade/deposit guid must fail.
@@ -565,6 +564,8 @@ contract CollarVaultTest is Test {
         });
 
         uint256 loanId = _requestDeposit(params);
+        uint256 acceptTs = block.timestamp;
+        uint256 expectedInterest = ((params.borrowAmount * initialApr) / 1e18) * (params.maturity - acceptTs) / 365 days;
 
         ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
@@ -574,7 +575,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0.2e18,
+            minNetInterest: expectedInterest,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -584,9 +585,6 @@ contract CollarVaultTest is Test {
         bytes32 rfqHash = vault.hashBaselineRfq(rfq);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
         bytes memory rfqSig = abi.encodePacked(r, s, v);
-
-        uint256 acceptTs = block.timestamp;
-        uint256 expectedInterest = ((params.borrowAmount * initialApr) / 1e18) * (params.maturity - acceptTs) / 365 days;
 
         vm.prank(borrower);
         vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
@@ -639,7 +637,7 @@ contract CollarVaultTest is Test {
         assertEq(loan.interestOwed, expectedInterest, "fixed interest snapshot must remain unchanged");
     }
 
-    function testFuzzFinalizeRevertsIfAprRaisedAboveMandateBound(uint256 raisedApr) public {
+    function testFuzzFinalizeRevertsWhenMinNetInterestNotMet(uint256 requiredNet) public {
         vault.setOriginationFeeApr(0.05e18);
 
         CollarVault.DepositParams memory params = CollarVault.DepositParams({
@@ -652,6 +650,10 @@ contract CollarVaultTest is Test {
 
         uint256 loanId = _requestDeposit(params);
 
+        uint256 fixedInterest =
+            ((params.borrowAmount * 0.05e18) / 1e18) * (params.maturity - block.timestamp) / 365 days;
+        requiredNet = bound(requiredNet, fixedInterest + 1, fixedInterest + 5_000e6);
+
         ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
             loanId: loanId,
             collateralAsset: address(wbtc),
@@ -660,7 +662,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0.1e18,
+            minNetInterest: requiredNet,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -673,9 +675,6 @@ contract CollarVaultTest is Test {
 
         vm.prank(borrower);
         vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
-
-        raisedApr = bound(raisedApr, 0.1e18 + 1, 2e18);
-        vault.setOriginationFeeApr(raisedApr);
 
         bytes32 depositGuid = bytes32(uint256(8300 + loanId));
         bytes32 tradeGuid = bytes32(uint256(8400 + loanId));
@@ -715,7 +714,7 @@ contract CollarVaultTest is Test {
         );
 
         vm.prank(keeper);
-        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vm.expectRevert(CollarVault.CV_InsufficientValue.selector);
         vault.finalizeLoan(loanId, depositGuid, tradeGuid);
     }
 
@@ -741,7 +740,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0.2e18,
             maxNegativeC: maxNegativeC,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -819,7 +818,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: 25_000e6,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: 0.2e18,
+            minNetInterest: 0.2e18,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
@@ -876,7 +875,7 @@ contract CollarVaultTest is Test {
 
     function testSettleConsumesAndReleasesReserve() public {
         vault.setOriginationFeeApr(0.1e18);
-        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
 
         uint256 reservedBefore = liquidityVault.reservedByLoan(loanId);
         assertGt(reservedBefore, 0);
@@ -911,7 +910,7 @@ contract CollarVaultTest is Test {
         assertLt(liquidityVault.reservedLiquidity(), reservedBefore);
     }
 
-    function _createAndFinalizeLoan(uint256 maturity, uint256 callStrike, uint256 putStrike, uint256 maxInterestApr)
+    function _createAndFinalizeLoan(uint256 maturity, uint256 callStrike, uint256 putStrike, uint256 minNetInterest)
         internal
         returns (uint256 loanId)
     {
@@ -932,7 +931,7 @@ contract CollarVaultTest is Test {
             putStrike: params.putStrike,
             callStrike: callStrike,
             borrowAmount: params.borrowAmount,
-            maxInterestApr: maxInterestApr,
+            minNetInterest: minNetInterest,
             maxNegativeC: 500e6,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,

@@ -46,7 +46,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint64 deadline,
         bytes32 lzGuid
     );
@@ -93,7 +93,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         ) {
             revert CV_InvalidMessage();
         }
-        if (rfq.callStrike == 0 || rfq.maxInterestApr < $.originationFeeApr) {
+        if (rfq.callStrike == 0) {
             revert CV_InvalidInput();
         }
 
@@ -133,14 +133,14 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             borrowAmount: pending.borrowAmount,
             minCallStrike: minCallStrike,
             maxPutStrike: maxPutStrike,
-            maxInterestApr: rfq.maxInterestApr,
+            minNetInterest: rfq.minNetInterest,
             fixedInterest: fixedInterest,
             maxNegativeC: rfq.maxNegativeC,
             sentToL2: true
         });
 
         lzGuid = _sendMandateCreated(
-            loanId, pending, minCallStrike, maxPutStrike, rfq.maxInterestApr, fixedInterest, rfq.maxNegativeC, deadline
+            loanId, pending, minCallStrike, maxPutStrike, rfq.minNetInterest, fixedInterest, rfq.maxNegativeC, deadline
         );
 
         emit MandateAccepted(
@@ -150,7 +150,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             pending.borrowAmount,
             minCallStrike,
             maxPutStrike,
-            rfq.maxInterestApr,
+            rfq.minNetInterest,
             deadline,
             lzGuid
         );
@@ -176,9 +176,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         if (block.timestamp > mandate.deadline) {
             revert CV_InvalidState();
         }
-        if ($.originationFeeApr > mandate.maxInterestApr) {
-            revert CV_InvalidState();
-        }
+        // Borrower signs fixedInterest; no APR revalidation required at finalize.
 
         CollarLZMessages.Message memory depositMessage = _loadLZMessage(depositGuid);
         CollarLZMessages.Message memory tradeMessage = _loadLZMessage(tradeGuid);
@@ -206,6 +204,10 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             );
 
         int256 totalEconomics = int256(mandate.fixedInterest) + realizedC;
+        if (totalEconomics < int256(mandate.minNetInterest)) {
+            revert CV_InsufficientValue();
+        }
+
         uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
         if (realizedDeficit > mandate.maxNegativeC) {
             revert CV_InsufficientValue();
@@ -257,7 +259,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         CollarVaultShared.PendingDeposit memory pending,
         uint256 minCallStrike,
         uint256 maxPutStrike,
-        uint256 maxInterestApr,
+        uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
         uint64 deadline
@@ -267,7 +269,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             pending.borrower,
             minCallStrike,
             maxPutStrike,
-            maxInterestApr,
+            minNetInterest,
             fixedInterest,
             maxNegativeC,
             uint64(pending.maturity),

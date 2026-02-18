@@ -10,7 +10,7 @@ interface ICollarVaultFinalizeModule {
         uint256 putStrike;
         uint256 callStrike;
         uint256 borrowAmount;
-        uint256 maxInterestApr;
+        uint256 minNetInterest;
         uint256 maxNegativeC;
         uint64 rfqExpiry;
         address borrower;

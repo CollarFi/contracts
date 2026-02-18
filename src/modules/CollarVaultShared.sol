@@ -63,7 +63,7 @@ library CollarVaultShared {
         uint256 borrowAmount;
         uint256 minCallStrike;
         uint256 maxPutStrike;
-        uint256 maxInterestApr;
+        uint256 minNetInterest;
         uint256 fixedInterest;
         uint256 maxNegativeC;
         bool sentToL2;

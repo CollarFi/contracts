@@ -48,7 +48,7 @@ contract CollarVault is
     // Quote-based RFQ flow has been removed; loans are now created via keeper-signed RFQ baseline + mandate + L2 TradeConfirmed.
 
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
-        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 maxInterestApr,uint256 maxNegativeC,uint64 rfqExpiry,address borrower,uint256 nonce)"
+        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 minNetInterest,uint256 maxNegativeC,uint64 rfqExpiry,address borrower,uint256 nonce)"
     );
 
     bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
@@ -293,7 +293,7 @@ contract CollarVault is
             uint256 borrowAmount,
             uint256 minCallStrike,
             uint256 maxPutStrike,
-            uint256 maxInterestApr,
+            uint256 minNetInterest,
             bool sentToL2
         )
     {
@@ -308,7 +308,7 @@ contract CollarVault is
             mandate.borrowAmount,
             mandate.minCallStrike,
             mandate.maxPutStrike,
-            mandate.maxInterestApr,
+            mandate.minNetInterest,
             mandate.sentToL2
         );
     }
@@ -411,7 +411,7 @@ contract CollarVault is
                 rfq.putStrike,
                 rfq.callStrike,
                 rfq.borrowAmount,
-                rfq.maxInterestApr,
+                rfq.minNetInterest,
                 rfq.maxNegativeC,
                 rfq.rfqExpiry,
                 rfq.borrower,

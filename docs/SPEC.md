@@ -202,7 +202,10 @@ The agreed origination model is:
 - Option net premium is `C = callPremium - putPremium`.
 - Negative `C` (put premium larger than call premium) is allowed; Derive/TSA cash may go temporarily negative.
 - Before RFQ execution, L1 reserves `maxNegativeC` liquidity per loan in the LP vault (non-withdrawable).
-- RFQ/trade confirmation must satisfy `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(I + C))`.
+- Keeper-signed baseline RFQ includes `minNetInterest` (minimum net value required for LP + protocol economics).
+- RFQ/trade confirmation must satisfy both:
+  - `I + C >= minNetInterest`
+  - `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(I + C))`.
 - On settlement, actual deficit is covered by consuming reserved liquidity; any unused reserve is released.
 
 This makes borrower obligations deterministic (`I` fixed), while allowing option legs to execute under bounded temporary deficit.
