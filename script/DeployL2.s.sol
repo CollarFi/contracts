@@ -31,6 +31,8 @@ import {IOptionRiskVerifier} from "../src/interfaces/IOptionRiskVerifier.sol";
 import {OptionRiskVerifier} from "../src/verifiers/OptionRiskVerifier.sol";
 import {IRfqVerifier} from "../src/interfaces/IRfqVerifier.sol";
 import {RfqVerifier} from "../src/verifiers/RfqVerifier.sol";
+import {ICollarTsaRfqDelegateModule} from "../src/interfaces/ICollarTsaRfqDelegateModule.sol";
+import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateModule.sol";
 
 /// @dev Deploy L2 protocol components.
 ///
@@ -63,7 +65,8 @@ contract DeployL2 is Script {
         address admin,
         address loanStoreAddr,
         address optionRiskVerifierAddr,
-        address rfqVerifierAddr
+        address rfqVerifierAddr,
+        address rfqDelegateModuleAddr
     ) internal view returns (bytes memory) {
         address initialOwner = vm.envOr("TSA_INITIAL_OWNER", admin);
 
@@ -90,6 +93,7 @@ contract DeployL2 is Script {
             optionAsset: IOptionAsset(vm.envAddress("OPTION_ASSET")),
             optionRiskVerifier: IOptionRiskVerifier(optionRiskVerifierAddr),
             rfqVerifier: IRfqVerifier(rfqVerifierAddr),
+            rfqDelegateModule: ICollarTsaRfqDelegateModule(rfqDelegateModuleAddr),
             loanStore: loanStoreAddr
         });
 
@@ -111,6 +115,7 @@ contract DeployL2 is Script {
         bytes memory tsaInitData = vm.envOr("TSA_INIT_DATA", bytes(""));
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
+        address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
 
@@ -134,6 +139,9 @@ contract DeployL2 is Script {
         if (rfqVerifierAddr == address(0)) {
             rfqVerifierAddr = address(new RfqVerifier());
         }
+        if (rfqDelegateModuleAddr == address(0)) {
+            rfqDelegateModuleAddr = address(new CollarTsaRfqDelegateModule());
+        }
 
         if (tsaProxyAddr == address(0)) {
             if (tsaImplementation == address(0)) {
@@ -142,7 +150,9 @@ contract DeployL2 is Script {
 
             // Auto-build initializer calldata if not provided explicitly.
             if (tsaInitData.length == 0) {
-                tsaInitData = _buildTsaInitData(admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr);
+                tsaInitData = _buildTsaInitData(
+                    admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr, rfqDelegateModuleAddr
+                );
             }
 
             // Deploy + initialize atomically in ERC1967Proxy constructor.
@@ -182,6 +192,7 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2TsaImplementation", tsaImplementation);
         json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
+        json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
         vm.writeJson(json, outPath);
 

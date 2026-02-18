@@ -6,6 +6,7 @@ import {CollarTSA} from "../../src/CollarTSA.sol";
 import {CollarLoanStore} from "../../src/CollarLoanStore.sol";
 import {OptionRiskVerifier} from "../../src/verifiers/OptionRiskVerifier.sol";
 import {RfqVerifier} from "../../src/verifiers/RfqVerifier.sol";
+import {CollarTsaRfqDelegateModule} from "../../src/modules/CollarTsaRfqDelegateModule.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
@@ -54,6 +55,7 @@ contract CollarTSATestUtils is TSATestUtils {
         loanStore = new CollarLoanStore(address(this));
         OptionRiskVerifier optionRiskVerifier = new OptionRiskVerifier();
         RfqVerifier rfqVerifier = new RfqVerifier();
+        CollarTsaRfqDelegateModule rfqDelegateModule = new CollarTsaRfqDelegateModule();
 
         proxyAdmin.upgradeAndCall(
             ITransparentUpgradeableProxy(address(proxy)),
@@ -80,6 +82,7 @@ contract CollarTSATestUtils is TSATestUtils {
                     optionAsset: optionAsset,
                     optionRiskVerifier: optionRiskVerifier,
                     rfqVerifier: rfqVerifier,
+                    rfqDelegateModule: rfqDelegateModule,
                     loanStore: address(loanStore)
                 })
             )

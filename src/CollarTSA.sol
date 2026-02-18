@@ -19,8 +19,8 @@ import {IMatching} from "v2-matching/src/interfaces/IMatching.sol";
 import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IRfqVerifier} from "./interfaces/IRfqVerifier.sol";
+import {ICollarTsaRfqDelegateModule} from "./interfaces/ICollarTsaRfqDelegateModule.sol";
 
-import {ICollarLoanStore} from "./interfaces/ICollarLoanStore.sol";
 import {IOptionRiskVerifier} from "./interfaces/IOptionRiskVerifier.sol";
 
 /// @title CollarTSA
@@ -41,6 +41,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         IOptionAsset optionAsset;
         IOptionRiskVerifier optionRiskVerifier;
         IRfqVerifier rfqVerifier;
+        ICollarTsaRfqDelegateModule rfqDelegateModule;
         address loanStore;
     }
 
@@ -76,6 +77,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         IOptionAsset optionAsset;
         ISpotFeed baseFeed;
         IRfqVerifier rfqVerifier;
+        ICollarTsaRfqDelegateModule rfqDelegateModule;
         CollarTSAParams params;
         CollateralManagementParams collateralManagementParams;
         /// @dev Only one hash is considered valid at a time, and it is revoked when a new one comes in.
@@ -122,12 +124,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
         if (
             collarInitParams.loanStore == address(0) || address(collarInitParams.optionRiskVerifier) == address(0)
                 || address(collarInitParams.rfqVerifier) == address(0)
+                || address(collarInitParams.rfqDelegateModule) == address(0)
         ) {
             revert CTSA_InvalidParams();
         }
         $.loanStore = collarInitParams.loanStore;
         $.optionRiskVerifier = collarInitParams.optionRiskVerifier;
         $.rfqVerifier = collarInitParams.rfqVerifier;
+        $.rfqDelegateModule = collarInitParams.rfqDelegateModule;
 
         BaseTSAAddresses memory tsaAddresses = getBaseTSAAddresses();
         tsaAddresses.depositAsset.approve(address($.depositModule), type(uint256).max);
@@ -183,6 +187,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
         _getCollarTSAStorage().rfqVerifier = newVerifier;
     }
 
+    function setRfqDelegateModule(ICollarTsaRfqDelegateModule newModule) external onlyOwner {
+        if (address(newModule) == address(0)) {
+            revert CTSA_InvalidParams();
+        }
+        _getCollarTSAStorage().rfqDelegateModule = newModule;
+        emit CollarTsaRfqDelegateModuleSet(address(newModule));
+    }
+
     ///////////////////////
     // Action Validation //
     ///////////////////////
@@ -224,7 +236,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
             if (action.subaccountId != subAccount()) {
                 revert CTSA_InvalidSubaccount();
             }
-            _verifyRfqAction(action, extraData);
+            _verifyRfqActionViaDelegate(action, extraData);
         } else {
             revert CTSA_InvalidModule();
         }
@@ -291,112 +303,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     /// @dev If extraData is 0, the action is a maker action; otherwise, it is a taker action.
-    function _verifyRfqAction(IMatching.Action memory action, bytes memory extraData) internal view {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
-        BaseTSAAddresses memory tsaAddresses = getBaseTSAAddresses();
-
-        IRfqVerifier.ParsedRfq memory parsed = $.rfqVerifier
-            .parseAndValidate(action.data, extraData, address(tsaAddresses.wrappedDepositAsset), address($.optionAsset));
-
-        if (parsed.isSpot) {
-            _verifySpotRfqTrade(parsed.spotTrade, parsed.isTaker, parsed.loanId);
-            return;
-        }
-
-        uint256 loanId = parsed.loanId;
-        if (loanId == 0) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-
-        ICollarLoanStore.Loan memory loan = ICollarLoanStore($.loanStore).getLoan(loanId);
-        if (loan.borrower == address(0) || loan.consumed) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (loan.deadline != 0 && block.timestamp > loan.deadline) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (loan.maturity != 0 && parsed.callExpiry != loan.maturity) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (loan.minCallStrike != 0 && parsed.callStrike < loan.minCallStrike) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (loan.maxPutStrike != 0 && parsed.putStrike > loan.maxPutStrike) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-
-        int256 callAmount = parsed.isTaker ? -parsed.callTrade.amount : parsed.callTrade.amount;
-        int256 putAmount = parsed.isTaker ? -parsed.putTrade.amount : parsed.putTrade.amount;
-
-        if (callAmount >= 0) {
-            revert CTSA_CanOnlyOpenShortCalls();
-        }
-        if (putAmount <= 0) {
-            revert CTSA_OnlyLongPutsAllowed();
-        }
-        if (callAmount.abs() != putAmount.abs()) {
-            revert CTSA_InvalidTradeAmount();
-        }
-
-        (uint256 shortCalls, uint256 baseBalance, int256 cashBalance,,) = _getSubAccountStats();
-        if (shortCalls + callAmount.abs() > baseBalance) {
-            revert CTSA_SellingTooManyCalls();
-        }
-
-        _validateCallDetails(parsed.callExpiry, parsed.callStrike, parsed.callTrade.price);
-        _validatePutDetails(parsed.putExpiry, parsed.putStrike, parsed.putTrade.price);
-
-        int256 cashDelta = parsed.callTrade.price.toInt256().multiplyDecimal(parsed.callTrade.amount)
-            + parsed.putTrade.price.toInt256().multiplyDecimal(parsed.putTrade.amount);
-        int256 postTradeCash = cashBalance + (parsed.isTaker ? cashDelta : -cashDelta);
-        if (postTradeCash < $.params.maxNegCash) {
-            revert CTSA_InsufficientCash();
-        }
-    }
-
-    function _verifySpotRfqTrade(IRfqModule.TradeData memory trade, bool isTaker, uint256 loanId) internal view {
-        if (!isTaker) {
-            revert CTSA_SpotRfqRequiresTaker();
-        }
-        if (trade.subId != 0) {
-            revert CTSA_InvalidAsset();
-        }
-        if (loanId == 0) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-
-        uint256 amount = trade.amount.toUint256();
-        if (amount == 0) {
-            revert CTSA_SpotRfqAmountInvalid();
-        }
-
-        address store = _getCollarTSAStorage().loanStore;
-        if (store == address(0)) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-
-        ICollarLoanStore.Loan memory loan = ICollarLoanStore(store).getLoan(loanId);
-        if (loan.borrower == address(0) || loan.consumed) {
-            revert CTSA_InvalidRfqTradeDetails();
-        }
-        if (loan.collateralAsset != address(0) && trade.asset != loan.collateralAsset) {
-            revert CTSA_InvalidAsset();
-        }
-        if (loan.collateralAmount != 0 && amount > loan.collateralAmount) {
-            revert CTSA_SpotRfqSellTooMuch();
-        }
-
-        uint256 basePrice = _getBasePrice();
-        if (
-            trade.price
-                < basePrice.multiplyDecimal(_getCollarTSAStorage().collateralManagementParams.worstSpotSellPrice)
-        ) {
-            revert CTSA_SpotRfqPriceTooLow();
-        }
-
-        (, uint256 baseBalance,,,) = _getSubAccountStats();
-        if (amount > baseBalance) {
-            revert CTSA_SpotRfqSellTooMuch();
+    function _verifyRfqActionViaDelegate(IMatching.Action memory action, bytes memory extraData) internal {
+        bytes memory payload = abi.encodeCall(ICollarTsaRfqDelegateModule.verifyRfqAction, (action, extraData));
+        (bool success, bytes memory returnData) =
+            address(_getCollarTSAStorage().rfqDelegateModule).delegatecall(payload);
+        if (!success) {
+            assembly {
+                revert(add(returnData, 32), mload(returnData))
+            }
         }
     }
 
@@ -562,6 +476,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
     event CollarTSAParamsSet(CollarTSAParams params);
     event CollarCollateralManagementParamsSet(CollateralManagementParams collateralManagementParams);
+    event CollarTsaRfqDelegateModuleSet(address module);
 
     error CTSA_InvalidParams();
     error CTSA_InvalidActionExpiry();
