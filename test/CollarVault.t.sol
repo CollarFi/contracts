@@ -506,6 +506,50 @@ contract CollarVaultTest is Test {
         vault.finalizeLoan(loanId, depositGuid, tradeGuid);
     }
 
+    function testFuzzCreateDepositRevertsOnBorrowAmountMismatch(uint256 putStrike, uint256 borrowAmount) public {
+        putStrike = bound(putStrike, 1, 100_000e6);
+        borrowAmount = bound(borrowAmount, 1, 1_000_000e6);
+
+        uint256 expected = (uint256(1e8) * putStrike) / uint256(1e8);
+        vm.assume(borrowAmount != expected);
+
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: putStrike,
+            borrowAmount: borrowAmount
+        });
+
+        IAllowanceTransfer.PermitSingle memory permit = IAllowanceTransfer.PermitSingle({
+            details: IAllowanceTransfer.PermitDetails({
+                token: params.collateralAsset,
+                amount: uint160(params.collateralAmount),
+                expiration: uint48(block.timestamp + 1 days),
+                nonce: 0
+            }),
+            spender: address(vault),
+            sigDeadline: block.timestamp + 1 days
+        });
+
+        bytes memory permitSig = permit2Signer.signPermitSingle(borrowerKey, permit);
+
+        vm.startPrank(borrower);
+        vm.expectRevert(CollarVault.CV_InvalidInput.selector);
+        vault.createDepositWithPermit(params, permit, permitSig);
+        vm.stopPrank();
+    }
+
+    function testFinalizeLoanCannotConsumeSameGuidTwice() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
+        loanId;
+
+        // Re-using an already consumed trade/deposit guid must fail.
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_NotFound.selector);
+        vault.finalizeLoan(loanId, bytes32(uint256(100 + loanId)), bytes32(uint256(200 + loanId)));
+    }
+
     function testSettleConsumesAndReleasesReserve() public {
         vault.setOriginationFeeApr(0.1e18);
         uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0.2e18);
