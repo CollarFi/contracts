@@ -99,6 +99,7 @@ uv run python ops/lz_harness/deploy.py --broadcast
 
 # Dry-run L1 deployment (safe default, named foundry account/keystore)
 # ADMIN is optional; deploy runner derives it from ACCOUNT (foundry keystore) if unset.
+# Set PROXY_ADMIN to keep proxy upgrade ownership separate from protocol admin roles.
 uv run python ops/deploy_l1.py --env testnet
 
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
@@ -109,6 +110,7 @@ uv run python ops/deploy_l1.py --env testnet --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
+# Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
 # Wire L1<->L2 LayerZero peers after both sides are deployed

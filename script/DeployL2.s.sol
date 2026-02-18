@@ -40,6 +40,9 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - ADMIN (address)
 /// - OUTPUT_JSON (string)
 ///
+/// Optional proxy admin owner vars:
+/// - PROXY_ADMIN (address, default ADMIN)
+///
 /// Optional wiring vars (can be set later via script/wire_lz_peers.py and receiver admin calls):
 /// - L1_MESSENGER (address)           (for setPeer)
 /// - L1_VAULT (address)               (vaultRecipient)
@@ -109,6 +112,7 @@ contract DeployL2 is Script {
 
     function run() external {
         address admin = vm.envAddress("ADMIN");
+        address proxyAdminOwner = vm.envOr("PROXY_ADMIN", admin);
 
         address l1Messenger = vm.envOr("L1_MESSENGER", address(0));
         address l1Vault = vm.envOr("L1_VAULT", address(0));
@@ -163,8 +167,8 @@ contract DeployL2 is Script {
             }
 
             // Deploy + initialize atomically in transparent proxy constructor.
-            // ProxyAdmin owner is ADMIN/deployer for now (can be transferred to multisig later).
-            tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, admin, tsaInitData));
+            // ProxyAdmin owner is PROXY_ADMIN (defaults to ADMIN).
+            tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
         }
 
         CollarTSAReceiver receiver = new CollarTSAReceiver(

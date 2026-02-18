@@ -31,6 +31,7 @@ contract DeployL1 is Script {
 
     struct EnvConfig {
         address admin;
+        address proxyAdminOwner;
         address treasury;
         address vaultOwner;
         address permit2;
@@ -79,6 +80,7 @@ contract DeployL1 is Script {
 
     function _loadConfig() internal view returns (EnvConfig memory cfg) {
         cfg.admin = vm.envOr("ADMIN", msg.sender);
+        cfg.proxyAdminOwner = vm.envOr("PROXY_ADMIN", cfg.admin);
         cfg.treasury = vm.envAddress("TREASURY");
         cfg.vaultOwner = vm.envOr("VAULT_OWNER", cfg.admin);
 
@@ -164,8 +166,8 @@ contract DeployL1 is Script {
                 cfg.treasury
             )
         );
-        // Transparent proxy with ProxyAdmin owner set to ADMIN/deployer.
-        address vaultProxy = address(new TransparentUpgradeableProxy(vaultImpl, cfg.admin, initData));
+        // Transparent proxy with ProxyAdmin owner set to PROXY_ADMIN (defaults to ADMIN).
+        address vaultProxy = address(new TransparentUpgradeableProxy(vaultImpl, cfg.proxyAdminOwner, initData));
         vault = CollarVault(payable(vaultProxy));
     }
 

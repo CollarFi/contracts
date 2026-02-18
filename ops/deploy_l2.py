@@ -213,6 +213,8 @@ def main(
         "ADMIN": l2["ADMIN"],
         "OUTPUT_JSON": l2["OUTPUT_JSON"],
     }
+    if l2.get("PROXY_ADMIN"):
+        env_overrides["PROXY_ADMIN"] = l2["PROXY_ADMIN"]
 
     for opt in (
         "L1_MESSENGER",

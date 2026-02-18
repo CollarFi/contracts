@@ -53,6 +53,8 @@ def main(
         "TREASURY": l1["TREASURY"],
         "OUTPUT_JSON": l1["OUTPUT_JSON"],
     }
+    if l1.get("PROXY_ADMIN"):
+        env_overrides["PROXY_ADMIN"] = l1["PROXY_ADMIN"]
 
     if l1.get("WETH_ASSET") and not l1.get("L2_WRAPPED_WETH_ASSET"):
         l1["L2_WRAPPED_WETH_ASSET"] = resolve_l2_wrapped_asset_from_tsa(l2_env_file)
