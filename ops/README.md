@@ -27,7 +27,7 @@ uv run python ops/ensure_lz_route.py --env testnet
 uv run python ops/ensure_lz_route.py --env testnet --broadcast
 
 # Detailed route diagnostics
-uv run python ops/check_lz_uln.py --env testnet --json
+uv run python ops/preflight/check_lz_uln.py --env testnet --json
 
 # Ops helpers
 uv run python ops/management/enable_collateral.py --env testnet

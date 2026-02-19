@@ -118,15 +118,15 @@ uv run python ops/deploy_l1.py --env testnet --broadcast
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
 # Wire L1<->L2 LayerZero peers after both sides are deployed
-uv run python ops/wire_lz_peers.py --env testnet --broadcast
+uv run python ops/preflight/wire_lz_peers.py --env testnet --broadcast
 
 # Unified preflight: recipient wiring + ULN check + asset mapping (optional pending-message scan)
 uv run python ops/preflight.py --env testnet
 uv run python ops/preflight.py --env testnet --include-messages
 
 # Check LayerZero ULN/route config for deployed messenger/receiver using current env files
-uv run python ops/check_lz_uln.py --env testnet
-uv run python ops/check_lz_uln.py --env testnet --json
+uv run python ops/preflight/check_lz_uln.py --env testnet
+uv run python ops/preflight/check_lz_uln.py --env testnet --json
 
 # Apply ULN config to both OApps using current effective endpoint configs (dry-run by default)
 # Also enforces OApp remoteEid + defaultOptions from env (LZ_RECEIVE_GAS/LZ_RECEIVE_VALUE)

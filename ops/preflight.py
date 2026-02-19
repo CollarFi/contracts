@@ -149,7 +149,7 @@ def all_checks(
     uln = None
     if include_uln:
         try:
-            uln = _run_json(["uv", "run", "python", "ops/check_lz_uln.py", "--env", (env_profile or "testnet"), "--json"])
+            uln = _run_json(["uv", "run", "python", "ops/preflight/check_lz_uln.py", "--env", (env_profile or "testnet"), "--json"])
         except Exception as exc:
             uln = {"ok": False, "error": f"failed to parse check_lz_uln output: {exc}"}
 
