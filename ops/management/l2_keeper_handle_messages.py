@@ -112,21 +112,24 @@ def _parse_uint(raw: str) -> int:
 def _quote_ack_native_fee(rpc_url: str, receiver_addr: str, pending_raw: str) -> int:
     msg = _parse_pending_message(pending_raw)
     options = cast_call(rpc_url, receiver_addr, "defaultOptions()(bytes)")
+    message_tuple = (
+        f"({ACTION_DEPOSIT_CONFIRMED},"
+        f"{msg['loanId']},"
+        f"{msg['asset']},"
+        f"{msg['amount']},"
+        f"{msg['recipient']},"
+        f"{msg['subaccountId']},"
+        f"{msg['socketMessageId']},"
+        f"0,"
+        f"0x{'0'*64},"
+        f"0,"
+        f"0x)"
+    )
     quote_raw = cast_call(
         rpc_url,
         receiver_addr,
         "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
-        str(ACTION_DEPOSIT_CONFIRMED),
-        str(msg["loanId"]),
-        msg["asset"],
-        str(msg["amount"]),
-        msg["recipient"],
-        str(msg["subaccountId"]),
-        msg["socketMessageId"],
-        "0",
-        "0x" + "0" * 64,
-        "0",
-        "0x",
+        message_tuple,
         options,
     )
     cleaned = quote_raw.strip()
