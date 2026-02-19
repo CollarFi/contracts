@@ -34,8 +34,45 @@ def cast_send(rpc: str, to: str, sig: str, *args: str, value: str | None = None)
     return run(cmd)
 
 
-def sign_typed_data(typed: dict) -> str:
-    return run(["cast", "wallet", "sign", "--data", "--private-key", ANVIL_PK0, json.dumps(typed)])
+def sign_hash_no_prefix(digest_hex: str) -> str:
+    return run(["cast", "wallet", "sign", "--no-hash", "--private-key", ANVIL_PK0, digest_hex])
+
+
+def _keccak_text(text: str) -> str:
+    return run(["cast", "keccak", text]).splitlines()[0].strip()
+
+
+def _keccak_hex(hex_data: str) -> str:
+    return run(["cast", "keccak", hex_data]).splitlines()[0].strip()
+
+
+def _abi_encode(sig: str, *args: str) -> str:
+    return run(["cast", "abi-encode", sig, *args]).splitlines()[0].strip()
+
+
+def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, expiration: int, nonce: int, spender: str, sig_deadline: int) -> str:
+    domain_typehash = _keccak_text("EIP712Domain(string name,uint256 chainId,address verifyingContract)")
+    name_hash = _keccak_text("Permit2")
+    domain_sep = _keccak_hex(_abi_encode("f(bytes32,bytes32,uint256,address)", domain_typehash, name_hash, str(chain_id), permit2))
+
+    details_typehash = _keccak_text("PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)")
+    details_hash = _keccak_hex(
+        _abi_encode(
+            "f(bytes32,address,uint160,uint48,uint48)",
+            details_typehash,
+            token,
+            str(amount),
+            str(expiration),
+            str(nonce),
+        )
+    )
+
+    single_typehash = _keccak_text("PermitSingle(PermitDetails details,address spender,uint256 sigDeadline)PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)")
+    struct_hash = _keccak_hex(_abi_encode("f(bytes32,bytes32,address,uint256)", single_typehash, details_hash, spender, str(sig_deadline)))
+
+    prefix = "0x1901"
+    digest = _keccak_hex(prefix + domain_sep[2:] + struct_hash[2:])
+    return sign_hash_no_prefix(digest)
 
 
 def ensure_token_balance(rpc: str, token: str, to: str, amount: int) -> str:
@@ -132,41 +169,17 @@ def main(
         fund_mode = ensure_token_balance(l1_rpc, weth, ANVIL_ADDR0, 10**18)
         cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1))
 
-        # Permit2 typed data
         chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
         now = int(time.time())
-        permit = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
-                "PermitDetails": [
-                    {"name": "token", "type": "address"},
-                    {"name": "amount", "type": "uint160"},
-                    {"name": "expiration", "type": "uint48"},
-                    {"name": "nonce", "type": "uint48"},
-                ],
-                "PermitSingle": [
-                    {"name": "details", "type": "PermitDetails"},
-                    {"name": "spender", "type": "address"},
-                    {"name": "sigDeadline", "type": "uint256"},
-                ],
-            },
-            "primaryType": "PermitSingle",
-            "domain": {"name": "Permit2", "chainId": chain_id, "verifyingContract": permit2},
-            "message": {
-                "details": {"token": weth, "amount": str(10**18), "expiration": str(now + 3600), "nonce": "0"},
-                "spender": vault,
-                "sigDeadline": str(now + 3600),
-            },
-        }
-        sig = sign_typed_data(permit)
+        expiration = now + 3600
+        sig_deadline = now + 3600
+        allow_raw = cast_call(l1_rpc, permit2, "allowance(address,address,address)(uint160,uint48,uint48)", ANVIL_ADDR0, weth, vault)
+        nonce = int(allow_raw.splitlines()[2].split()[0])
+        sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline)
 
         maturity = now + 7 * 24 * 3600
         params = f"({weth},1000000000000000000,{maturity},1500000000000000000000,1500000000)"
-        permit_arg = f"(({weth},1000000000000000000,{now+3600},0),{vault},{now+3600})"
+        permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
 
         tx = cast_send(
             l1_rpc,
