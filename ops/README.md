@@ -37,6 +37,9 @@ uv run python ops/preflight/l2_message_preflight.py --env testnet --json
 uv run python ops/management/l1_message_preflight.py --env testnet --logs-rpc-url https://sepolia-rollup.arbitrum.io/rpc --json
 uv run python ops/management/l2_keeper_handle_messages.py --env testnet --once
 uv run python ops/management/l1_keeper_handle_messages.py --env testnet --once --logs-rpc-url https://sepolia-rollup.arbitrum.io/rpc
+
+# E2E on forked deployments from l1.json/l2.json
+uv run python ops/e2e_deployment.py --l1-json deployments/421614/l1.json --l2-json deployments/901/l2.json
 ```
 
 ## Defaults and safety
