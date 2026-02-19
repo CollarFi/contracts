@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
@@ -14,6 +14,7 @@ import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
+import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
 import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
 import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
@@ -26,8 +27,11 @@ import {OptionsBuilder} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/libs/
 contract DeployL1 is Script {
     using OptionsBuilder for bytes;
 
+    bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+
     struct EnvConfig {
         address admin;
+        address proxyAdminOwner;
         address treasury;
         address vaultOwner;
         address permit2;
@@ -47,6 +51,7 @@ contract DeployL1 is Script {
         uint256 wethPayloadSize;
         uint256 wethStrikeScale;
         address l2WrappedWethAsset;
+        uint256 deriveSubaccountId;
         string outputJson;
     }
 
@@ -56,6 +61,7 @@ contract DeployL1 is Script {
         CollarVaultMessenger messenger;
         CollarVaultFinalizeModule finalizeModule;
         CollarVaultSettleModule settleModule;
+        CollarVaultRolloverModule rolloverModule;
         address liquidityVault;
         address eulerAdapter;
         address lzEndpoint;
@@ -75,6 +81,7 @@ contract DeployL1 is Script {
 
     function _loadConfig() internal view returns (EnvConfig memory cfg) {
         cfg.admin = vm.envOr("ADMIN", msg.sender);
+        cfg.proxyAdminOwner = vm.envOr("PROXY_ADMIN", cfg.admin);
         cfg.treasury = vm.envAddress("TREASURY");
         cfg.vaultOwner = vm.envOr("VAULT_OWNER", cfg.admin);
 
@@ -99,6 +106,7 @@ contract DeployL1 is Script {
         cfg.wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
         cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
         cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
+        cfg.deriveSubaccountId = vm.envOr("DERIVE_SUBACCOUNT_ID", uint256(0));
 
         cfg.outputJson = vm.envString("OUTPUT_JSON");
     }
@@ -113,10 +121,15 @@ contract DeployL1 is Script {
 
         dep.finalizeModule = new CollarVaultFinalizeModule();
         dep.settleModule = new CollarVaultSettleModule();
+        dep.rolloverModule = new CollarVaultRolloverModule();
 
         dep.vault.setLZMessenger(ICollarVaultMessenger(address(dep.messenger)));
+        if (cfg.deriveSubaccountId != 0) {
+            dep.vault.setDeriveSubaccountId(cfg.deriveSubaccountId);
+        }
         dep.vault.setFinalizeModule(address(dep.finalizeModule));
         dep.vault.setSettleModule(address(dep.settleModule));
+        dep.vault.setRolloverModule(address(dep.rolloverModule));
 
         if (cfg.wethAsset != address(0)) {
             if (cfg.l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
@@ -158,7 +171,8 @@ contract DeployL1 is Script {
                 cfg.treasury
             )
         );
-        address vaultProxy = address(new ERC1967Proxy(vaultImpl, initData));
+        // Transparent proxy with ProxyAdmin owner set to PROXY_ADMIN (defaults to ADMIN).
+        address vaultProxy = address(new TransparentUpgradeableProxy(vaultImpl, cfg.proxyAdminOwner, initData));
         vault = CollarVault(payable(vaultProxy));
     }
 
@@ -168,8 +182,8 @@ contract DeployL1 is Script {
     {
         messenger = new CollarVaultMessenger(cfg.admin, address(vault), lzEndpoint, cfg.l2Eid);
         if (cfg.lzReceiveGas > 0) {
-            bytes memory lzOptions =
-                OptionsBuilder.newOptions().addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
+            bytes memory lzOptions = OptionsBuilder.newOptions()
+                .addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
             messenger.setDefaultOptions(lzOptions);
         }
     }
@@ -200,27 +214,37 @@ contract DeployL1 is Script {
         return address(adapter);
     }
 
+    function _proxyAdminOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
     function _writeOutput(EnvConfig memory cfg, Deployed memory dep) internal {
         string memory json;
         json = vm.serializeAddress("addrs", "l1Vault", address(dep.vault));
         json = vm.serializeAddress("addrs", "l1VaultProxy", address(dep.vault));
         json = vm.serializeAddress("addrs", "l1VaultImplementation", dep.vaultImpl);
+        json = vm.serializeAddress("addrs", "l1VaultProxyAdmin", _proxyAdminOf(address(dep.vault)));
         json = vm.serializeAddress("addrs", "l1Messenger", address(dep.messenger));
         json = vm.serializeAddress("addrs", "l1FinalizeModule", address(dep.finalizeModule));
         json = vm.serializeAddress("addrs", "l1SettleModule", address(dep.settleModule));
+        json = vm.serializeAddress("addrs", "l1RolloverModule", address(dep.rolloverModule));
         json = vm.serializeAddress("addrs", "l1LiquidityVault", dep.liquidityVault);
         json = vm.serializeAddress("addrs", "l1EulerAdapter", dep.eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", cfg.permit2);
         json = vm.serializeAddress("addrs", "l1WethAdapter", dep.wethAdapter);
+        json = vm.serializeUint("addrs", "l1DeriveSubaccountId", cfg.deriveSubaccountId);
         vm.writeJson(json, cfg.outputJson);
     }
 
     function _logSummary(EnvConfig memory cfg, Deployed memory dep) internal view {
         console2.log("L1 vault proxy", address(dep.vault));
         console2.log("L1 vault implementation", dep.vaultImpl);
+        console2.log("L1 vault proxy admin", _proxyAdminOf(address(dep.vault)));
         console2.log("L1 messenger", address(dep.messenger));
         console2.log("L1 finalizeModule", address(dep.finalizeModule));
         console2.log("L1 settleModule", address(dep.settleModule));
+        console2.log("L1 rolloverModule", address(dep.rolloverModule));
         console2.log("L1 liquidityVault", dep.liquidityVault);
         console2.log("L1 eulerAdapter placeholder", dep.eulerAdapter);
         console2.log("L1 permit2", cfg.permit2);
@@ -232,6 +256,9 @@ contract DeployL1 is Script {
         }
         if (dep.wethAdapter != address(0)) {
             console2.log("L1 WETH adapter", dep.wethAdapter);
+        }
+        if (cfg.deriveSubaccountId > 0) {
+            console2.log("L1 derive subaccount id", cfg.deriveSubaccountId);
         }
         if (cfg.lzReceiveGas > 0) {
             console2.log("L1 messenger defaultOptions receive gas", cfg.lzReceiveGas);

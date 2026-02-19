@@ -16,6 +16,7 @@ import {CollarLoanStore} from "../src/CollarLoanStore.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol";
 import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
+import {ICollarLoanStore} from "../src/interfaces/ICollarLoanStore.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 contract MockEndpointV2 {
@@ -273,7 +274,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 
@@ -314,7 +316,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
     }
@@ -338,7 +341,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
         assertTrue(receiver.tradeConfirmed(1));
@@ -359,7 +363,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 
@@ -374,9 +379,48 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
+    }
+
+    function testHandleRolloverIntentRecordsMandate() public {
+        bytes32 mandateHash = keccak256("rollover");
+        bytes memory data = abi.encode(
+            mandateHash,
+            address(0xB0B),
+            uint64(block.timestamp + 40 days),
+            uint256(26_000e6),
+            uint256(21_000e6),
+            uint256(0.2e18),
+            uint256(0),
+            uint256(0),
+            uint64(block.timestamp + 1 days),
+            uint256(1)
+        );
+
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.RolloverIntent,
+            loanId: 1,
+            asset: address(token),
+            amount: 0,
+            recipient: address(this),
+            subaccountId: tsa.subAccount(),
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: data
+        });
+
+        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
+        _deliverToReceiver(receipt.guid, message);
+        receiver.handleMessage(receipt.guid);
+
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(1);
+        assertTrue(loan.rolloverPending);
+        assertEq(loan.rolloverMandateHash, mandateHash);
     }
 
     function testSendTradeConfirmedStoresOnL1() public {
@@ -398,7 +442,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 25_000e6,
                 putStrike: 20_000e6,
-                expiry: uint64(block.timestamp + 30 days)
+                expiry: uint64(block.timestamp + 30 days),
+                realizedC: 0
             })
         );
 
@@ -412,11 +457,12 @@ contract LZMessagingTest is Test {
         assertEq(tradeMessage.quoteHash, quoteHash);
         assertEq(tradeMessage.takerNonce, takerNonce);
 
-        (uint256 callStrike, uint256 putStrike, uint64 expiry) =
-            abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        (uint256 callStrike, uint256 putStrike, uint64 expiry, int256 realizedC) =
+            abi.decode(tradeMessage.data, (uint256, uint256, uint64, int256));
         assertEq(callStrike, 25_000e6);
         assertEq(putStrike, 20_000e6);
         assertEq(expiry, uint64(block.timestamp + 30 days));
+        assertEq(realizedC, 0);
 
         _deliverToMessenger(endpointL2.lastGuid(), tradeMessage);
 
@@ -473,7 +519,8 @@ contract LZMessagingTest is Test {
                 takerNonce: takerNonce,
                 callStrike: 0,
                 putStrike: 0,
-                expiry: 0
+                expiry: 0,
+                realizedC: 0
             })
         );
 

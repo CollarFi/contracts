@@ -15,6 +15,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
     event MandateRecorded(uint256 indexed loanId, address borrower, uint256 borrowAmount);
     event CollateralRecorded(uint256 indexed loanId, address collateralAsset, uint256 collateralAmount);
     event LoanConsumed(uint256 indexed loanId);
+    event RolloverMandateRecorded(uint256 indexed loanId, bytes32 indexed mandateHash, uint64 maturity);
+    event RolloverCleared(uint256 indexed loanId);
 
     error CLS_InvalidLoanId();
     error CLS_AlreadyConsumed();
@@ -36,6 +38,9 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 borrowAmount,
         uint256 minCallStrike,
         uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint256 fixedInterest,
+        uint256 maxNegativeC,
         uint64 maturity,
         uint64 deadline
     ) external onlyRole(WRITER_ROLE) {
@@ -67,6 +72,15 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maxPutStrike != 0 && loan.maxPutStrike != maxPutStrike) {
             revert CLS_Mismatch();
         }
+        if (loan.minNetInterest != 0 && loan.minNetInterest != minNetInterest) {
+            revert CLS_Mismatch();
+        }
+        if (loan.fixedInterest != 0 && loan.fixedInterest != fixedInterest) {
+            revert CLS_Mismatch();
+        }
+        if (loan.maxNegativeC != 0 && loan.maxNegativeC != maxNegativeC) {
+            revert CLS_Mismatch();
+        }
 
         // Collateral asset can be set either by deposit or mandate. Require consistency.
         if (loan.collateralAsset != address(0) && loan.collateralAsset != collateralAsset) {
@@ -77,6 +91,9 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.borrowAmount = borrowAmount;
         loan.minCallStrike = minCallStrike;
         loan.maxPutStrike = maxPutStrike;
+        loan.minNetInterest = minNetInterest;
+        loan.fixedInterest = fixedInterest;
+        loan.maxNegativeC = maxNegativeC;
         loan.maturity = maturity;
         loan.deadline = deadline;
         if (loan.collateralAsset == address(0)) {
@@ -110,6 +127,62 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.collateralAmount = collateralAmount;
 
         emit CollateralRecorded(loanId, collateralAsset, collateralAmount);
+    }
+
+    function recordRolloverMandate(
+        uint256 loanId,
+        address borrower,
+        bytes32 mandateHash,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint256 fixedInterest,
+        uint256 maxNegativeC,
+        uint64 maturity,
+        uint64 deadline
+    ) external onlyRole(WRITER_ROLE) {
+        if (loanId == 0) {
+            revert CLS_InvalidLoanId();
+        }
+
+        Loan storage loan = _loans[loanId];
+        if (loan.consumed) {
+            revert CLS_AlreadyConsumed();
+        }
+        if (loan.borrower != address(0) && loan.borrower != borrower) {
+            revert CLS_Mismatch();
+        }
+
+        loan.rolloverPending = true;
+        loan.rolloverMandateHash = mandateHash;
+        loan.rolloverMinCallStrike = minCallStrike;
+        loan.rolloverMaxPutStrike = maxPutStrike;
+        loan.rolloverMinNetInterest = minNetInterest;
+        loan.rolloverFixedInterest = fixedInterest;
+        loan.rolloverMaxNegativeC = maxNegativeC;
+        loan.rolloverMaturity = maturity;
+        loan.rolloverDeadline = deadline;
+
+        emit RolloverMandateRecorded(loanId, mandateHash, maturity);
+    }
+
+    function clearRollover(uint256 loanId) external onlyRole(WRITER_ROLE) {
+        if (loanId == 0) {
+            revert CLS_InvalidLoanId();
+        }
+
+        Loan storage loan = _loans[loanId];
+        loan.rolloverPending = false;
+        loan.rolloverMandateHash = bytes32(0);
+        loan.rolloverMinCallStrike = 0;
+        loan.rolloverMaxPutStrike = 0;
+        loan.rolloverMinNetInterest = 0;
+        loan.rolloverFixedInterest = 0;
+        loan.rolloverMaxNegativeC = 0;
+        loan.rolloverMaturity = 0;
+        loan.rolloverDeadline = 0;
+
+        emit RolloverCleared(loanId);
     }
 
     function markConsumed(uint256 loanId) external onlyRole(WRITER_ROLE) {

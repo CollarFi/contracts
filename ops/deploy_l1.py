@@ -9,7 +9,7 @@ from rich import print
 
 from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
 from py_lib.envs import resolve_l1_l2_env_paths
-from py_lib.l2_discovery import resolve_l2_wrapped_asset_from_tsa
+from py_lib.l2_discovery import resolve_l2_subaccount_id_from_tsa, resolve_l2_wrapped_asset_from_tsa
 
 app = typer.Typer(add_completion=False)
 
@@ -53,6 +53,8 @@ def main(
         "TREASURY": l1["TREASURY"],
         "OUTPUT_JSON": l1["OUTPUT_JSON"],
     }
+    if l1.get("PROXY_ADMIN"):
+        env_overrides["PROXY_ADMIN"] = l1["PROXY_ADMIN"]
 
     if l1.get("WETH_ASSET") and not l1.get("L2_WRAPPED_WETH_ASSET"):
         l1["L2_WRAPPED_WETH_ASSET"] = resolve_l2_wrapped_asset_from_tsa(l2_env_file)
@@ -60,6 +62,11 @@ def main(
             "[cyan][info][/cyan] resolved L2_WRAPPED_WETH_ASSET from L2 TSA:",
             l1["L2_WRAPPED_WETH_ASSET"],
         )
+
+    if not l1.get("DERIVE_SUBACCOUNT_ID"):
+        subaccount_id = resolve_l2_subaccount_id_from_tsa(l2_env_file)
+        l1["DERIVE_SUBACCOUNT_ID"] = str(subaccount_id)
+        print("[cyan][info][/cyan] resolved DERIVE_SUBACCOUNT_ID from L2 TSA:", l1["DERIVE_SUBACCOUNT_ID"])
 
     for opt in (
         "VAULT_OWNER",
@@ -78,6 +85,7 @@ def main(
         "WETH_PAYLOAD_SIZE",
         "WETH_STRIKE_SCALE",
         "L2_WRAPPED_WETH_ASSET",
+        "DERIVE_SUBACCOUNT_ID",
     ):
         if l1.get(opt):
             env_overrides[opt] = l1[opt]

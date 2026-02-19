@@ -64,4 +64,25 @@ contract CollarLiquidityVaultTest is Test {
         vm.expectRevert(CollarLiquidityVault.LV_InsufficientLiquidity.selector);
         vault.borrow(2_000_000e6);
     }
+
+    function testReserveBlocksWithdrawableLiquidity() public {
+        vault.reserve(1, 300_000e6);
+        assertEq(vault.availableLiquidity(), 700_000e6);
+
+        vm.startPrank(lender);
+        assertEq(vault.maxWithdraw(lender), 700_000e6);
+        vm.stopPrank();
+    }
+
+    function testConsumeAndReleaseReserve() public {
+        vault.reserve(1, 200_000e6);
+
+        vault.consume(1, 120_000e6);
+        assertEq(usdc.balanceOf(address(this)), 120_000e6);
+        assertEq(vault.reservedByLoan(1), 80_000e6);
+
+        vault.release(1);
+        assertEq(vault.reservedByLoan(1), 0);
+        assertEq(vault.reservedLiquidity(), 0);
+    }
 }

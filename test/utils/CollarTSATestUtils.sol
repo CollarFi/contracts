@@ -6,6 +6,7 @@ import {CollarTSA} from "../../src/CollarTSA.sol";
 import {CollarLoanStore} from "../../src/CollarLoanStore.sol";
 import {OptionRiskVerifier} from "../../src/verifiers/OptionRiskVerifier.sol";
 import {RfqVerifier} from "../../src/verifiers/RfqVerifier.sol";
+import {CollarTsaRfqDelegateModule} from "../../src/modules/CollarTsaRfqDelegateModule.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
@@ -54,6 +55,7 @@ contract CollarTSATestUtils is TSATestUtils {
         loanStore = new CollarLoanStore(address(this));
         OptionRiskVerifier optionRiskVerifier = new OptionRiskVerifier();
         RfqVerifier rfqVerifier = new RfqVerifier();
+        CollarTsaRfqDelegateModule rfqDelegateModule = new CollarTsaRfqDelegateModule();
 
         proxyAdmin.upgradeAndCall(
             ITransparentUpgradeableProxy(address(proxy)),
@@ -80,6 +82,7 @@ contract CollarTSATestUtils is TSATestUtils {
                     optionAsset: optionAsset,
                     optionRiskVerifier: optionRiskVerifier,
                     rfqVerifier: rfqVerifier,
+                    rfqDelegateModule: rfqDelegateModule,
                     loanStore: address(loanStore)
                 })
             )
@@ -117,9 +120,19 @@ contract CollarTSATestUtils is TSATestUtils {
 
     function _seedLoan(uint256 loanId, uint64 maturity) internal {
         // Generous collateral amount for tests; TSA enforces that spot sells don't exceed this.
-        loanStore.recordCollateral(loanId, address(markets[MARKET].base), 1_000_000e18);
+        loanStore.recordCollateral(loanId, address(markets[MARKET].base), 1e18);
         loanStore.recordMandate(
-            loanId, address(0xB0B0), address(markets[MARKET].base), 0, 0, 0, maturity, uint64(block.timestamp + 1 days)
+            loanId,
+            address(0xB0B0),
+            address(markets[MARKET].base),
+            0,
+            0,
+            0,
+            0,
+            100e18,
+            type(uint256).max,
+            maturity,
+            uint64(block.timestamp + 1 days)
         );
     }
 }

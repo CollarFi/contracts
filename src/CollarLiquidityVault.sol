@@ -17,13 +17,21 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
 
     IERC4626 public eulerVault;
     uint256 public activeLoans;
+    uint256 public reservedLiquidity;
+    mapping(uint256 => uint256) public reservedByLoan;
 
     error LV_InsufficientLiquidity();
     error LV_InvalidAmount();
     error LV_RepayExceedsDebt();
     error LV_EulerVaultNotSet();
+    error LV_ReserveExists();
+    error LV_ReserveMissing();
+    error LV_ReserveExceeds();
 
     event LossRecorded(uint256 amount);
+    event LiquidityReserved(uint256 indexed loanId, uint256 amount);
+    event LiquidityReleased(uint256 indexed loanId, uint256 amount);
+    event LiquidityConsumed(uint256 indexed loanId, uint256 amount);
 
     constructor(IERC20 asset_, string memory name_, string memory symbol_, address admin)
         ERC20(name_, symbol_)
@@ -97,9 +105,59 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         emit LossRecorded(amount);
     }
 
+    /// @notice Reserve liquidity for a loan-level negative option premium budget.
+    function reserve(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
+        if (loanId == 0 || amount == 0) {
+            revert LV_InvalidAmount();
+        }
+        if (reservedByLoan[loanId] != 0) {
+            revert LV_ReserveExists();
+        }
+        if (amount > availableLiquidity()) {
+            revert LV_InsufficientLiquidity();
+        }
+        reservedByLoan[loanId] = amount;
+        reservedLiquidity += amount;
+        emit LiquidityReserved(loanId, amount);
+    }
+
+    /// @notice Consume reserved liquidity and transfer it to the caller.
+    function consume(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
+        if (amount == 0) {
+            revert LV_InvalidAmount();
+        }
+        uint256 reserved = reservedByLoan[loanId];
+        if (reserved == 0) {
+            revert LV_ReserveMissing();
+        }
+        if (amount > reserved) {
+            revert LV_ReserveExceeds();
+        }
+        reservedByLoan[loanId] = reserved - amount;
+        reservedLiquidity -= amount;
+        _pullFromEulerIfNeeded(amount);
+        IERC20(asset()).safeTransfer(msg.sender, amount);
+        emit LiquidityConsumed(loanId, amount);
+    }
+
+    /// @notice Release any unused reserve for a loan.
+    function release(uint256 loanId) external onlyRole(VAULT_ROLE) nonReentrant {
+        uint256 reserved = reservedByLoan[loanId];
+        if (reserved == 0) {
+            revert LV_ReserveMissing();
+        }
+        delete reservedByLoan[loanId];
+        reservedLiquidity -= reserved;
+        emit LiquidityReleased(loanId, reserved);
+    }
+
     /// @notice Return assets immediately available for withdrawal or borrowing.
     function availableLiquidity() public view returns (uint256) {
-        return IERC20(asset()).balanceOf(address(this)) + _eulerAssets();
+        uint256 gross = IERC20(asset()).balanceOf(address(this)) + _eulerAssets();
+        if (gross <= reservedLiquidity) {
+            return 0;
+        }
+        return gross - reservedLiquidity;
     }
 
     /// @notice Return total assets including outstanding loans and Euler balance.

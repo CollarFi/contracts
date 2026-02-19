@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarLoanStore} from "../src/CollarLoanStore.sol";
@@ -31,12 +31,17 @@ import {IOptionRiskVerifier} from "../src/interfaces/IOptionRiskVerifier.sol";
 import {OptionRiskVerifier} from "../src/verifiers/OptionRiskVerifier.sol";
 import {IRfqVerifier} from "../src/interfaces/IRfqVerifier.sol";
 import {RfqVerifier} from "../src/verifiers/RfqVerifier.sol";
+import {ICollarTsaRfqDelegateModule} from "../src/interfaces/ICollarTsaRfqDelegateModule.sol";
+import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateModule.sol";
 
 /// @dev Deploy L2 protocol components.
 ///
 /// Required env vars:
 /// - ADMIN (address)
 /// - OUTPUT_JSON (string)
+///
+/// Optional proxy admin owner vars:
+/// - PROXY_ADMIN (address, default ADMIN)
 ///
 /// Optional wiring vars (can be set later via script/wire_lz_peers.py and receiver admin calls):
 /// - L1_MESSENGER (address)           (for setPeer)
@@ -59,11 +64,19 @@ import {RfqVerifier} from "../src/verifiers/RfqVerifier.sol";
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
 /// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
 contract DeployL2 is Script {
+    bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+
+    function _proxyAdminOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
     function _buildTsaInitData(
         address admin,
         address loanStoreAddr,
         address optionRiskVerifierAddr,
-        address rfqVerifierAddr
+        address rfqVerifierAddr,
+        address rfqDelegateModuleAddr
     ) internal view returns (bytes memory) {
         address initialOwner = vm.envOr("TSA_INITIAL_OWNER", admin);
 
@@ -90,6 +103,7 @@ contract DeployL2 is Script {
             optionAsset: IOptionAsset(vm.envAddress("OPTION_ASSET")),
             optionRiskVerifier: IOptionRiskVerifier(optionRiskVerifierAddr),
             rfqVerifier: IRfqVerifier(rfqVerifierAddr),
+            rfqDelegateModule: ICollarTsaRfqDelegateModule(rfqDelegateModuleAddr),
             loanStore: loanStoreAddr
         });
 
@@ -98,6 +112,7 @@ contract DeployL2 is Script {
 
     function run() external {
         address admin = vm.envAddress("ADMIN");
+        address proxyAdminOwner = vm.envOr("PROXY_ADMIN", admin);
 
         address l1Messenger = vm.envOr("L1_MESSENGER", address(0));
         address l1Vault = vm.envOr("L1_VAULT", address(0));
@@ -111,6 +126,7 @@ contract DeployL2 is Script {
         bytes memory tsaInitData = vm.envOr("TSA_INIT_DATA", bytes(""));
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
+        address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
 
@@ -134,6 +150,9 @@ contract DeployL2 is Script {
         if (rfqVerifierAddr == address(0)) {
             rfqVerifierAddr = address(new RfqVerifier());
         }
+        if (rfqDelegateModuleAddr == address(0)) {
+            rfqDelegateModuleAddr = address(new CollarTsaRfqDelegateModule());
+        }
 
         if (tsaProxyAddr == address(0)) {
             if (tsaImplementation == address(0)) {
@@ -142,11 +161,14 @@ contract DeployL2 is Script {
 
             // Auto-build initializer calldata if not provided explicitly.
             if (tsaInitData.length == 0) {
-                tsaInitData = _buildTsaInitData(admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr);
+                tsaInitData = _buildTsaInitData(
+                    admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr, rfqDelegateModuleAddr
+                );
             }
 
-            // Deploy + initialize atomically in ERC1967Proxy constructor.
-            tsaProxyAddr = address(new ERC1967Proxy(tsaImplementation, tsaInitData));
+            // Deploy + initialize atomically in transparent proxy constructor.
+            // ProxyAdmin owner is PROXY_ADMIN (defaults to ADMIN).
+            tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
         }
 
         CollarTSAReceiver receiver = new CollarTSAReceiver(
@@ -180,8 +202,10 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2LoanStore", loanStoreAddr);
         json = vm.serializeAddress("addrs", "l2Tsa", tsaProxyAddr);
         json = vm.serializeAddress("addrs", "l2TsaImplementation", tsaImplementation);
+        json = vm.serializeAddress("addrs", "l2TsaProxyAdmin", _proxyAdminOf(tsaProxyAddr));
         json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
+        json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
         vm.writeJson(json, outPath);
 
@@ -190,6 +214,7 @@ contract DeployL2 is Script {
         console2.log("L2 loanStore", loanStoreAddr);
         console2.log("L2 tsa(proxy)", tsaProxyAddr);
         console2.log("L2 tsaImplementation", tsaImplementation);
+        console2.log("L2 tsa proxy admin", _proxyAdminOf(tsaProxyAddr));
         console2.log("L2 optionRiskVerifier", optionRiskVerifierAddr);
         console2.log("L2 rfqVerifier", rfqVerifierAddr);
         console2.log("L2 lzEndpoint", lzEndpoint);

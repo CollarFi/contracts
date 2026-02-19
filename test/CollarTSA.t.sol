@@ -268,8 +268,196 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
-    function _openCollarPosition(int256 amount) internal {
-        uint64 expiry = uint64(block.timestamp + 7 days);
+    function _prepareRollover(uint256 loanId, uint64 oldExpiry, uint64 newExpiry, uint256 minNetInterest) internal {
+        if (loanStore.getLoan(loanId).borrower == address(0)) {
+            _seedLoan(loanId, oldExpiry);
+        }
+        loanStore.recordRolloverMandate(
+            loanId,
+            address(0xB0B0),
+            keccak256("rollover"),
+            2100e18,
+            1900e18,
+            minNetInterest,
+            20e18,
+            500e6,
+            newExpiry,
+            uint64(block.timestamp + 1 days)
+        );
+    }
+
+    function _rolloverTrades(uint64 oldExpiry, uint64 newExpiry)
+        internal
+        pure
+        returns (IRfqModule.TradeData[] memory trades)
+    {
+        trades = new IRfqModule.TradeData[](4);
+        trades[0] = IRfqModule.TradeData({
+            asset: address(0), // overwritten by caller
+            subId: OptionEncoding.toSubId(oldExpiry, 2200e18, true),
+            price: 100e18,
+            amount: -1e18
+        });
+        trades[1] = IRfqModule.TradeData({
+            asset: address(0), // overwritten by caller
+            subId: OptionEncoding.toSubId(oldExpiry, 1800e18, false),
+            price: 1e18,
+            amount: 1e18
+        });
+        trades[2] = IRfqModule.TradeData({
+            asset: address(0), // overwritten by caller
+            subId: OptionEncoding.toSubId(newExpiry, 2200e18, true),
+            price: 150e18,
+            amount: 1e18
+        });
+        trades[3] = IRfqModule.TradeData({
+            asset: address(0), // overwritten by caller
+            subId: OptionEncoding.toSubId(newExpiry, 1800e18, false),
+            price: 50e18,
+            amount: -1e18
+        });
+    }
+
+    function _setOptionAsset(IRfqModule.TradeData[] memory trades) internal view {
+        for (uint256 i = 0; i < trades.length; i++) {
+            trades[i].asset = address(markets[MARKET].option);
+        }
+    }
+
+    function _signRolloverRfq(uint256 loanId, IRfqModule.TradeData[] memory trades) internal {
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
+
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsaSubacc,
+            nonce: ++tsaNonce,
+            module: rfqModule,
+            data: abi.encode(order),
+            expiry: block.timestamp + 8 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        vm.prank(signer);
+        collarTsa.signActionData(action, abi.encode(loanId, abi.encode(trades)));
+    }
+
+    function testAllowsRolloverWithFourLegPortfolioTransition() public {
+        _depositToTSA(10e18);
+        _executeDeposit(10e18);
+
+        uint64 oldExpiry = uint64(block.timestamp + 7 days);
+        uint64 newExpiry = uint64(block.timestamp + 14 days);
+
+        _setForwardPrice(MARKET, oldExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, oldExpiry);
+        _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, newExpiry);
+
+        _openCollarPosition(1e18, oldExpiry);
+        _prepareRollover(1, oldExpiry, newExpiry, 10e18);
+
+        IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
+        _setOptionAsset(trades);
+
+        _signRolloverRfq(1, trades);
+    }
+
+    function testRejectsRolloverMissingCloseLeg() public {
+        _depositToTSA(10e18);
+        _executeDeposit(10e18);
+
+        uint64 oldExpiry = uint64(block.timestamp + 7 days);
+        uint64 newExpiry = uint64(block.timestamp + 14 days);
+
+        _setForwardPrice(MARKET, oldExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, oldExpiry);
+        _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, newExpiry);
+
+        _openCollarPosition(1e18, oldExpiry);
+        _prepareRollover(1, oldExpiry, newExpiry, 10e18);
+
+        IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](3);
+        IRfqModule.TradeData[] memory full = _rolloverTrades(oldExpiry, newExpiry);
+        _setOptionAsset(full);
+        trades[0] = full[0];
+        trades[1] = full[2];
+        trades[2] = full[3];
+
+        vm.expectRevert(bytes4(keccak256("CTSA_InvalidRfqTradeLength()")));
+        _signRolloverRfq(1, trades);
+    }
+
+    function testRejectsRolloverWrongExpiryOnLeg() public {
+        _depositToTSA(10e18);
+        _executeDeposit(10e18);
+
+        uint64 oldExpiry = uint64(block.timestamp + 7 days);
+        uint64 newExpiry = uint64(block.timestamp + 14 days);
+
+        _setForwardPrice(MARKET, oldExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, oldExpiry);
+        _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, newExpiry);
+
+        _openCollarPosition(1e18, oldExpiry);
+        _prepareRollover(1, oldExpiry, newExpiry, 10e18);
+
+        IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
+        _setOptionAsset(trades);
+        trades[0].subId = OptionEncoding.toSubId(newExpiry, 2200e18, true);
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
+        _signRolloverRfq(1, trades);
+    }
+
+    function testRejectsRolloverWrongDirectionOnLeg() public {
+        _depositToTSA(10e18);
+        _executeDeposit(10e18);
+
+        uint64 oldExpiry = uint64(block.timestamp + 7 days);
+        uint64 newExpiry = uint64(block.timestamp + 14 days);
+
+        _setForwardPrice(MARKET, oldExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, oldExpiry);
+        _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, newExpiry);
+
+        _openCollarPosition(1e18, oldExpiry);
+        _prepareRollover(1, oldExpiry, newExpiry, 10e18);
+
+        IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
+        _setOptionAsset(trades);
+        trades[3].amount = 1e18;
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
+        _signRolloverRfq(1, trades);
+    }
+
+    function testRejectsRolloverOnEconomicsGuardFailure() public {
+        _depositToTSA(10e18);
+        _executeDeposit(10e18);
+
+        uint64 oldExpiry = uint64(block.timestamp + 7 days);
+        uint64 newExpiry = uint64(block.timestamp + 14 days);
+
+        _setForwardPrice(MARKET, oldExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, oldExpiry);
+        _setForwardPrice(MARKET, newExpiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, newExpiry);
+
+        _openCollarPosition(1e18, oldExpiry);
+        _prepareRollover(1, oldExpiry, newExpiry, 100e18);
+
+        IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
+        _setOptionAsset(trades);
+
+        vm.expectRevert(CollarTSA.CTSA_InsufficientCash.selector);
+        _signRolloverRfq(1, trades);
+    }
+
+    function _openCollarPosition(int256 amount, uint64 expiry) internal {
         _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, expiry);
 

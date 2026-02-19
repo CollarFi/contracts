@@ -36,7 +36,8 @@ library CollarVaultShared {
         uint256 subaccountId;
         LoanState state;
         uint256 startTime;
-        uint256 originationFeeApr;
+        uint256 interestApr;
+        uint256 interestOwed;
         uint256 variableDebt;
     }
 
@@ -62,7 +63,34 @@ library CollarVaultShared {
         uint256 borrowAmount;
         uint256 minCallStrike;
         uint256 maxPutStrike;
+        uint256 minNetInterest;
+        uint256 fixedInterest;
+        uint256 maxNegativeC;
         bool sentToL2;
+    }
+
+    struct RolloverMandate {
+        address borrower;
+        uint256 loanId;
+        uint64 newMaturity;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        uint256 minNetInterest;
+        uint256 maxNegativeC;
+        uint64 deadline;
+        uint256 nonce;
+    }
+
+    struct PendingRollover {
+        bytes32 mandateHash;
+        address borrower;
+        uint64 newMaturity;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        uint256 minNetInterest;
+        uint256 maxNegativeC;
+        uint64 deadline;
+        uint256 requestedAt;
     }
 
     struct CollarVaultStorage {
@@ -83,6 +111,8 @@ library CollarVaultShared {
         mapping(uint256 => PendingDeposit) pendingDeposits;
         mapping(uint256 => Mandate) mandates;
         mapping(bytes32 => bool) usedBaselineRfqs;
+        mapping(bytes32 => bool) usedRolloverMandates;
+        mapping(uint256 => PendingRollover) pendingRollovers;
         mapping(uint256 => bool) tradeConfirmed;
         mapping(uint256 => bool) collateralActivated;
         mapping(uint256 => bool) returnRequested;
@@ -94,6 +124,7 @@ library CollarVaultShared {
         mapping(bytes32 => bool) lzMessageConsumed;
         address finalizeModule;
         address settleModule;
+        address rolloverModule;
     }
 
     // keccak256(abi.encode(uint256(keccak256("collar.storage.CollarVault")) - 1)) & ~bytes32(uint256(0xff))

@@ -151,11 +151,64 @@ contract CollarTSAReceiver is AccessControl, OApp {
         }
 
         if (message.action == CollarLZMessages.Action.MandateCreated) {
-            (address borrower, uint256 minCallStrike, uint256 maxPutStrike, uint64 maturity, uint64 deadline) =
-                abi.decode(message.data, (address, uint256, uint256, uint64, uint64));
+            (
+                address borrower,
+                uint256 minCallStrike,
+                uint256 maxPutStrike,
+                uint256 minNetInterest,
+                uint256 fixedInterest,
+                uint256 maxNegativeC,
+                uint64 maturity,
+                uint64 deadline
+            ) = abi.decode(message.data, (address, uint256, uint256, uint256, uint256, uint256, uint64, uint64));
 
             loanStore.recordMandate(
-                message.loanId, borrower, message.asset, message.amount, minCallStrike, maxPutStrike, maturity, deadline
+                message.loanId,
+                borrower,
+                message.asset,
+                message.amount,
+                minCallStrike,
+                maxPutStrike,
+                minNetInterest,
+                fixedInterest,
+                maxNegativeC,
+                maturity,
+                deadline
+            );
+
+            handledMessages[guid] = true;
+            emit MessageHandled(guid, message.action, message.loanId);
+            return;
+        }
+
+        if (message.action == CollarLZMessages.Action.RolloverIntent) {
+            (
+                bytes32 mandateHash,
+                address borrower,
+                uint64 newMaturity,
+                uint256 minCallStrike,
+                uint256 maxPutStrike,
+                uint256 minNetInterest,
+                uint256 fixedInterest,
+                uint256 maxNegativeC,
+                uint64 deadline,
+                uint256 nonce
+            ) = abi.decode(
+                message.data, (bytes32, address, uint64, uint256, uint256, uint256, uint256, uint256, uint64, uint256)
+            );
+            nonce;
+
+            loanStore.recordRolloverMandate(
+                message.loanId,
+                borrower,
+                mandateHash,
+                minCallStrike,
+                maxPutStrike,
+                minNetInterest,
+                fixedInterest,
+                maxNegativeC,
+                newMaturity,
+                deadline
             );
 
             handledMessages[guid] = true;
@@ -269,6 +322,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         uint256 callStrike;
         uint256 putStrike;
         uint64 expiry;
+        int256 realizedC;
     }
 
     function sendTradeConfirmed(TradeConfirmedParams calldata p)
@@ -288,8 +342,22 @@ contract CollarTSAReceiver is AccessControl, OApp {
         }
         _validateTradeConfirmedPreconditions(p.amount, p.socketMessageId, p.takerNonce);
 
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(p.loanId);
+        bool isRollover = loan.rolloverPending;
+        bytes memory payload = isRollover
+            ? abi.encode(
+                loan.rolloverMandateHash,
+                loan.borrower,
+                p.callStrike,
+                p.putStrike,
+                loan.rolloverMinNetInterest,
+                p.expiry,
+                p.realizedC
+            )
+            : abi.encode(p.callStrike, p.putStrike, p.expiry, p.realizedC);
+
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
-            action: CollarLZMessages.Action.TradeConfirmed,
+            action: isRollover ? CollarLZMessages.Action.RolloverConfirmed : CollarLZMessages.Action.TradeConfirmed,
             loanId: p.loanId,
             asset: p.asset,
             amount: p.amount,
@@ -299,12 +367,16 @@ contract CollarTSAReceiver is AccessControl, OApp {
             secondaryAmount: 0,
             quoteHash: p.quoteHash,
             takerNonce: p.takerNonce,
-            data: abi.encode(p.callStrike, p.putStrike, p.expiry)
+            data: payload
         });
 
         MessagingReceipt memory receipt = _send(message, defaultOptions);
 
-        loanStore.markConsumed(p.loanId);
+        if (isRollover) {
+            loanStore.clearRollover(p.loanId);
+        } else {
+            loanStore.markConsumed(p.loanId);
+        }
 
         tradeConfirmed[p.loanId] = true;
         return receipt;

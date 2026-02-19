@@ -11,6 +11,7 @@ interface IRfqVerifier {
         IRfqModule.TradeData spotTrade;
         IRfqModule.TradeData callTrade;
         IRfqModule.TradeData putTrade;
+        IRfqModule.TradeData[] optionTrades;
         uint256 callExpiry;
         uint256 callStrike;
         uint256 putExpiry;

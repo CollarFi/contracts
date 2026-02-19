@@ -9,7 +9,9 @@ library CollarLZMessages {
         DepositConfirmed,
         CollateralReturned,
         TradeConfirmed,
-        MandateCreated
+        MandateCreated,
+        RolloverIntent,
+        RolloverConfirmed
     }
 
     /// @dev Generic LZ message envelope. Different actions interpret fields differently.
@@ -18,7 +20,7 @@ library CollarLZMessages {
     /// - loanId: identifies the loan/mandate
     /// - asset: collateral asset
     /// - amount: borrowAmount (mandate size)
-    /// - data: abi.encode(borrower, minCallStrike, maxPutStrike, maturity, deadline)
+    /// - data: abi.encode(borrower, minCallStrike, maxPutStrike, minNetInterest, maturity, deadline)
     struct Message {
         Action action;
         uint256 loanId;

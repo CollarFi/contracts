@@ -168,6 +168,31 @@ contract CollarVaultMessenger is AccessControl, OApp {
         return _sendAutoFee(message, refundTo);
     }
 
+    function sendRolloverIntentAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 principal,
+        address recipient,
+        uint256 subaccountId,
+        bytes calldata rolloverData,
+        address refundTo
+    ) external payable onlyRole(VAULT_ROLE) returns (bytes32 guid) {
+        CollarLZMessages.Message memory message = CollarLZMessages.Message({
+            action: CollarLZMessages.Action.RolloverIntent,
+            loanId: loanId,
+            asset: asset,
+            amount: principal,
+            recipient: recipient,
+            subaccountId: subaccountId,
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: rolloverData
+        });
+        return _sendAutoFee(message, refundTo);
+    }
+
     function validateDepositConfirmed(
         CollarLZMessages.Message calldata lzMessage,
         address pendingBorrower,
@@ -206,7 +231,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 expectedMaturity
-    ) external pure returns (uint256 callStrike, uint256 putStrike) {
+    ) external pure returns (uint256 callStrike, uint256 putStrike, int256 realizedC) {
         if (tradeMessage.action != CollarLZMessages.Action.TradeConfirmed || tradeMessage.loanId != expectedLoanId) {
             revert CV_LZMessageMismatch();
         }
@@ -218,7 +243,7 @@ contract CollarVaultMessenger is AccessControl, OApp {
         }
 
         uint64 expiry;
-        (callStrike, putStrike, expiry) = abi.decode(tradeMessage.data, (uint256, uint256, uint64));
+        (callStrike, putStrike, expiry, realizedC) = abi.decode(tradeMessage.data, (uint256, uint256, uint64, int256));
         if (expiry != expectedMaturity) {
             revert CV_LZMessageMismatch();
         }
@@ -282,6 +307,36 @@ contract CollarVaultMessenger is AccessControl, OApp {
             revert CV_LZMessageMismatch();
         }
         settlementAmount = lzMessage.amount;
+    }
+
+    function validateRolloverConfirmed(
+        CollarLZMessages.Message calldata lzMessage,
+        uint256 loanId,
+        address expectedRecipient,
+        uint256 expectedSubaccountId,
+        bytes32 expectedMandateHash,
+        address expectedBorrower,
+        uint64 expectedMaturity
+    ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC) {
+        if (lzMessage.action != CollarLZMessages.Action.RolloverConfirmed || lzMessage.loanId != loanId) {
+            revert CV_LZMessageMismatch();
+        }
+        if (lzMessage.recipient != expectedRecipient) {
+            revert CV_LZMessageMismatch();
+        }
+        if (expectedSubaccountId != 0 && lzMessage.subaccountId != expectedSubaccountId) {
+            revert CV_LZMessageMismatch();
+        }
+
+        bytes32 mandateHash;
+        address borrower;
+        uint64 expiry;
+        (mandateHash, borrower, callStrike, putStrike, interestApr, expiry, realizedC) =
+            abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
+
+        if (mandateHash != expectedMandateHash || borrower != expectedBorrower || expiry != expectedMaturity) {
+            revert CV_LZMessageMismatch();
+        }
     }
 
     function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)

@@ -193,6 +193,23 @@ sequenceDiagram
   Vault->>Borrower: transfer collateral
 ```
 
+
+### 5.1.1 Mandate economics (fixed-interest + negative-C reserve)
+
+The agreed origination model is:
+
+- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so the borrower knows exact interest to repay.
+- Option net premium is `C = callPremium - putPremium`.
+- Negative `C` (put premium larger than call premium) is allowed; Derive/TSA cash may go temporarily negative.
+- Before RFQ execution, L1 reserves `maxNegativeC` liquidity per loan in the LP vault (non-withdrawable).
+- Keeper-signed baseline RFQ includes `minNetInterest` (minimum net value required for LP + protocol economics).
+- RFQ/trade confirmation must satisfy both:
+  - `I + C >= minNetInterest`
+  - `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(I + C))`.
+- On settlement, actual deficit is covered by consuming reserved liquidity; any unused reserve is released.
+
+This makes borrower obligations deterministic (`I` fixed), while allowing option legs to execute under bounded temporary deficit.
+
 ### 5.2 Maturity settlement
 
 At maturity `t`, the executor (or a keeper) settles the collar position on Derive and triggers one of three outcomes. `S_t` is Derive's official expiry settlement price at maturity.
@@ -397,6 +414,7 @@ Monitors for situations such as the bridge being down or fast withdrawal limits 
 - Socket message ID trust: `TradeConfirmed` includes a Socket `messageId` provided by the L2 executor; the system trusts the executor to supply the correct bridge message ID and amount for the origination fee withdrawal.
 - Aggregate coverage withdrawals: Withdrawals from the shared vault subaccount must only be signed when `baseBalance - amount >= shortCalls` and cash stays above `maxNegCash`. This is an aggregate (not per-loan) invariant and relies on correct executor operation.
 - Return/trade mutual exclusion: A `ReturnRequest` is best-effort and does not cancel the loan on its own. The L2 receiver must emit **at most one** of `TradeConfirmed` or `CollateralReturned` for a loan. L1 must reject `finalizeDepositReturn` if `TradeConfirmed` was handled, and must reject `finalizeLoan` if `CollateralReturned` was handled.
+- Mandate deficit reserve invariant: every accepted mandate stores `maxNegativeC`; LP liquidity of this amount is reserved before trade execution, `realizedDeficit` at finalize must not exceed the reserve, settlement consumes only actual deficit, and leftover reserve is released when the loan closes/returns.
 - Borrow amount safety buffer (TODO): `_validateBorrowAmount` should be reworked so loans are constrained by a configurable LTV buffer, not strict parity. Target check: `borrowAmount <= collateralAmount * putStrike / strikeScale * maxLTV` (with `maxLTV < 1e18`). Rationale: even when the put expires ITM, realized unwind/spot execution can suffer slippage, so assuming exact mark-price execution is unsafe.
 - Role-based parameter changes: Strike bounds, slippage tolerances, market allowlists and other risk parameters are adjustable by a role controlled by a multisig; governance modules may replace this role later.
 - Emergency controls: The protocol supports emergency controls to pause new loans and settlement.
@@ -425,3 +443,22 @@ The following items are not yet specified and require clarification before imple
 ## 10. Conclusion
 
 By leveraging Derive's vault architecture and fast bridge, CollarFi can implement a non-custodial lending protocol that hedges collateralized loans with zero-cost collars. An L2 TSA contract owns the Derive subaccount, and the L1 vault coordinates collateral and settlement via rapid bridging. When options expire neutrally, the collateral is bridged back and deposited into Euler V2 to continue earning yield via a variable-rate loan. Careful configuration of signers, nonces, bridge limits and risk parameters ensures solvency and security for lenders and borrowers alike.
+
+### 5.x Async Rollover (pre-maturity)
+
+Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
+
+1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `maxNegativeC`, `deadline`, `nonce`.
+2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
+3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
+4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields.
+5. After successful RFQ execution, L2 receiver sends `RolloverConfirmed` to L1 containing mandate linkage and finalized terms (`callStrike`, `putStrike`, `interestApr`, `expiry`).
+6. Keeper calls `finalizeRollover` on L1. Finalization is a trusted, authenticated commit step: once a valid `RolloverConfirmed` is present, it applies the confirmed terms, updates accounting, consumes guid, and clears pending rollover.
+
+Safety invariants:
+- Replay protection: mandate hash can be used only once.
+- Hard reverts in `finalizeRollover` are reserved for invalid/forged/mismatched confirmation identity (action, loan, recipient/subaccount, mandate hash, borrower, expiry) or missing pending state.
+- Post-open economic/consistency checks (e.g. strike/economics drift vs mandate bounds) MUST NOT brick the loan at finalization; they are signaled as anomalies and enforced pre-trade in TSA RFQ verification.
+- `finalizeRollover` is idempotent by confirmation guid (duplicate finalize on an already-consumed guid is a no-op).
+- If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
+- While rollover is pending, a second rollover request for the same loan MUST revert.

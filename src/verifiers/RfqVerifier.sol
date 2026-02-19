@@ -47,29 +47,39 @@ contract RfqVerifier is IRfqVerifier {
             return parsed;
         }
 
-        if (makerTrades.length != 2) revert CTSA_InvalidRfqTradeLength();
+        if (makerTrades.length != 2 && makerTrades.length != 4) revert CTSA_InvalidRfqTradeLength();
 
-        bool hasCall;
-        bool hasPut;
-        for (uint256 i = 0; i < makerTrades.length; i++) {
-            if (makerTrades[i].asset != optionAsset) revert CTSA_InvalidAsset();
+        parsed.optionTrades = makerTrades;
 
-            (uint256 expiry, uint256 strike, bool isCall) = OptionEncoding.fromSubId(makerTrades[i].subId.toUint96());
-            if (isCall) {
-                if (hasCall) revert CTSA_InvalidRfqTradeDetails();
-                parsed.callTrade = makerTrades[i];
-                parsed.callExpiry = expiry;
-                parsed.callStrike = strike;
-                hasCall = true;
-            } else {
-                if (hasPut) revert CTSA_InvalidRfqTradeDetails();
-                parsed.putTrade = makerTrades[i];
-                parsed.putExpiry = expiry;
-                parsed.putStrike = strike;
-                hasPut = true;
+        if (makerTrades.length == 2) {
+            bool hasCall;
+            bool hasPut;
+            for (uint256 i = 0; i < makerTrades.length; i++) {
+                if (makerTrades[i].asset != optionAsset) revert CTSA_InvalidAsset();
+
+                (uint256 expiry, uint256 strike, bool isCall) =
+                    OptionEncoding.fromSubId(makerTrades[i].subId.toUint96());
+                if (isCall) {
+                    if (hasCall) revert CTSA_InvalidRfqTradeDetails();
+                    parsed.callTrade = makerTrades[i];
+                    parsed.callExpiry = expiry;
+                    parsed.callStrike = strike;
+                    hasCall = true;
+                } else {
+                    if (hasPut) revert CTSA_InvalidRfqTradeDetails();
+                    parsed.putTrade = makerTrades[i];
+                    parsed.putExpiry = expiry;
+                    parsed.putStrike = strike;
+                    hasPut = true;
+                }
             }
+
+            if (!hasCall || !hasPut || parsed.callExpiry != parsed.putExpiry) revert CTSA_InvalidRfqTradeDetails();
+            return parsed;
         }
 
-        if (!hasCall || !hasPut || parsed.callExpiry != parsed.putExpiry) revert CTSA_InvalidRfqTradeDetails();
+        for (uint256 i = 0; i < makerTrades.length; i++) {
+            if (makerTrades[i].asset != optionAsset) revert CTSA_InvalidAsset();
+        }
     }
 }

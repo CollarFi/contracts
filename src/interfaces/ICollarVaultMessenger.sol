@@ -55,6 +55,16 @@ interface ICollarVaultMessenger {
         address refundTo
     ) external payable returns (bytes32 guid);
 
+    function sendRolloverIntentAutoFee(
+        uint256 loanId,
+        address asset,
+        uint256 principal,
+        address recipient,
+        uint256 subaccountId,
+        bytes calldata rolloverData,
+        address refundTo
+    ) external payable returns (bytes32 guid);
+
     function validateDepositConfirmed(
         CollarLZMessages.Message calldata lzMessage,
         address pendingBorrower,
@@ -73,7 +83,7 @@ interface ICollarVaultMessenger {
         uint256 minCallStrike,
         uint256 maxPutStrike,
         uint64 expectedMaturity
-    ) external pure returns (uint256 callStrike, uint256 putStrike);
+    ) external pure returns (uint256 callStrike, uint256 putStrike, int256 realizedC);
 
     function validateTradeConfirmedMarker(
         CollarLZMessages.Message calldata lzMessage,
@@ -96,6 +106,16 @@ interface ICollarVaultMessenger {
         address usdcAsset,
         address expectedRecipient
     ) external pure returns (uint256 settlementAmount);
+
+    function validateRolloverConfirmed(
+        CollarLZMessages.Message calldata lzMessage,
+        uint256 loanId,
+        address expectedRecipient,
+        uint256 expectedSubaccountId,
+        bytes32 expectedMandateHash,
+        address expectedBorrower,
+        uint64 expectedMaturity
+    ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC);
 
     function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
         external
