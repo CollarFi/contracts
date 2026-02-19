@@ -121,7 +121,7 @@ def main(
         else:
             raise FileNotFoundError(f"expected L1 env file not found for --env {resolved_env}: {l1_env_file}")
 
-    for k in ("RPC_URL", "ACCOUNT"):
+    for k in ("RPC_URL", "ACCOUNT", "SOCKET_TRACKER"):
         must(l2, k)
 
     if not l2.get("ADMIN"):
@@ -220,7 +220,6 @@ def main(
         "L1_MESSENGER",
         "L1_VAULT",
         "LZ_ENDPOINT",
-        "SOCKET_TRACKER",
         "LOAN_STORE",
         "TSA_PROXY",
         "TSA_IMPLEMENTATION",

@@ -112,6 +112,7 @@ uv run python ops/deploy_l1.py --env testnet --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
+# SOCKET_TRACKER is required and must be a real socket tracker address (no mock fallback).
 # Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
