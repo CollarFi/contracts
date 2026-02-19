@@ -56,6 +56,10 @@ def _cast_send(rpc: str, frm: str, to: str, sig: str, *args: str) -> str:
     return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--unlocked", "--from", frm])
 
 
+def _loads_json_relaxed(raw: str) -> dict:
+    return json.loads(raw, strict=False)
+
+
 def _grant_role_if_needed(rpc: str, contract: str, role: str, account: str, admin: str) -> None:
     has = run(["cast", "call", contract, "hasRole(bytes32,address)(bool)", role, account, "--rpc-url", rpc]).strip().lower()
     if has != "true":
@@ -84,6 +88,8 @@ def main(
     l2_env: Path = typer.Option(ROOT_DIR / ".env.l2.testnet"),
     l1_port: int = typer.Option(8758),
     l2_port: int = typer.Option(8759),
+    l1_rpc: str = typer.Option("", help="Use existing L1 RPC (skip spawning anvil for L1)"),
+    l2_rpc: str = typer.Option("", help="Use existing L2 RPC (skip spawning anvil for L2)"),
     keep_anvil: bool = typer.Option(False, help="Keep anvil processes running"),
 ) -> None:
     l1a = _read_addrs(l1_json)
@@ -91,9 +97,17 @@ def main(
     l1e = load_env(l1_env)
     l2e = load_env(l2_env)
 
-    p1 = _spawn_anvil(l1e["RPC_URL"], l1_port, int(l1_json.parent.name))
-    p2 = _spawn_anvil(l2e["RPC_URL"], l2_port, int(l2_json.parent.name))
-    time.sleep(1.2)
+    p1 = None
+    p2 = None
+    l1_rpc_url = l1_rpc or f"http://127.0.0.1:{l1_port}"
+    l2_rpc_url = l2_rpc or f"http://127.0.0.1:{l2_port}"
+
+    if not l1_rpc:
+        p1 = _spawn_anvil(l1e["RPC_URL"], l1_port, int(l1_json.parent.name))
+    if not l2_rpc:
+        p2 = _spawn_anvil(l2e["RPC_URL"], l2_port, int(l2_json.parent.name))
+    if p1 or p2:
+        time.sleep(1.2)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="collar-e2e-"))
     l1_fork_env = tmpdir / "l1.fork.env"
@@ -102,7 +116,7 @@ def main(
     _write_env(
         l1e,
         l1_fork_env,
-        f"http://127.0.0.1:{l1_port}",
+        l1_rpc_url,
         {
             "L1_VAULT": l1a.get("l1Vault", ""),
             "L1_MESSENGER": l1a.get("l1Messenger", ""),
@@ -112,7 +126,7 @@ def main(
     _write_env(
         l2e,
         l2_fork_env,
-        f"http://127.0.0.1:{l2_port}",
+        l2_rpc_url,
         {
             "L2_RECEIVER": l2a.get("l2Receiver", ""),
             "L2_TSA": l2a.get("l2Tsa", ""),
@@ -128,8 +142,8 @@ def main(
     keeper_role = run(["cast", "keccak", "KEEPER_ROLE"]).strip()
     rfq_role = run(["cast", "keccak", "RFQ_SIGNER_ROLE"]).strip()
 
-    l1_rpc = f"http://127.0.0.1:{l1_port}"
-    l2_rpc = f"http://127.0.0.1:{l2_port}"
+    l1_rpc = l1_rpc_url
+    l2_rpc = l2_rpc_url
 
     try:
         l1_admin = _find_default_admin(
@@ -163,7 +177,7 @@ def main(
         "--once",
         "--broadcast",
         "--logs-rpc-url",
-        f"http://127.0.0.1:{l1_port}",
+        l1_rpc_url,
         "--json",
     ])
 
@@ -176,23 +190,25 @@ def main(
         str(l1_fork_env),
         "--json",
         "--logs-rpc-url",
-        f"http://127.0.0.1:{l1_port}",
+        l1_rpc_url,
     ])
 
     report = {
         "tmpDir": str(tmpdir),
         "l1ForkEnv": str(l1_fork_env),
         "l2ForkEnv": str(l2_fork_env),
-        "l2Keeper": json.loads(k2),
-        "l1Keeper": json.loads(k1),
-        "l2Messages": json.loads(m2),
-        "l1Messages": json.loads(m1),
+        "l2Keeper": _loads_json_relaxed(k2),
+        "l1Keeper": _loads_json_relaxed(k1),
+        "l2Messages": _loads_json_relaxed(m2),
+        "l1Messages": _loads_json_relaxed(m1),
     }
     print(json.dumps(report, indent=2))
 
     if not keep_anvil:
-        p1.terminate()
-        p2.terminate()
+        if p1 is not None:
+            p1.terminate()
+        if p2 is not None:
+            p2.terminate()
 
 
 if __name__ == "__main__":
