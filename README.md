@@ -106,6 +106,7 @@ uv run python ops/deploy_l1.py --env testnet
 # If WETH_ASSET is set and L2_WRAPPED_WETH_ASSET is empty in L1 env,
 # deploy_l1.py auto-resolves it from L2 TSA via --l2-env-file (default: .env.l2.<env>).
 # If DERIVE_SUBACCOUNT_ID is empty, deploy_l1.py also auto-resolves TSA subAccount() from L2.
+# Socket adapter msg gas follows LZ_RECEIVE_GAS (legacy WETH_MSG_GAS_LIMIT remains as override fallback).
 # L2 receiver lookup order: L2_RECEIVER env -> L2 OUTPUT_JSON -> DeployL2 broadcast run-latest artifact.
 uv run python ops/deploy_l1.py --env testnet --broadcast
 

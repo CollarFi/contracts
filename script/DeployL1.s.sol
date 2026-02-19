@@ -103,7 +103,9 @@ contract DeployL1 is Script {
         cfg.wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
         cfg.wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
         cfg.wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
-        cfg.wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        // Socket adapter gas limit follows LZ receive gas by default.
+        // Backward-compat: WETH_MSG_GAS_LIMIT still works if LZ_RECEIVE_GAS is unset.
+        cfg.wethMsgGasLimit = vm.envOr("LZ_RECEIVE_GAS", vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000)));
         cfg.wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
         cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
         cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
