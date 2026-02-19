@@ -120,6 +120,10 @@ uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-regis
 # Wire L1<->L2 LayerZero peers after both sides are deployed
 uv run python ops/wire_lz_peers.py --env testnet --broadcast
 
+# Unified preflight: recipient wiring + ULN check + asset mapping (optional pending-message scan)
+uv run python ops/preflight.py --env testnet
+uv run python ops/preflight.py --env testnet --include-messages
+
 # Check LayerZero ULN/route config for deployed messenger/receiver using current env files
 uv run python ops/check_lz_uln.py --env testnet
 uv run python ops/check_lz_uln.py --env testnet --json
