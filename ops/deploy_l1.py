@@ -24,6 +24,9 @@ def main(
     l2_env_file: Path = typer.Option(ROOT_DIR / ".env.l2.testnet", "--l2-env-file", help="L2 env file used for TSA lookup"),
     env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l1.<env> and .env.l2.<env>."),
     broadcast: bool = typer.Option(False, help="Execute onchain txs (default: dry-run/simulation)"),
+    private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
+    from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
+    unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
     require_cmd("forge")
@@ -33,11 +36,23 @@ def main(
 
     l1 = load_env(l1_env_file)
 
-    for k in ("RPC_URL", "ACCOUNT", "TREASURY"):
-        must(l1, k)
+    must(l1, "RPC_URL")
+    must(l1, "TREASURY")
 
-    # Keep keystore/named-account workflow only.
-    deployer = run(["cast", "wallet", "address", "--account", l1["ACCOUNT"]])
+    account = l1.get("ACCOUNT", "")
+    pk = private_key or l1.get("PRIVATE_KEY", "")
+    sender = from_addr or l1.get("FROM", "")
+    use_unlocked = unlocked or (str(l1.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
+
+    if not account and not pk and not (use_unlocked and sender):
+        raise ValueError("provide ACCOUNT, or --private-key, or --unlocked --from")
+
+    if pk:
+        deployer = run(["cast", "wallet", "address", "--private-key", pk])
+    elif use_unlocked and sender:
+        deployer = sender
+    else:
+        deployer = run(["cast", "wallet", "address", "--account", account])
     if not l1.get("ADMIN"):
         l1["ADMIN"] = deployer
 
@@ -102,9 +117,12 @@ def main(
     _forge_out = forge_script(
         "script/DeployL1.s.sol:DeployL1",
         l1["RPC_URL"],
-        l1["ACCOUNT"],
+        account or None,
         broadcast,
         env_overrides,
+        private_key=pk or None,
+        from_addr=sender or None,
+        unlocked=use_unlocked,
     )
 
     if json_out:
@@ -113,7 +131,10 @@ def main(
                 {
                     "outputJson": str(out_abs),
                     "broadcast": broadcast,
-                    "account": l1["ACCOUNT"],
+                    "account": account or None,
+                    "privateKey": bool(pk),
+                    "from": sender or None,
+                    "unlocked": use_unlocked,
                     "envProfile": (env_profile.strip().lower() or None),
                     "l1Env": str(l1_env_file),
                     "l2Env": str(l2_env_file),

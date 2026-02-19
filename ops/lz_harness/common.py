@@ -107,14 +107,25 @@ def cast_send(
 def forge_script(
     script_target: str,
     rpc_url: str,
-    account: str,
+    account: str | None,
     broadcast: bool,
     env_overrides: dict[str, str],
     extra_args: list[str] | None = None,
+    private_key: str | None = None,
+    from_addr: str | None = None,
+    unlocked: bool = False,
 ) -> str:
     env = os.environ.copy()
     env.update(env_overrides)
-    cmd = ["forge", "script", script_target, "--rpc-url", rpc_url, "--account", account]
+    cmd = ["forge", "script", script_target, "--rpc-url", rpc_url]
+    if private_key:
+        cmd += ["--private-key", private_key]
+    elif unlocked and from_addr:
+        cmd += ["--unlocked", "--sender", from_addr]
+    elif account:
+        cmd += ["--account", account]
+    else:
+        raise CmdError("forge_script requires one auth mode: account, private_key, or unlocked+from_addr")
     if broadcast:
         cmd.append("--broadcast")
     if extra_args:
