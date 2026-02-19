@@ -152,7 +152,7 @@ contract CollarVault is
         $.permit2 = permit2_;
         $.l2Recipient = l2Recipient_;
         $.treasury = treasury_;
-        $.maxMandateDuration = 1 days;
+        $.maxMandateDuration = 30 minutes;
         $.nextLoanId = 1;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
