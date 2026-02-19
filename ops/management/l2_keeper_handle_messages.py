@@ -101,6 +101,64 @@ def _action_name(action: int) -> str:
     }.get(action, f"Unknown({action})")
 
 
+
+
+def _parse_uint(raw: str) -> int:
+    token = raw.strip().split()[0]
+    return int(token)
+
+
+def _quote_ack_native_fee(rpc_url: str, receiver_addr: str, pending_raw: str) -> int:
+    msg = _parse_pending_message(pending_raw)
+    options = cast_call(rpc_url, receiver_addr, "defaultOptions()(bytes)")
+    quote_raw = cast_call(
+        rpc_url,
+        receiver_addr,
+        "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+        str(ACTION_DEPOSIT_CONFIRMED),
+        str(msg["loanId"]),
+        msg["asset"],
+        str(msg["amount"]),
+        msg["recipient"],
+        str(msg["subaccountId"]),
+        msg["socketMessageId"],
+        "0",
+        "0x" + "0" * 64,
+        "0",
+        "0x",
+        options,
+    )
+    cleaned = quote_raw.strip()
+    # cast may return either tuple line "(native,lz)" or first-line number.
+    if cleaned.startswith("("):
+        first = cleaned.split(",", 1)[0].lstrip("(").strip()
+        return _parse_uint(first)
+    return _parse_uint(cleaned)
+
+
+
+def _parse_pending_message(raw: str) -> dict[str, Any]:
+    s = re.sub(r"\s*\[[^\]]+\]", "", raw.strip())
+    m = re.match(
+        r"^\((\d+),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]*)\)$",
+        s,
+    )
+    if not m:
+        raise ValueError(f"failed to parse pendingMessages tuple: {raw}")
+    return {
+        "action": int(m.group(1)),
+        "loanId": int(m.group(2)),
+        "asset": m.group(3),
+        "amount": int(m.group(4)),
+        "recipient": m.group(5),
+        "subaccountId": int(m.group(6)),
+        "socketMessageId": m.group(7),
+        "secondaryAmount": int(m.group(8)),
+        "quoteHash": m.group(9),
+        "takerNonce": int(m.group(10)),
+        "data": m.group(11),
+    }
+
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -125,6 +183,7 @@ def main(
     include_return_requests: bool = typer.Option(False, "--include-return-requests", help="Also handle ReturnRequest messages"),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
+    lz_fee_buffer_bps: int = typer.Option(500, "--lz-fee-buffer-bps", min=0, help="Buffer over quoted LZ native fee (bps)."),
 ) -> None:
     l2_env_file = resolve_l2_env_path(env_profile, l2_env_file)
     env = load_env(l2_env_file)
@@ -189,12 +248,30 @@ def main(
 
             if broadcast:
                 try:
+                    value_wei = None
+                    pending_raw = cast_call(
+                        rpc_url,
+                        receiver_addr,
+                        "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+                        guid,
+                        allow_fail=True,
+                    )
+                    if action == ACTION_DEPOSIT_INTENT:
+                        if pending_raw == "N/A":
+                            raise RuntimeError("failed to read pendingMessages for fee quote")
+                        fee = _quote_ack_native_fee(rpc_url, receiver_addr, pending_raw)
+                        fee_with_buffer = fee + (fee * lz_fee_buffer_bps) // 10_000
+                        value_wei = str(fee_with_buffer)
+                        item["quotedAckNativeFee"] = str(fee)
+                        item["valueWei"] = value_wei
+
                     tx = cast_send(
                         rpc_url,
                         account,
                         receiver_addr,
                         "handleMessage(bytes32)",
                         guid,
+                        value_wei=value_wei,
                     )
                     item["tx"] = tx
                     item["status"] = "sent"
