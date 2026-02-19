@@ -10,8 +10,8 @@ from rich import print
 from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
 from py_lib.envs import resolve_l1_l2_env_paths
 from py_lib.l2_discovery import (
+    resolve_l2_receiver_from_env_file,
     resolve_l2_subaccount_id_from_tsa,
-    resolve_l2_tsa_from_receiver,
     resolve_l2_wrapped_asset_from_tsa,
 )
 
@@ -68,8 +68,8 @@ def main(
         )
 
     if not l1.get("L2_RECIPIENT"):
-        l1["L2_RECIPIENT"] = resolve_l2_tsa_from_receiver(l2_env_file)
-        print("[cyan][info][/cyan] resolved L2_RECIPIENT (TSA) from L2 receiver:", l1["L2_RECIPIENT"])
+        l1["L2_RECIPIENT"] = resolve_l2_receiver_from_env_file(l2_env_file)
+        print("[cyan][info][/cyan] resolved L2_RECIPIENT (receiver) from L2 deployment/env:", l1["L2_RECIPIENT"])
 
     if not l1.get("DERIVE_SUBACCOUNT_ID"):
         subaccount_id = resolve_l2_subaccount_id_from_tsa(l2_env_file)
