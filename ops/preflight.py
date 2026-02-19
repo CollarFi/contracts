@@ -68,6 +68,16 @@ def _peer_check(env_profile: str, l1_env_file: Path, l2_env_file: Path) -> dict:
     l2_eid = int((l1.get("L2_EID") or l1.get("REMOTE_EID") or "0").strip())
     l1_eid = int((l2.get("L1_EID") or "0").strip())
 
+    # Fallback: derive eids from endpoint contracts when env is unset.
+    if l2_eid == 0 and l2.get("LZ_ENDPOINT"):
+        l2_eid_raw = cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)", allow_fail=True)
+        if l2_eid_raw != "N/A":
+            l2_eid = int(_strip_units(l2_eid_raw))
+    if l1_eid == 0 and l1.get("LZ_ENDPOINT"):
+        l1_eid_raw = cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)", allow_fail=True)
+        if l1_eid_raw != "N/A":
+            l1_eid = int(_strip_units(l1_eid_raw))
+
     l1_peer_actual = cast_call(l1["RPC_URL"], l1_messenger, "peers(uint32)(bytes32)", str(l2_eid), allow_fail=True)
     l2_peer_actual = cast_call(l2["RPC_URL"], l2_receiver, "peers(uint32)(bytes32)", str(l1_eid), allow_fail=True)
 
