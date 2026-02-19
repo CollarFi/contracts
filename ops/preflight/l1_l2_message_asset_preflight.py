@@ -83,7 +83,7 @@ def main(
     }
 
     if json_out:
-        print(json.dumps(out, indent=2))
+        typer.echo(json.dumps(out, indent=2))
         return
 
     icon = "[green]OK[/green]" if ok else "[red]MISMATCH[/red]"

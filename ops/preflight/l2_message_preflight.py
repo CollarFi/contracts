@@ -249,7 +249,7 @@ def main(
     }
 
     if json_out:
-        print(json.dumps(out, indent=2))
+        typer.echo(json.dumps(out, indent=2))
         return
 
     print(f"[bold]L2 message preflight[/bold] receiver={receiver_addr} inspected={len(results)}")

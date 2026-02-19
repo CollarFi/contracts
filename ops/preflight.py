@@ -9,9 +9,9 @@ from rich import print
 
 from lz_harness.common import ROOT_DIR, cast_call, load_env, must, run
 from py_lib.deployments import resolve_addr
-from py_lib.envs import resolve_l1_l2_env_paths
+from py_lib.envs import resolve_l1_l2_env_paths, resolve_l2_env_path
 
-app = typer.Typer(add_completion=False)
+app = typer.Typer(add_completion=False, help="Unified preflight router")
 
 
 def _strip_units(value: str) -> str:
@@ -30,15 +30,7 @@ def _run_json(cmd: list[str]) -> dict:
         raise
 
 
-@app.command()
-def main(
-    l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
-    l2_env_file: Path = typer.Option(ROOT_DIR / ".env.l2.testnet", "--l2-env-file"),
-    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet"),
-    include_messages: bool = typer.Option(False, help="Also run L2 pending-message preflight scan"),
-    lookback_blocks: int = typer.Option(50000, "--lookback-blocks", min=1),
-    json_out: bool = typer.Option(False, "--json"),
-) -> None:
+def _recipient_check(env_profile: str, l1_env_file: Path, l2_env_file: Path) -> dict:
     l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
     l1 = load_env(l1_env_file)
     l2 = load_env(l2_env_file)
@@ -48,36 +40,105 @@ def main(
 
     vault = resolve_addr(l1, "L1_VAULT", "l1Vault", "l1")
     receiver = resolve_addr(l2, "L2_RECEIVER", "l2Receiver", "l2")
-
     l1_recipient = _strip_units(cast_call(l1["RPC_URL"], vault, "l2Recipient()(address)", allow_fail=True))
-    recipient_ok = l1_recipient.lower() == receiver.lower()
 
-    try:
-        lz = _run_json(["uv", "run", "python", "ops/check_lz_uln.py", "--env", (env_profile or "testnet"), "--json"])
-    except Exception as exc:
-        lz = {"ok": False, "error": f"failed to parse check_lz_uln output: {exc}"}
-    asset = _run_json(
+    return {
+        "ok": l1_recipient.lower() == receiver.lower(),
+        "vault": vault,
+        "l1Recipient": l1_recipient,
+        "l2Receiver": receiver,
+    }
+
+
+@app.command("assets")
+def assets(
+    l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
+    l2_env_file: Path = typer.Option(ROOT_DIR / ".env.l2.testnet", "--l2-env-file"),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    cmd = [
+        "uv",
+        "run",
+        "python",
+        "ops/preflight/l1_l2_message_asset_preflight.py",
+        "--env",
+        (env_profile or "testnet"),
+        "--json",
+    ]
+    out = _run_json(cmd)
+    if json_out:
+        print(json.dumps(out, indent=2))
+    else:
+        print(out)
+
+
+@app.command("messages")
+def messages(
+    l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet"),
+    lookback_blocks: int = typer.Option(50000, "--lookback-blocks", min=1),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    l2_env_file = resolve_l2_env_path(env_profile, l2_env_file)
+    cmd = [
+        "uv",
+        "run",
+        "python",
+        "ops/preflight/l2_message_preflight.py",
+        str(l2_env_file),
+        "--lookback-blocks",
+        str(lookback_blocks),
+        "--json",
+    ]
+    out = _run_json(cmd)
+    if json_out:
+        print(json.dumps(out, indent=2))
+    else:
+        print(out)
+
+
+@app.command("all")
+def all_checks(
+    l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
+    l2_env_file: Path = typer.Option(ROOT_DIR / ".env.l2.testnet", "--l2-env-file"),
+    env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet"),
+    include_messages: bool = typer.Option(False, help="Include pending-message preflight scan"),
+    include_uln: bool = typer.Option(False, help="Include ULN/route check"),
+    lookback_blocks: int = typer.Option(50000, "--lookback-blocks", min=1),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    recipient = _recipient_check(env_profile, l1_env_file, l2_env_file)
+
+    uln = None
+    if include_uln:
+        try:
+            uln = _run_json(["uv", "run", "python", "ops/check_lz_uln.py", "--env", (env_profile or "testnet"), "--json"])
+        except Exception as exc:
+            uln = {"ok": False, "error": f"failed to parse check_lz_uln output: {exc}"}
+
+    assets_out = _run_json(
         [
             "uv",
             "run",
             "python",
-            "ops/management/l1_l2_message_asset_preflight.py",
+            "ops/preflight/l1_l2_message_asset_preflight.py",
             "--env",
             (env_profile or "testnet"),
             "--json",
         ]
     )
 
-    messages = None
+    messages_out = None
     if include_messages:
-        messages = _run_json(
+        l2_resolved = resolve_l2_env_path(env_profile, l2_env_file)
+        messages_out = _run_json(
             [
                 "uv",
                 "run",
                 "python",
-                "ops/management/l2_message_preflight.py",
-                "--env",
-                (env_profile or "testnet"),
+                "ops/preflight/l2_message_preflight.py",
+                str(l2_resolved),
                 "--lookback-blocks",
                 str(lookback_blocks),
                 "--json",
@@ -85,27 +146,19 @@ def main(
         )
 
     messages_ok = True
-    if messages:
-        results = messages.get("results", [])
-        messages_ok = all(bool(r.get("ok")) for r in results)
+    if messages_out:
+        messages_ok = all(bool(r.get("ok")) for r in messages_out.get("results", []))
 
-    uln_ok = bool(lz.get("ok", False)) if isinstance(lz, dict) else False
-    asset_ok = bool(asset.get("ok", False)) if isinstance(asset, dict) else False
-
-    ok = recipient_ok and uln_ok and asset_ok and messages_ok
+    uln_ok = True if uln is None else bool(uln.get("ok", False))
+    ok = bool(recipient.get("ok")) and uln_ok and bool(assets_out.get("ok")) and messages_ok
 
     out = {
         "ok": ok,
         "checks": {
-            "recipient": {
-                "ok": recipient_ok,
-                "vault": vault,
-                "l1Recipient": l1_recipient,
-                "l2Receiver": receiver,
-            },
-            "uln": lz,
-            "assetMapping": asset,
-            "messages": messages,
+            "recipient": recipient,
+            "uln": uln,
+            "assetMapping": assets_out,
+            "messages": messages_out,
         },
     }
 
@@ -114,18 +167,15 @@ def main(
         return
 
     print(f"[bold]Unified preflight[/bold] {'[green]OK[/green]' if ok else '[red]FAIL[/red]'}")
-    print(f"  recipient: {'OK' if recipient_ok else 'MISMATCH'} ({l1_recipient} vs {receiver})")
-    print(f"  ULN/route: {'OK' if uln_ok else 'FAIL'}")
-    print(f"  asset mapping: {'OK' if asset_ok else 'FAIL'}")
+    print(
+        f"  recipient: {'OK' if recipient['ok'] else 'MISMATCH'} "
+        f"({recipient['l1Recipient']} vs {recipient['l2Receiver']})"
+    )
+    if uln is not None:
+        print(f"  ULN/route: {'OK' if uln.get('ok', False) else 'FAIL'}")
+    print(f"  asset mapping: {'OK' if assets_out.get('ok', False) else 'FAIL'}")
     if include_messages:
         print(f"  pending messages: {'OK' if messages_ok else 'FAIL'}")
-
-    if not recipient_ok:
-        print("  hint: cast send <L1_VAULT> 'setL2Recipient(address)' <L2_RECEIVER> ...")
-    if not asset_ok:
-        print("  hint: run ops/management/set_l2_message_asset.py with wrapped underlying asset")
-    if not uln_ok:
-        print("  hint: run ops/ensure_lz_route.py --env <env> --broadcast")
 
 
 if __name__ == "__main__":

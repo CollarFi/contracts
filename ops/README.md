@@ -32,8 +32,8 @@ uv run python ops/check_lz_uln.py --env testnet --json
 # Ops helpers
 uv run python ops/management/enable_collateral.py --env testnet
 uv run python ops/management/set_l2_message_asset.py --env testnet
-uv run python ops/management/l1_l2_message_asset_preflight.py --env testnet --json
-uv run python ops/management/l2_message_preflight.py --env testnet --json
+uv run python ops/preflight/l1_l2_message_asset_preflight.py --env testnet --json
+uv run python ops/preflight/l2_message_preflight.py --env testnet --json
 uv run python ops/management/l2_keeper_handle_messages.py --env testnet --once
 ```
 
