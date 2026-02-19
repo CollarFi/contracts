@@ -108,6 +108,10 @@ def all_checks(
     lookback_blocks: int = typer.Option(50000, "--lookback-blocks", min=1),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
+    l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
+    l1 = load_env(l1_env_file)
+    l2 = load_env(l2_env_file)
+
     recipient = _recipient_check(env_profile, l1_env_file, l2_env_file)
 
     uln = None
@@ -155,19 +159,22 @@ def all_checks(
     recommendations: list[str] = []
     if not recipient.get("ok"):
         recommendations.append(
-            "Set L1 vault l2Recipient to current L2 receiver: cast send <L1_VAULT> 'setL2Recipient(address)' <L2_RECEIVER> --rpc-url <L1_RPC> --account <ACCOUNT>"
+            f"cast send {recipient['vault']} 'setL2Recipient(address)' {recipient['l2Receiver']} --rpc-url {l1['RPC_URL']} --account {l1.get('ACCOUNT', '<ACCOUNT>')}"
         )
     if not assets_out.get("ok"):
+        l1_asset = assets_out.get('l1Asset', l1.get('WETH_ASSET', '<L1_ASSET>'))
+        wrapped_underlying = assets_out.get('tsaWrappedUnderlyingAsset', '<WRAPPED_UNDERLYING>')
+        env_name = (env_profile or 'testnet')
         recommendations.append(
-            "Set L1->L2 message asset to wrappedDepositAsset.wrappedAsset(): uv run python ops/management/set_l2_message_asset.py --env <env> --l1-asset <L1_ASSET> --l2-asset <WRAPPED_UNDERLYING> --broadcast"
+            f"uv run python ops/management/set_l2_message_asset.py --env {env_name} --l1-asset {l1_asset} --l2-asset {wrapped_underlying} --broadcast"
         )
     if uln is not None and not uln.get("ok", False):
         recommendations.append(
-            "Repair peers/ULN/default options: uv run python ops/ensure_lz_route.py --env <env> --broadcast"
+            f"uv run python ops/ensure_lz_route.py --env {(env_profile or 'testnet')} --broadcast"
         )
     if messages_out is not None and not messages_ok:
         recommendations.append(
-            "Inspect failing GUIDs and reasons: uv run python ops/preflight/l2_message_preflight.py --env <env> --json"
+            f"uv run python ops/preflight/l2_message_preflight.py --env {(env_profile or 'testnet')} --json"
         )
 
     out = {
