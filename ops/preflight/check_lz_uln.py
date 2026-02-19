@@ -318,7 +318,7 @@ def main(
     }
 
     if json_out:
-        print(json.dumps(summary, indent=2))
+        typer.echo(json.dumps(summary, indent=2))
         return
 
     icon = "[green]OK[/green]" if summary["ok"] else "[red]ISSUES FOUND[/red]"
