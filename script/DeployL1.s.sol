@@ -88,7 +88,7 @@ contract DeployL1 is Script {
 
         address defaultPermit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
         cfg.permit2 = vm.envOr("PERMIT2", defaultPermit2);
-        cfg.l2Recipient = vm.envOr("L2_RECIPIENT", cfg.admin);
+        cfg.l2Recipient = vm.envOr("L2_RECIPIENT", address(0));
 
         cfg.liquidityVault = vm.envOr("LIQUIDITY_VAULT", address(0));
         cfg.usdcAsset = vm.envOr("USDC_ASSET", address(0));
@@ -162,6 +162,7 @@ contract DeployL1 is Script {
         internal
         returns (CollarVault vault, address vaultImpl)
     {
+        if (cfg.l2Recipient == address(0)) revert("L2_RECIPIENT required");
         vaultImpl = address(new CollarVault());
         bytes memory initData = abi.encodeCall(
             CollarVault.initialize,

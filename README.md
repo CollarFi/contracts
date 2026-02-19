@@ -103,6 +103,7 @@ uv run python ops/lz_harness/deploy.py --broadcast
 uv run python ops/deploy_l1.py --env testnet
 
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
+# If L2_RECIPIENT is empty, deploy_l1.py auto-resolves it to the L2 TSA address via --l2-env-file.
 # If WETH_ASSET is set and L2_WRAPPED_WETH_ASSET is empty in L1 env,
 # deploy_l1.py auto-resolves it from L2 TSA via --l2-env-file (default: .env.l2.<env>).
 # If DERIVE_SUBACCOUNT_ID is empty, deploy_l1.py also auto-resolves TSA subAccount() from L2.
