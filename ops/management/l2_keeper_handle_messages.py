@@ -186,6 +186,9 @@ def main(
     max_per_tick: int = typer.Option(10, "--max-per-tick", min=1),
     include_return_requests: bool = typer.Option(False, "--include-return-requests", help="Also handle ReturnRequest messages"),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
+    private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
+    from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
+    unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
     lz_fee_buffer_bps: int = typer.Option(500, "--lz-fee-buffer-bps", min=0, help="Buffer over quoted LZ native fee (bps)."),
 ) -> None:
@@ -194,9 +197,12 @@ def main(
 
     rpc_url = must(env, "RPC_URL")
     account = env.get("ACCOUNT", "")
+    pk = private_key or env.get("PRIVATE_KEY", "")
+    sender = from_addr or env.get("FROM", "")
+    use_unlocked = unlocked or (str(env.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
     receiver_addr = receiver or resolve_addr(env, "L2_RECEIVER", "l2Receiver", "l2")
-    if broadcast and not account:
-        raise ValueError("missing ACCOUNT in env for --broadcast")
+    if broadcast and not account and not pk and not (use_unlocked and sender):
+        raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
     state = _load_state(state_file, start_block)
     next_block = int(state.get("nextBlock", start_block))
@@ -271,11 +277,14 @@ def main(
 
                     tx = cast_send(
                         rpc_url,
-                        account,
+                        account or None,
                         receiver_addr,
                         "handleMessage(bytes32)",
                         guid,
                         value_wei=value_wei,
+                        private_key=pk or None,
+                        from_addr=sender or None,
+                        unlocked=use_unlocked,
                     )
                     item["tx"] = tx
                     item["status"] = "sent"

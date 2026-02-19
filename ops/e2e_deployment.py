@@ -167,7 +167,18 @@ def main(
         typer.echo(f"[warn] skipped L2 role setup: {exc}")
 
     # L2 then L1 keeper once
-    k2 = run(["uv", "run", "python", "ops/management/l2_keeper_handle_messages.py", str(l2_fork_env), "--once", "--broadcast", "--json"])
+    k2 = run([
+        "uv",
+        "run",
+        "python",
+        "ops/management/l2_keeper_handle_messages.py",
+        str(l2_fork_env),
+        "--once",
+        "--broadcast",
+        "--private-key",
+        ANVIL_PK0,
+        "--json",
+    ])
     k1 = run([
         "uv",
         "run",
@@ -176,6 +187,8 @@ def main(
         str(l1_fork_env),
         "--once",
         "--broadcast",
+        "--private-key",
+        ANVIL_PK0,
         "--logs-rpc-url",
         l1_rpc_url,
         "--json",

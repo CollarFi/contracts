@@ -115,6 +115,9 @@ def main(
     once: bool = typer.Option(False, "--once", help="Run one polling tick and exit"),
     max_per_tick: int = typer.Option(10, "--max-per-tick", min=1),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
+    private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
+    from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
+    unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
     l1_env_file, _ = resolve_l1_l2_env_paths(env_profile, l1_env_file, ROOT_DIR / ".env.l2.testnet")
@@ -123,10 +126,13 @@ def main(
     rpc_url = must(env, "RPC_URL")
     logs_url = logs_rpc_url or env.get("LOGS_RPC_URL", "") or rpc_url
     account = env.get("ACCOUNT", "")
+    pk = private_key or env.get("PRIVATE_KEY", "")
+    sender = from_addr or env.get("FROM", "")
+    use_unlocked = unlocked or (str(env.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
     messenger_addr = messenger or resolve_addr(env, "L1_MESSENGER", "l1Messenger", "l1")
     vault_addr = vault or resolve_addr(env, "L1_VAULT", "l1Vault", "l1")
-    if broadcast and not account:
-        raise ValueError("missing ACCOUNT in env for --broadcast")
+    if broadcast and not account and not pk and not (use_unlocked and sender):
+        raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
     if not state_file.is_file() and start_block == 0:
         latest = _block_number(rpc_url)
@@ -214,12 +220,15 @@ def main(
                 try:
                     tx = cast_send(
                         rpc_url,
-                        account,
+                        account or None,
                         vault_addr,
                         "finalizeLoan(uint256,bytes32,bytes32)",
                         str(loan_id),
                         deposit_guid,
                         trade_guid,
+                        private_key=pk or None,
+                        from_addr=sender or None,
+                        unlocked=use_unlocked,
                     )
                     item["tx"] = tx
                     item["status"] = "sent"

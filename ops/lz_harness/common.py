@@ -91,16 +91,27 @@ def cast_call(rpc_url: str, to: str, sig: str, *args: str, allow_fail: bool = Fa
 
 def cast_send(
     rpc_url: str,
-    account: str,
+    account: str | None,
     to: str,
     sig: str,
     *args: str,
     value_wei: str | None = None,
+    private_key: str | None = None,
+    from_addr: str | None = None,
+    unlocked: bool = False,
 ) -> str:
     cmd = ["cast", "send", to, sig, *args]
     if value_wei is not None:
         cmd += ["--value", value_wei]
-    cmd += ["--rpc-url", rpc_url, "--account", account]
+    cmd += ["--rpc-url", rpc_url]
+    if private_key:
+        cmd += ["--private-key", private_key]
+    elif unlocked and from_addr:
+        cmd += ["--unlocked", "--from", from_addr]
+    elif account:
+        cmd += ["--account", account]
+    else:
+        raise CmdError("cast_send requires one auth mode: account, private_key, or unlocked+from_addr")
     return run(cmd)
 
 
