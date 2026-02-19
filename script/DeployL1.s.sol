@@ -11,7 +11,8 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
-import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
+import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
+import {SocketBridgeAdapterOld} from "../src/bridge/SocketBridgeAdapterOld.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
@@ -191,27 +192,22 @@ contract DeployL1 is Script {
     function _maybeDeployWethAdapter(EnvConfig memory cfg, CollarVault vault) internal returns (address) {
         if (cfg.wethAsset == address(0) || cfg.wethSocketConnector == address(0)) return address(0);
 
-        SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
         if (cfg.wethSocketVault != address(0)) {
-            bridgeType = SocketBridgeAdapter.BridgeType.OLD;
-        } else if (cfg.wethSocketBridge != address(0)) {
-            bridgeType = SocketBridgeAdapter.BridgeType.NEW;
+            SocketBridgeAdapterOld adapter =
+                new SocketBridgeAdapterOld(cfg.wethSocketVault, cfg.wethSocketConnector, cfg.wethMsgGasLimit);
+            vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
+            return address(adapter);
         }
 
-        if (bridgeType == SocketBridgeAdapter.BridgeType.NONE) return address(0);
+        if (cfg.wethSocketBridge != address(0)) {
+            SocketBridgeAdapterNew adapter = new SocketBridgeAdapterNew(
+                cfg.wethSocketBridge, cfg.wethSocketConnector, cfg.wethMsgGasLimit, cfg.wethPayloadSize, "", ""
+            );
+            vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
+            return address(adapter);
+        }
 
-        SocketBridgeAdapter adapter = new SocketBridgeAdapter(
-            bridgeType,
-            cfg.wethSocketBridge,
-            cfg.wethSocketVault,
-            cfg.wethSocketConnector,
-            cfg.wethMsgGasLimit,
-            cfg.wethPayloadSize,
-            "",
-            ""
-        );
-        vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
-        return address(adapter);
+        return address(0);
     }
 
     function _proxyAdminOf(address proxy) internal view returns (address) {

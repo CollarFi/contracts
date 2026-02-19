@@ -33,7 +33,9 @@ def _l1_from_run(run: dict) -> dict:
         "l1SettleModule": _first_create_by_name(txs, "CollarVaultSettleModule"),
         "l1LiquidityVault": _first_create_by_name(txs, "CollarLiquidityVault"),
         "l1EulerAdapter": _first_create_by_name(txs, "EulerAdapterMock"),
-        "l1WethAdapter": _first_create_by_name(txs, "SocketBridgeAdapter"),
+        "l1WethAdapter": _first_create_by_name(txs, "SocketBridgeAdapterOld")
+        or _first_create_by_name(txs, "SocketBridgeAdapterNew")
+        or _first_create_by_name(txs, "SocketBridgeAdapter"),
     }
     return {k: v for k, v in out.items() if v}
 
