@@ -152,6 +152,24 @@ def all_checks(
     uln_ok = True if uln is None else bool(uln.get("ok", False))
     ok = bool(recipient.get("ok")) and uln_ok and bool(assets_out.get("ok")) and messages_ok
 
+    recommendations: list[str] = []
+    if not recipient.get("ok"):
+        recommendations.append(
+            "Set L1 vault l2Recipient to current L2 receiver: cast send <L1_VAULT> 'setL2Recipient(address)' <L2_RECEIVER> --rpc-url <L1_RPC> --account <ACCOUNT>"
+        )
+    if not assets_out.get("ok"):
+        recommendations.append(
+            "Set L1->L2 message asset to wrappedDepositAsset.wrappedAsset(): uv run python ops/management/set_l2_message_asset.py --env <env> --l1-asset <L1_ASSET> --l2-asset <WRAPPED_UNDERLYING> --broadcast"
+        )
+    if uln is not None and not uln.get("ok", False):
+        recommendations.append(
+            "Repair peers/ULN/default options: uv run python ops/ensure_lz_route.py --env <env> --broadcast"
+        )
+    if messages_out is not None and not messages_ok:
+        recommendations.append(
+            "Inspect failing GUIDs and reasons: uv run python ops/preflight/l2_message_preflight.py --env <env> --json"
+        )
+
     out = {
         "ok": ok,
         "checks": {
@@ -160,6 +178,7 @@ def all_checks(
             "assetMapping": assets_out,
             "messages": messages_out,
         },
+        "recommendations": recommendations,
     }
 
     if json_out:
@@ -176,6 +195,11 @@ def all_checks(
     print(f"  asset mapping: {'OK' if assets_out.get('ok', False) else 'FAIL'}")
     if include_messages:
         print(f"  pending messages: {'OK' if messages_ok else 'FAIL'}")
+
+    if recommendations:
+        print("  recommendations:")
+        for rec in recommendations:
+            print(f"   - {rec}")
 
 
 if __name__ == "__main__":
