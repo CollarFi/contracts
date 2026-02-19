@@ -236,6 +236,7 @@ def main(
         "L1_MESSENGER",
         "L1_VAULT",
         "LZ_ENDPOINT",
+        "SOCKET_TRACKER",
         "LOAN_STORE",
         "TSA_PROXY",
         "TSA_IMPLEMENTATION",
