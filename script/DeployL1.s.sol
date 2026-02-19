@@ -51,6 +51,7 @@ contract DeployL1 is Script {
         uint256 wethPayloadSize;
         uint256 wethStrikeScale;
         address l2WrappedWethAsset;
+        uint256 deriveSubaccountId;
         string outputJson;
     }
 
@@ -105,6 +106,7 @@ contract DeployL1 is Script {
         cfg.wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
         cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
         cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
+        cfg.deriveSubaccountId = vm.envOr("DERIVE_SUBACCOUNT_ID", uint256(0));
 
         cfg.outputJson = vm.envString("OUTPUT_JSON");
     }
@@ -122,6 +124,9 @@ contract DeployL1 is Script {
         dep.rolloverModule = new CollarVaultRolloverModule();
 
         dep.vault.setLZMessenger(ICollarVaultMessenger(address(dep.messenger)));
+        if (cfg.deriveSubaccountId != 0) {
+            dep.vault.setDeriveSubaccountId(cfg.deriveSubaccountId);
+        }
         dep.vault.setFinalizeModule(address(dep.finalizeModule));
         dep.vault.setSettleModule(address(dep.settleModule));
         dep.vault.setRolloverModule(address(dep.rolloverModule));
@@ -228,6 +233,7 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1EulerAdapter", dep.eulerAdapter);
         json = vm.serializeAddress("addrs", "l1Permit2", cfg.permit2);
         json = vm.serializeAddress("addrs", "l1WethAdapter", dep.wethAdapter);
+        json = vm.serializeUint("addrs", "l1DeriveSubaccountId", cfg.deriveSubaccountId);
         vm.writeJson(json, cfg.outputJson);
     }
 
@@ -250,6 +256,9 @@ contract DeployL1 is Script {
         }
         if (dep.wethAdapter != address(0)) {
             console2.log("L1 WETH adapter", dep.wethAdapter);
+        }
+        if (cfg.deriveSubaccountId > 0) {
+            console2.log("L1 derive subaccount id", cfg.deriveSubaccountId);
         }
         if (cfg.lzReceiveGas > 0) {
             console2.log("L1 messenger defaultOptions receive gas", cfg.lzReceiveGas);

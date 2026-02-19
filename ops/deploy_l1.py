@@ -9,7 +9,7 @@ from rich import print
 
 from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
 from py_lib.envs import resolve_l1_l2_env_paths
-from py_lib.l2_discovery import resolve_l2_wrapped_asset_from_tsa
+from py_lib.l2_discovery import resolve_l2_subaccount_id_from_tsa, resolve_l2_wrapped_asset_from_tsa
 
 app = typer.Typer(add_completion=False)
 
@@ -63,6 +63,11 @@ def main(
             l1["L2_WRAPPED_WETH_ASSET"],
         )
 
+    if not l1.get("DERIVE_SUBACCOUNT_ID"):
+        subaccount_id = resolve_l2_subaccount_id_from_tsa(l2_env_file)
+        l1["DERIVE_SUBACCOUNT_ID"] = str(subaccount_id)
+        print("[cyan][info][/cyan] resolved DERIVE_SUBACCOUNT_ID from L2 TSA:", l1["DERIVE_SUBACCOUNT_ID"])
+
     for opt in (
         "VAULT_OWNER",
         "PERMIT2",
@@ -80,6 +85,7 @@ def main(
         "WETH_PAYLOAD_SIZE",
         "WETH_STRIKE_SCALE",
         "L2_WRAPPED_WETH_ASSET",
+        "DERIVE_SUBACCOUNT_ID",
     ):
         if l1.get(opt):
             env_overrides[opt] = l1[opt]

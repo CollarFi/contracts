@@ -105,6 +105,7 @@ uv run python ops/deploy_l1.py --env testnet
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
 # If WETH_ASSET is set and L2_WRAPPED_WETH_ASSET is empty in L1 env,
 # deploy_l1.py auto-resolves it from L2 TSA via --l2-env-file (default: .env.l2.<env>).
+# If DERIVE_SUBACCOUNT_ID is empty, deploy_l1.py also auto-resolves TSA subAccount() from L2.
 # L2 receiver lookup order: L2_RECEIVER env -> L2 OUTPUT_JSON -> DeployL2 broadcast run-latest artifact.
 uv run python ops/deploy_l1.py --env testnet --broadcast
 
