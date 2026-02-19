@@ -40,6 +40,7 @@ uv run python ops/management/l1_keeper_handle_messages.py --env testnet --once -
 
 # E2E on forked deployments from l1.json/l2.json (test scenario script)
 uv run python test/e2e/deployment_e2e.py --l1-json deployments/421614/l1.json --l2-json deployments/901/l2.json
+uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-clean.json --l2-json deployments/901/l2-clean.json --l1-rpc http://127.0.0.1:8868 --l2-rpc http://127.0.0.1:8869
 ```
 
 ## Defaults and safety
