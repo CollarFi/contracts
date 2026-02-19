@@ -139,10 +139,14 @@ def main(
         allow_fail=True,
     )
     wrapped_deposit_asset = "N/A"
+    wrapped_underlying_asset = "N/A"
     if base_addrs_raw != "N/A":
         lines = [ln.strip() for ln in base_addrs_raw.splitlines() if ln.strip()]
         if len(lines) >= 3:
             wrapped_deposit_asset = lines[2]
+            underlying_raw = cast_call(rpc_url, wrapped_deposit_asset, "wrappedAsset()(address)", allow_fail=True)
+            if underlying_raw != "N/A":
+                wrapped_underlying_asset = _strip_units(underlying_raw).strip()
 
     results: list[dict[str, Any]] = []
 
@@ -221,9 +225,10 @@ def main(
                 )
 
         item["wrappedDepositAsset"] = wrapped_deposit_asset
-        if wrapped_deposit_asset != "N/A" and asset.lower() != wrapped_deposit_asset.lower():
+        item["wrappedUnderlyingAsset"] = wrapped_underlying_asset
+        if wrapped_underlying_asset != "N/A" and asset.lower() != wrapped_underlying_asset.lower():
             item["issues"].append(
-                f"asset differs from TSA wrappedDepositAsset ({asset} != {wrapped_deposit_asset})"
+                f"asset differs from wrappedDepositAsset.wrappedAsset ({asset} != {wrapped_underlying_asset})"
             )
 
         if item["issues"]:
@@ -237,6 +242,7 @@ def main(
         "tsa": tsa_addr,
         "tsaSubaccount": tsa_subaccount,
         "wrappedDepositAsset": wrapped_deposit_asset,
+        "wrappedUnderlyingAsset": wrapped_underlying_asset,
         "latestBlock": latest,
         "inspected": len(results),
         "results": results,
