@@ -250,6 +250,21 @@ contract LZMessagingTest is Test {
         assertEq(uint8(storedAction), uint8(CollarLZMessages.Action.DepositConfirmed));
     }
 
+
+    function testHandleDepositRevertsOnMismatchedUnderlyingAsset() public {
+        bytes32 socketMessageId = bytes32(uint256(300));
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, socketMessageId);
+        message.asset = address(0xDEAD);
+
+        socket.setExecuted(socketMessageId, true);
+
+        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
+        _deliverToReceiver(receipt.guid, message);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_InvalidAsset.selector);
+        receiver.handleMessage(receipt.guid);
+    }
+
     function testHandleMessageRevertsIfSocketPending() public {
         bytes32 socketMessageId = bytes32(uint256(200));
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, socketMessageId);
