@@ -90,6 +90,19 @@ contract MockRfqModule {
     }
 }
 
+
+contract MockWrappedDepositAsset {
+    address public underlying;
+
+    constructor(address underlying_) {
+        underlying = underlying_;
+    }
+
+    function wrappedAsset() external view returns (address) {
+        return underlying;
+    }
+}
+
 contract MockCollarTSA is ICollarTSA {
     IActionVerifier.Action public lastAction;
     address public depositModule;
@@ -146,6 +159,7 @@ contract LZMessagingTest is Test {
     CollarLoanStore internal loanStore;
     MockRfqModule internal rfqModule;
     MockERC20 internal token;
+    MockWrappedDepositAsset internal wrappedDepositAsset;
     MockEndpointV2 internal endpointL1;
     MockEndpointV2 internal endpointL2;
     address internal vaultRecipient;
@@ -158,9 +172,10 @@ contract LZMessagingTest is Test {
         endpointL2 = new MockEndpointV2();
 
         token = new MockERC20("Mock", "MOCK", 18);
+        wrappedDepositAsset = new MockWrappedDepositAsset(address(token));
         socket = new MockSocketMessageTracker();
         rfqModule = new MockRfqModule();
-        tsa = new MockCollarTSA(address(token), address(rfqModule));
+        tsa = new MockCollarTSA(address(wrappedDepositAsset), address(rfqModule));
         loanStore = new CollarLoanStore(address(this));
 
         messenger = new CollarVaultMessenger(address(this), address(this), address(endpointL1), L2_EID);
