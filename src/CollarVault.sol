@@ -86,6 +86,7 @@ contract CollarVault is
     event TreasuryUpdated(address indexed treasury, uint256 bps);
     event OriginationFeeAprUpdated(uint256 feeApr);
     event MaxTotalPrincipalUpdated(uint256 maxTotalPrincipal);
+    event MaxMandateDurationUpdated(uint64 maxMandateDuration);
     event CollateralConfigUpdated(
         address indexed asset, bool allowed, uint256 strikeScale, address indexed l2MessageAsset
     );
@@ -151,6 +152,7 @@ contract CollarVault is
         $.permit2 = permit2_;
         $.l2Recipient = l2Recipient_;
         $.treasury = treasury_;
+        $.maxMandateDuration = 1 days;
         $.nextLoanId = 1;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -207,6 +209,11 @@ contract CollarVault is
     function totalCommittedPrincipal() external view returns (uint256) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.totalCommittedPrincipal;
+    }
+
+    function maxMandateDuration() external view returns (uint64) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.maxMandateDuration;
     }
 
     function deriveSubaccountId() external view returns (uint256) {
@@ -552,6 +559,7 @@ contract CollarVault is
         CollarVaultShared.Mandate memory mandate = $.mandates[loanId];
         if (mandate.borrower != address(0)) {
             _releaseCommittedPrincipal(mandate.borrowAmount);
+            $.liquidityVault.releasePrincipal(loanId);
             if (mandate.maxNegativeC > 0) {
                 $.liquidityVault.release(loanId);
             }
@@ -730,6 +738,14 @@ contract CollarVault is
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         $.maxTotalPrincipal = maxPrincipal;
         emit MaxTotalPrincipalUpdated(maxPrincipal);
+    }
+
+    /// @notice Update max mandate lifetime in seconds.
+    function setMaxMandateDuration(uint64 duration) external onlyRole(PARAMETER_ROLE) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        if (duration == 0) revert CV_InvalidConfig();
+        $.maxMandateDuration = duration;
+        emit MaxMandateDurationUpdated(duration);
     }
 
     /// @notice Allow or revoke an RFQ signer.
