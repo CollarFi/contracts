@@ -38,7 +38,8 @@ contract SocketBridgeAdapterOld is IBridgeAdapter {
         (address siblingPlug,,,,) = ISocketCoreShared(socket_).getPlugConfig(connector_, siblingChainSlug);
         if (siblingPlug == address(0)) revert("SBA_OLD:zero-sibling-plug");
 
-        messageIdPrefix = (uint256(ISocketCoreShared(socket_).chainSlug()) << 224) | (uint256(uint160(siblingPlug)) << 64);
+        messageIdPrefix =
+            (uint256(ISocketCoreShared(socket_).chainSlug()) << 224) | (uint256(uint160(siblingPlug)) << 64);
     }
 
     function messageId() external view override returns (bytes32) {

@@ -196,8 +196,9 @@ contract DeployL1 is Script {
         if (cfg.wethAsset == address(0) || cfg.wethSocketConnector == address(0)) return address(0);
 
         if (cfg.wethSocketVault != address(0)) {
-            SocketBridgeAdapterOld adapter =
-                new SocketBridgeAdapterOld(cfg.wethAsset, cfg.wethSocketVault, cfg.wethSocketConnector, cfg.wethMsgGasLimit);
+            SocketBridgeAdapterOld adapter = new SocketBridgeAdapterOld(
+                cfg.wethAsset, cfg.wethSocketVault, cfg.wethSocketConnector, cfg.wethMsgGasLimit
+            );
             vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
             return address(adapter);
         }

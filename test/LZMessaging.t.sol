@@ -90,7 +90,6 @@ contract MockRfqModule {
     }
 }
 
-
 contract MockWrappedDepositAsset {
     address public underlying;
 
@@ -249,7 +248,6 @@ contract LZMessagingTest is Test {
         assertEq(storedLoanId, message.loanId);
         assertEq(uint8(storedAction), uint8(CollarLZMessages.Action.DepositConfirmed));
     }
-
 
     function testHandleDepositRevertsOnMismatchedUnderlyingAsset() public {
         bytes32 socketMessageId = bytes32(uint256(300));

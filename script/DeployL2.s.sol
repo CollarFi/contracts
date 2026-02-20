@@ -135,7 +135,6 @@ contract DeployL2 is Script {
             lzEndpoint = address(new LZEndpointV2Mock());
         }
 
-
         if (loanStoreAddr == address(0)) {
             loanStoreAddr = address(new CollarLoanStore(admin));
         }
