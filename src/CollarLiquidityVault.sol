@@ -18,7 +18,9 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     IERC4626 public eulerVault;
     uint256 public activeLoans;
     uint256 public reservedLiquidity;
+    uint256 public reservedPrincipal;
     mapping(uint256 => uint256) public reservedByLoan;
+    mapping(uint256 => uint256) public reservedPrincipalByLoan;
 
     error LV_InsufficientLiquidity();
     error LV_InvalidAmount();
@@ -27,11 +29,17 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     error LV_ReserveExists();
     error LV_ReserveMissing();
     error LV_ReserveExceeds();
+    error LV_ReservedLiquidityLocked();
+    error LV_ReserveInvariantBroken();
+    error LV_InvalidEulerAsset();
+    error LV_EulerVaultHasFunds();
 
     event LossRecorded(uint256 amount);
     event LiquidityReserved(uint256 indexed loanId, uint256 amount);
     event LiquidityReleased(uint256 indexed loanId, uint256 amount);
     event LiquidityConsumed(uint256 indexed loanId, uint256 amount);
+    event PrincipalReserved(uint256 indexed loanId, uint256 amount);
+    event PrincipalReleased(uint256 indexed loanId, uint256 amount);
 
     constructor(IERC20 asset_, string memory name_, string memory symbol_, address admin)
         ERC20(name_, symbol_)
@@ -47,7 +55,18 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
 
     /// @notice Update the Euler vault used for idle liquidity.
     function setEulerVault(IERC4626 newEulerVault) external onlyRole(PARAMETER_ROLE) {
+        IERC4626 currentEulerVault = eulerVault;
+        if (
+            address(currentEulerVault) != address(0) && address(currentEulerVault) != address(newEulerVault)
+                && currentEulerVault.balanceOf(address(this)) > 0
+        ) {
+            revert LV_EulerVaultHasFunds();
+        }
+        if (address(newEulerVault) != address(0) && newEulerVault.asset() != address(asset())) {
+            revert LV_InvalidEulerAsset();
+        }
         eulerVault = newEulerVault;
+        _assertReserveCoverage();
     }
 
     /// @notice Supply idle USDC into the Euler vault.
@@ -55,8 +74,14 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (address(eulerVault) == address(0)) {
             revert LV_EulerVaultNotSet();
         }
+        uint256 balance = IERC20(asset()).balanceOf(address(this));
+        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
+        if (balance <= totalReserved || assets > balance - totalReserved) {
+            revert LV_ReservedLiquidityLocked();
+        }
         IERC20(asset()).safeIncreaseAllowance(address(eulerVault), assets);
         eulerVault.deposit(assets, address(this));
+        _assertReserveCoverage();
     }
 
     /// @notice Withdraw USDC from the Euler vault back to the pool.
@@ -65,6 +90,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
             revert LV_EulerVaultNotSet();
         }
         eulerVault.withdraw(assets, address(this), address(this));
+        _assertReserveCoverage();
     }
 
     /// @notice Borrow USDC for active loans.
@@ -76,9 +102,43 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (amount > available) {
             revert LV_InsufficientLiquidity();
         }
+        _pullFromEulerForOutflow(amount);
+        activeLoans += amount;
+        IERC20(asset()).safeTransfer(msg.sender, amount);
+        _assertReserveCoverage();
+    }
+
+    function reservePrincipal(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
+        if (loanId == 0 || amount == 0) revert LV_InvalidAmount();
+        if (reservedPrincipalByLoan[loanId] != 0) revert LV_ReserveExists();
+        if (amount > availableLiquidity()) revert LV_InsufficientLiquidity();
+        _pullFromEulerIfNeeded(amount);
+        reservedPrincipalByLoan[loanId] = amount;
+        reservedPrincipal += amount;
+        emit PrincipalReserved(loanId, amount);
+        _assertReserveCoverage();
+    }
+
+    function releasePrincipal(uint256 loanId) external onlyRole(VAULT_ROLE) nonReentrant {
+        uint256 amt = reservedPrincipalByLoan[loanId];
+        if (amt == 0) revert LV_ReserveMissing();
+        delete reservedPrincipalByLoan[loanId];
+        reservedPrincipal -= amt;
+        _supplyToEulerIfSet(amt);
+        emit PrincipalReleased(loanId, amt);
+        _assertReserveCoverage();
+    }
+
+    function borrowReserved(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
+        if (amount == 0) revert LV_InvalidAmount();
+        uint256 reserved = reservedPrincipalByLoan[loanId];
+        if (reserved < amount) revert LV_ReserveExceeds();
+        reservedPrincipalByLoan[loanId] = reserved - amount;
+        reservedPrincipal -= amount;
         _pullFromEulerIfNeeded(amount);
         activeLoans += amount;
         IERC20(asset()).safeTransfer(msg.sender, amount);
+        _assertReserveCoverage();
     }
 
     /// @notice Repay borrowed USDC back to the pool.
@@ -91,6 +151,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         }
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
         activeLoans -= amount;
+        _assertReserveCoverage();
     }
 
     /// @notice Record a loan loss without transferring assets (lenders absorb the shortfall).
@@ -103,6 +164,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         }
         activeLoans -= amount;
         emit LossRecorded(amount);
+        _assertReserveCoverage();
     }
 
     /// @notice Reserve liquidity for a loan-level negative option premium budget.
@@ -116,9 +178,11 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (amount > availableLiquidity()) {
             revert LV_InsufficientLiquidity();
         }
+        _pullFromEulerIfNeeded(amount);
         reservedByLoan[loanId] = amount;
         reservedLiquidity += amount;
         emit LiquidityReserved(loanId, amount);
+        _assertReserveCoverage();
     }
 
     /// @notice Consume reserved liquidity and transfer it to the caller.
@@ -138,6 +202,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         _pullFromEulerIfNeeded(amount);
         IERC20(asset()).safeTransfer(msg.sender, amount);
         emit LiquidityConsumed(loanId, amount);
+        _assertReserveCoverage();
     }
 
     /// @notice Release any unused reserve for a loan.
@@ -148,16 +213,19 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         }
         delete reservedByLoan[loanId];
         reservedLiquidity -= reserved;
+        _supplyToEulerIfSet(reserved);
         emit LiquidityReleased(loanId, reserved);
+        _assertReserveCoverage();
     }
 
     /// @notice Return assets immediately available for withdrawal or borrowing.
     function availableLiquidity() public view returns (uint256) {
         uint256 gross = IERC20(asset()).balanceOf(address(this)) + _eulerAssets();
-        if (gross <= reservedLiquidity) {
+        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
+        if (gross <= totalReserved) {
             return 0;
         }
-        return gross - reservedLiquidity;
+        return gross - totalReserved;
     }
 
     /// @notice Return total assets including outstanding loans and Euler balance.
@@ -187,17 +255,23 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     {
         _pullFromEulerIfNeeded(assets);
         super._withdraw(caller, receiver, owner, assets, shares);
+        _assertReserveCoverage();
     }
 
     function _pullFromEulerIfNeeded(uint256 assets) internal {
+        _pullFromEulerForOutflow(assets);
+    }
+
+    function _pullFromEulerForOutflow(uint256 outflowAssets) internal {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
-        if (assets <= balance) {
+        uint256 required = outflowAssets + reservedLiquidity + reservedPrincipal;
+        if (required <= balance) {
             return;
         }
         if (address(eulerVault) == address(0)) {
             revert LV_InsufficientLiquidity();
         }
-        uint256 shortfall = assets - balance;
+        uint256 shortfall = required - balance;
         eulerVault.withdraw(shortfall, address(this), address(this));
     }
 
@@ -210,5 +284,25 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
             return 0;
         }
         return eulerVault.previewRedeem(shares);
+    }
+
+    function _supplyToEulerIfSet(uint256 assets) internal {
+        if (assets == 0 || address(eulerVault) == address(0)) {
+            return;
+        }
+        uint256 maxDeposit = eulerVault.maxDeposit(address(this));
+        if (maxDeposit == 0) {
+            return;
+        }
+        uint256 depositAssets = assets < maxDeposit ? assets : maxDeposit;
+        IERC20(asset()).safeIncreaseAllowance(address(eulerVault), depositAssets);
+        try eulerVault.deposit(depositAssets, address(this)) {} catch {}
+    }
+
+    function _assertReserveCoverage() internal view {
+        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
+        if (IERC20(asset()).balanceOf(address(this)) < totalReserved) {
+            revert LV_ReserveInvariantBroken();
+        }
     }
 }
