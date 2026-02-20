@@ -141,34 +141,6 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         _assertReserveCoverage();
     }
 
-    function reservePrincipal(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
-        if (loanId == 0 || amount == 0) revert LV_InvalidAmount();
-        if (reservedPrincipalByLoan[loanId] != 0) revert LV_ReserveExists();
-        if (amount > availableLiquidity()) revert LV_InsufficientLiquidity();
-        reservedPrincipalByLoan[loanId] = amount;
-        reservedPrincipal += amount;
-        emit PrincipalReserved(loanId, amount);
-    }
-
-    function releasePrincipal(uint256 loanId) external onlyRole(VAULT_ROLE) nonReentrant {
-        uint256 amt = reservedPrincipalByLoan[loanId];
-        if (amt == 0) revert LV_ReserveMissing();
-        delete reservedPrincipalByLoan[loanId];
-        reservedPrincipal -= amt;
-        emit PrincipalReleased(loanId, amt);
-    }
-
-    function borrowReserved(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
-        if (amount == 0) revert LV_InvalidAmount();
-        uint256 reserved = reservedPrincipalByLoan[loanId];
-        if (reserved < amount) revert LV_ReserveExceeds();
-        reservedPrincipalByLoan[loanId] = reserved - amount;
-        reservedPrincipal -= amount;
-        _pullFromEulerIfNeeded(amount);
-        activeLoans += amount;
-        IERC20(asset()).safeTransfer(msg.sender, amount);
-    }
-
     /// @notice Repay borrowed USDC back to the pool.
     function repay(uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
         if (amount == 0) {
