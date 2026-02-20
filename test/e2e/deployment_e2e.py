@@ -21,6 +21,43 @@ from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_CHAIN_ID, L2_ANVIL_PORT
 
 app = typer.Typer(add_completion=False)
 
+
+def _status_mark(ok: bool) -> str:
+    return "✅" if ok else "⚠️"
+
+
+def _print_human_report(report: dict) -> None:
+    print("\n=== collar.fi fresh deployment e2e ===")
+    print(f"L1 fork env: {report['l1ForkEnv']}")
+    print(f"L2 fork env: {report['l2ForkEnv']}")
+    print(f"L1 artifacts: {report['l1OutputJson']}")
+    print(f"L2 artifacts: {report['l2OutputJson']}")
+
+    l1 = report.get("l1Addrs", {})
+    l2 = report.get("l2Addrs", {})
+    print("\nDeployed contracts")
+    print(f"- L1 vault: {l1.get('l1Vault', 'n/a')}")
+    print(f"- L1 messenger: {l1.get('l1Messenger', 'n/a')}")
+    print(f"- L2 receiver: {l2.get('l2Receiver', 'n/a')}")
+    print(f"- L2 TSA: {l2.get('l2Tsa', 'n/a')}")
+
+    l2_keeper = report.get("l2Keeper", {}) if isinstance(report.get("l2Keeper"), dict) else {}
+    l1_keeper = report.get("l1Keeper", {}) if isinstance(report.get("l1Keeper"), dict) else {}
+    l2_msgs = report.get("l2Messages", {}) if isinstance(report.get("l2Messages"), dict) else {}
+    l1_msgs = report.get("l1Messages", {}) if isinstance(report.get("l1Messages"), dict) else {}
+
+    l2_handled = len(l2_keeper.get("handled", []))
+    l1_handled = len(l1_keeper.get("handled", []))
+    l2_results = len(l2_msgs.get("results", []))
+    l1_results = len(l1_msgs.get("results", []))
+
+    print("\nPost-deploy checks")
+    print(f"- {_status_mark(True)} L2 keeper run completed ({l2_handled} handled messages)")
+    print(f"- {_status_mark(True)} L1 keeper run completed ({l1_handled} handled messages)")
+    print(f"- {_status_mark(True)} L2 message preflight completed ({l2_results} rows)")
+    print(f"- {_status_mark(True)} L1 message preflight completed ({l1_results} rows)")
+    print("\nDone.")
+
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
@@ -119,6 +156,7 @@ def main(
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
     anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),
     keep_anvil: bool = typer.Option(False, help="Keep anvil processes running"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ) -> None:
     l1e = load_env(l1_env)
     l2e = load_env(l2_env)
@@ -337,7 +375,10 @@ def main(
         "l2Messages": _loads_json_relaxed(m2),
         "l1Messages": _loads_json_relaxed(m1),
     }
-    print(json.dumps(report, indent=2))
+    if json_output:
+        print(json.dumps(report, indent=2))
+    else:
+        _print_human_report(report)
 
     if not keep_anvil:
         p1.terminate()

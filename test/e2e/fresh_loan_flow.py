@@ -26,6 +26,42 @@ SOCKET_MOCK_CACHE: dict[str, str] = {}
 app = typer.Typer(add_completion=False)
 
 
+def _describe_step(step_name: str) -> str:
+    descriptions = {
+        "grant_l2_keeper": "Grant keeper role on L2 receiver",
+        "create_deposit_with_permit": "Create L1 deposit intent via Permit2",
+        "relay_l1_to_l2_exact": "Relay exact LayerZero packet L1 → L2",
+        "simulate_socket_finalized": "Mark socket transfer as finalized on fork",
+        "fund_l2_receiver_for_deposit": "Ensure L2 receiver has bridged asset balance",
+        "grant_tsa_signer": "Grant receiver signer role on TSA",
+        "l2_keeper_handle_deposit": "Run L2 keeper once to process deposit and send ACK",
+        "relay_l2_to_l1_exact": "Relay exact LayerZero packet L2 → L1",
+        "verify_expected_state": "Verify expected post-run protocol state",
+    }
+    return descriptions.get(step_name, step_name)
+
+
+def _print_human_summary(out: dict) -> None:
+    print("\n=== collar.fi fresh loan flow e2e ===")
+    for s in out.get("steps", []):
+        title = _describe_step(s.get("step", ""))
+        if s.get("ok"):
+            print(f"✅ {title}")
+        else:
+            print(f"❌ {title}")
+            if s.get("error"):
+                print(f"   ↳ {s['error']}")
+
+    verify = next((s.get("result") for s in out.get("steps", []) if s.get("step") == "verify_expected_state" and s.get("ok")), None)
+    if isinstance(verify, dict):
+        print("\nVerification snapshot")
+        print(f"- Loan ID: {verify.get('loanId')}")
+        print(f"- L1→L2 guid handled on L2: {verify.get('l2Handled')}")
+        print(f"- L2→L1 ACK action: {verify.get('ackAction')} (loanId={verify.get('ackLoanId')})")
+
+    print("\nResult: SUCCESS" if out.get("ok") else "\nResult: FAILED")
+
+
 def run(cmd: list[str], env: dict | None = None) -> str:
     p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if p.returncode != 0:
@@ -232,6 +268,7 @@ def main(
     l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
     l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ):
     l1 = json.loads((ROOT / l1_json).read_text())
     l2 = json.loads((ROOT / l2_json).read_text())
@@ -251,7 +288,10 @@ def main(
         except Exception as e:
             rec["error"] = str(e)
             out["steps"].append(rec)
-            print(json.dumps(out, indent=2))
+            if json_output:
+                print(json.dumps(out, indent=2))
+            else:
+                _print_human_summary(out)
             raise SystemExit(1)
         out["steps"].append(rec)
 
@@ -419,7 +459,10 @@ def main(
     step("verify_expected_state", verify_expected_state)
 
     out["ok"] = True
-    print(json.dumps(out, indent=2))
+    if json_output:
+        print(json.dumps(out, indent=2))
+    else:
+        _print_human_summary(out)
 
 
 if __name__ == "__main__":
