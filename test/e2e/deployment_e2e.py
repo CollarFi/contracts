@@ -137,6 +137,14 @@ def main(
         {
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
+            # Force fresh local components in fork E2E; avoid ambient env contamination
+            # that could point to privileged external contracts.
+            "LOAN_STORE": "0x0000000000000000000000000000000000000000",
+            "TSA_PROXY": "0x0000000000000000000000000000000000000000",
+            "TSA_IMPLEMENTATION": "0x0000000000000000000000000000000000000000",
+            "OPTION_RISK_VERIFIER": "0x0000000000000000000000000000000000000000",
+            "RFQ_VERIFIER": "0x0000000000000000000000000000000000000000",
+            "RFQ_DELEGATE_MODULE": "0x0000000000000000000000000000000000000000",
         },
     )
     run(
