@@ -26,21 +26,22 @@ uv run python ops/deploy_l2.py --env testnet
 uv run python ops/ensure_lz_route.py --env testnet
 uv run python ops/ensure_lz_route.py --env testnet --broadcast
 
-# Detailed route diagnostics
-uv run python ops/preflight/check_lz_uln.py --env testnet --json
+# Unified preflight entrypoint (routes ULN + recipient + asset + optional message checks)
+uv run python ops/preflight.py --env testnet
+uv run python ops/preflight.py --env testnet --include-messages
+uv run python ops/preflight.py --env testnet --json
 
 # Ops helpers
 uv run python ops/management/enable_collateral.py --env testnet
 uv run python ops/management/set_l2_message_asset.py --env testnet
-uv run python ops/preflight/l1_l2_message_asset_preflight.py --env testnet --json
-uv run python ops/preflight/l2_message_preflight.py --env testnet --json
-uv run python ops/management/l1_message_preflight.py --env testnet --logs-rpc-url https://sepolia-rollup.arbitrum.io/rpc --json
 uv run python ops/management/l2_keeper_handle_messages.py --env testnet --once
 uv run python ops/management/l1_keeper_handle_messages.py --env testnet --once --logs-rpc-url https://sepolia-rollup.arbitrum.io/rpc
 
-# E2E on forked deployments from l1.json/l2.json (test scenario script)
-uv run python test/e2e/deployment_e2e.py --l1-json deployments/421614/l1.json --l2-json deployments/901/l2.json
-uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-clean.json --l2-json deployments/901/l2-clean.json --l1-rpc http://127.0.0.1:8868 --l2-rpc http://127.0.0.1:8869
+# Fresh-fork E2E: deploy brand-new contracts on anvil forks and write l1-e2e/l2-e2e outputs
+uv run python test/e2e/deployment_e2e.py --l1-port 8758 --l2-port 8759 --keep-anvil
+
+# Then run fresh-loan flow against those fresh outputs + fork RPCs
+uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-e2e.json --l2-json deployments/901/l2-e2e.json --l1-rpc http://127.0.0.1:8758 --l2-rpc http://127.0.0.1:8759
 ```
 
 ## Defaults and safety
