@@ -117,8 +117,8 @@ uv run python ops/deploy_l1.py --env testnet --broadcast
 # Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
-# Wire L1<->L2 LayerZero peers after both sides are deployed
-uv run python ops/preflight/wire_lz_peers.py --env testnet --broadcast
+# Wire/check L1<->L2 route via the unified route command (includes peer wiring)
+uv run python ops/ensure_lz_route.py --env testnet --broadcast
 
 # Unified preflight entrypoint: recipient wiring + ULN/route + asset mapping (+ optional message scan)
 uv run python ops/preflight.py --env testnet
