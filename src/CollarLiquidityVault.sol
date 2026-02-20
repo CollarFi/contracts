@@ -15,7 +15,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
     bytes32 public constant PARAMETER_ROLE = keccak256("PARAMETER_ROLE");
 
-    IERC4626 public eulerVault;
+    IERC4626 public yieldVault;
     uint256 public activeLoans;
     uint256 public reservedLiquidity;
     uint256 public reservedPrincipal;
@@ -25,14 +25,14 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     error LV_InsufficientLiquidity();
     error LV_InvalidAmount();
     error LV_RepayExceedsDebt();
-    error LV_EulerVaultNotSet();
+    error LV_YieldVaultNotSet();
     error LV_ReserveExists();
     error LV_ReserveMissing();
     error LV_ReserveExceeds();
     error LV_ReservedLiquidityLocked();
     error LV_ReserveInvariantBroken();
-    error LV_InvalidEulerAsset();
-    error LV_EulerVaultHasFunds();
+    error LV_InvalidYieldVaultAsset();
+    error LV_YieldVaultHasFunds();
 
     event LossRecorded(uint256 amount);
     event LiquidityReserved(uint256 indexed loanId, uint256 amount);
@@ -53,43 +53,43 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         _grantRole(PARAMETER_ROLE, admin);
     }
 
-    /// @notice Update the Euler vault used for idle liquidity.
-    function setEulerVault(IERC4626 newEulerVault) external onlyRole(PARAMETER_ROLE) {
-        IERC4626 currentEulerVault = eulerVault;
+    /// @notice Update the ERC4626 yield vault used for idle liquidity.
+    function setYieldVault(IERC4626 newYieldVault) external onlyRole(PARAMETER_ROLE) {
+        IERC4626 currentYieldVault = yieldVault;
         if (
-            address(currentEulerVault) != address(0) && address(currentEulerVault) != address(newEulerVault)
-                && currentEulerVault.balanceOf(address(this)) > 0
+            address(currentYieldVault) != address(0) && address(currentYieldVault) != address(newYieldVault)
+                && currentYieldVault.balanceOf(address(this)) > 0
         ) {
-            revert LV_EulerVaultHasFunds();
+            revert LV_YieldVaultHasFunds();
         }
-        if (address(newEulerVault) != address(0) && newEulerVault.asset() != address(asset())) {
-            revert LV_InvalidEulerAsset();
+        if (address(newYieldVault) != address(0) && newYieldVault.asset() != address(asset())) {
+            revert LV_InvalidYieldVaultAsset();
         }
-        eulerVault = newEulerVault;
+        yieldVault = newYieldVault;
         _assertReserveCoverage();
     }
 
-    /// @notice Supply idle USDC into the Euler vault.
-    function supplyToEuler(uint256 assets) external onlyRole(PARAMETER_ROLE) nonReentrant {
-        if (address(eulerVault) == address(0)) {
-            revert LV_EulerVaultNotSet();
+    /// @notice Supply idle USDC into the configured ERC4626 yield vault.
+    function supplyToYieldVault(uint256 assets) external onlyRole(PARAMETER_ROLE) nonReentrant {
+        if (address(yieldVault) == address(0)) {
+            revert LV_YieldVaultNotSet();
         }
         uint256 balance = IERC20(asset()).balanceOf(address(this));
         uint256 totalReserved = reservedLiquidity + reservedPrincipal;
         if (balance <= totalReserved || assets > balance - totalReserved) {
             revert LV_ReservedLiquidityLocked();
         }
-        IERC20(asset()).safeIncreaseAllowance(address(eulerVault), assets);
-        eulerVault.deposit(assets, address(this));
+        IERC20(asset()).safeIncreaseAllowance(address(yieldVault), assets);
+        yieldVault.deposit(assets, address(this));
         _assertReserveCoverage();
     }
 
-    /// @notice Withdraw USDC from the Euler vault back to the pool.
-    function withdrawFromEuler(uint256 assets) external onlyRole(PARAMETER_ROLE) nonReentrant {
-        if (address(eulerVault) == address(0)) {
-            revert LV_EulerVaultNotSet();
+    /// @notice Withdraw USDC from the configured ERC4626 yield vault back to the pool.
+    function withdrawFromYieldVault(uint256 assets) external onlyRole(PARAMETER_ROLE) nonReentrant {
+        if (address(yieldVault) == address(0)) {
+            revert LV_YieldVaultNotSet();
         }
-        eulerVault.withdraw(assets, address(this), address(this));
+        yieldVault.withdraw(assets, address(this), address(this));
         _assertReserveCoverage();
     }
 
@@ -102,7 +102,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (amount > available) {
             revert LV_InsufficientLiquidity();
         }
-        _pullFromEulerForOutflow(amount);
+        _pullFromYieldVaultForOutflow(amount);
         activeLoans += amount;
         IERC20(asset()).safeTransfer(msg.sender, amount);
         _assertReserveCoverage();
@@ -112,7 +112,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (loanId == 0 || amount == 0) revert LV_InvalidAmount();
         if (reservedPrincipalByLoan[loanId] != 0) revert LV_ReserveExists();
         if (amount > availableLiquidity()) revert LV_InsufficientLiquidity();
-        _pullFromEulerIfNeeded(amount);
+        _pullFromYieldVaultIfNeeded(amount);
         reservedPrincipalByLoan[loanId] = amount;
         reservedPrincipal += amount;
         emit PrincipalReserved(loanId, amount);
@@ -124,7 +124,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (amt == 0) revert LV_ReserveMissing();
         delete reservedPrincipalByLoan[loanId];
         reservedPrincipal -= amt;
-        _supplyToEulerIfSet(amt);
+        _supplyToYieldVaultIfSet(amt);
         emit PrincipalReleased(loanId, amt);
         _assertReserveCoverage();
     }
@@ -135,7 +135,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (reserved < amount) revert LV_ReserveExceeds();
         reservedPrincipalByLoan[loanId] = reserved - amount;
         reservedPrincipal -= amount;
-        _pullFromEulerIfNeeded(amount);
+        _pullFromYieldVaultIfNeeded(amount);
         activeLoans += amount;
         IERC20(asset()).safeTransfer(msg.sender, amount);
         _assertReserveCoverage();
@@ -178,7 +178,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         if (amount > availableLiquidity()) {
             revert LV_InsufficientLiquidity();
         }
-        _pullFromEulerIfNeeded(amount);
+        _pullFromYieldVaultIfNeeded(amount);
         reservedByLoan[loanId] = amount;
         reservedLiquidity += amount;
         emit LiquidityReserved(loanId, amount);
@@ -199,7 +199,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         }
         reservedByLoan[loanId] = reserved - amount;
         reservedLiquidity -= amount;
-        _pullFromEulerIfNeeded(amount);
+        _pullFromYieldVaultIfNeeded(amount);
         IERC20(asset()).safeTransfer(msg.sender, amount);
         emit LiquidityConsumed(loanId, amount);
         _assertReserveCoverage();
@@ -213,14 +213,14 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         }
         delete reservedByLoan[loanId];
         reservedLiquidity -= reserved;
-        _supplyToEulerIfSet(reserved);
+        _supplyToYieldVaultIfSet(reserved);
         emit LiquidityReleased(loanId, reserved);
         _assertReserveCoverage();
     }
 
     /// @notice Return assets immediately available for withdrawal or borrowing.
     function availableLiquidity() public view returns (uint256) {
-        uint256 gross = IERC20(asset()).balanceOf(address(this)) + _eulerAssets();
+        uint256 gross = IERC20(asset()).balanceOf(address(this)) + _yieldVaultAssets();
         uint256 totalReserved = reservedLiquidity + reservedPrincipal;
         if (gross <= totalReserved) {
             return 0;
@@ -228,10 +228,10 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         return gross - totalReserved;
     }
 
-    /// @notice Return total assets including outstanding loans and Euler balance.
+    /// @notice Return total assets including outstanding loans and yield vault balance.
     function totalAssets() public view override returns (uint256) {
         // In-flight amounts are excluded from NAV/share pricing until funds land on L1.
-        return IERC20(asset()).balanceOf(address(this)) + _eulerAssets() + activeLoans;
+        return IERC20(asset()).balanceOf(address(this)) + _yieldVaultAssets() + activeLoans;
     }
 
     /// @notice Return the maximum assets an owner can withdraw based on available liquidity.
@@ -253,50 +253,50 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         override
         nonReentrant
     {
-        _pullFromEulerIfNeeded(assets);
+        _pullFromYieldVaultIfNeeded(assets);
         super._withdraw(caller, receiver, owner, assets, shares);
         _assertReserveCoverage();
     }
 
-    function _pullFromEulerIfNeeded(uint256 assets) internal {
-        _pullFromEulerForOutflow(assets);
+    function _pullFromYieldVaultIfNeeded(uint256 assets) internal {
+        _pullFromYieldVaultForOutflow(assets);
     }
 
-    function _pullFromEulerForOutflow(uint256 outflowAssets) internal {
+    function _pullFromYieldVaultForOutflow(uint256 outflowAssets) internal {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
         uint256 required = outflowAssets + reservedLiquidity + reservedPrincipal;
         if (required <= balance) {
             return;
         }
-        if (address(eulerVault) == address(0)) {
+        if (address(yieldVault) == address(0)) {
             revert LV_InsufficientLiquidity();
         }
         uint256 shortfall = required - balance;
-        eulerVault.withdraw(shortfall, address(this), address(this));
+        yieldVault.withdraw(shortfall, address(this), address(this));
     }
 
-    function _eulerAssets() internal view returns (uint256) {
-        if (address(eulerVault) == address(0)) {
+    function _yieldVaultAssets() internal view returns (uint256) {
+        if (address(yieldVault) == address(0)) {
             return 0;
         }
-        uint256 shares = eulerVault.balanceOf(address(this));
+        uint256 shares = yieldVault.balanceOf(address(this));
         if (shares == 0) {
             return 0;
         }
-        return eulerVault.previewRedeem(shares);
+        return yieldVault.previewRedeem(shares);
     }
 
-    function _supplyToEulerIfSet(uint256 assets) internal {
-        if (assets == 0 || address(eulerVault) == address(0)) {
+    function _supplyToYieldVaultIfSet(uint256 assets) internal {
+        if (assets == 0 || address(yieldVault) == address(0)) {
             return;
         }
-        uint256 maxDeposit = eulerVault.maxDeposit(address(this));
+        uint256 maxDeposit = yieldVault.maxDeposit(address(this));
         if (maxDeposit == 0) {
             return;
         }
         uint256 depositAssets = assets < maxDeposit ? assets : maxDeposit;
-        IERC20(asset()).safeIncreaseAllowance(address(eulerVault), depositAssets);
-        try eulerVault.deposit(depositAssets, address(this)) {} catch {}
+        IERC20(asset()).safeIncreaseAllowance(address(yieldVault), depositAssets);
+        try yieldVault.deposit(depositAssets, address(this)) {} catch {}
     }
 
     function _assertReserveCoverage() internal view {

@@ -10,7 +10,7 @@ CollarFi is a DeFi lending protocol that issues zero-cost, fixed-maturity USDC l
 2. Neutral corridor: both options expire OTM; the borrower's collateral is still worth at least the principal. The loan converts to a variable-rate loan backed by the same collateral in a money-market vault.
 3. Call ITM (profit): the collateral appreciates above the call strike. The protocol sells the collateral, pays the call payoff to the option buyer (the market maker) and repays the principal; the borrower receives the upside beyond the call strike.
 
-CollarFi uses Derive's vault architecture and fast bridge to manage the collateral and options on Derive L2 while keeping liquidity and accounting on Ethereum L1 (see Derive official docs: https://docs.derive.xyz/). Liquidity providers deposit USDC into a lending vault; idle funds are deployed into Euler V2 (EVK) for variable yield. Borrowers receive USDC loans; market makers quote call strikes; and an off-chain executor places orders on Derive.
+CollarFi uses Derive's vault architecture and fast bridge to manage the collateral and options on Derive L2 while keeping liquidity and accounting on Ethereum L1 (see Derive official docs: https://docs.derive.xyz/). Liquidity providers deposit USDC into a lending vault; idle funds are deployed into an external ERC-4626 yield vault for variable yield. Borrowers receive USDC loans; market makers quote call strikes; and an off-chain executor places orders on Derive.
 
 This specification documents the smart contracts, off-chain components and flows necessary to implement CollarFi.
 
@@ -19,11 +19,11 @@ This specification documents the smart contracts, off-chain components and flows
 | Entity/Component | Description |
 | --- | --- |
 | Borrower | Permissionless user who provides crypto collateral; receives a zero-cost loan; may convert into a variable-rate loan after neutral expiry. |
-| Lender | Deposits USDC into an ERC-4626 vault on L1; earns Euler yield and premiums from collars. |
+| Lender | Deposits USDC into an ERC-4626 vault on L1; earns external yield-vault returns and premiums from collars. |
 | Vault Contract (L1) | Smart contract controlling collateral, loans and settlement on L1. It does not sign Derive actions. |
 | TSA Contract (L2) | `CollarTSA` on Derive L2; inherits `BaseOnChainSigningTSA`, owns the Derive subaccount, and signs actions via ERC-1271. |
 | Vault Executor (off-chain) | Authorized signer that prepares and signs orders off-chain, posts them to Derive's API, monitors options positions and triggers settlement. |
-| Liquidity Vault (USDC Pool) | ERC-4626 vault storing lender USDC. Integrates with Euler V2 for yield. Tracks available liquidity and active loans. |
+| Liquidity Vault (USDC Pool) | ERC-4626 vault storing lender USDC. Integrates with an external ERC-4626 yield vault for idle-funds yield. Tracks available liquidity and active loans. |
 | Euler Money Market | Lending market where USDC can be lent and borrowed at variable rates. |
 | Derive Subaccount | A single subaccount on Derive L2 owned by the L2 TSA contract via ERC-1271. It holds deposits, open collar positions, and settlement flows. |
 | Derive Deposit Module | Module that deposits ERC-20 tokens into a subaccount. Called by the executor using the L2 TSA signature via Derive's API. |
@@ -367,7 +367,7 @@ Runs a secure service that:
 
 ### 6.3 Liquidity vault (USDC pool)
 
-Implements ERC-4626 for lenders. Idle USDC is deposited into Euler V2; variable-rate earnings accrue to lenders.
+Implements ERC-4626 for lenders. Idle USDC is deposited into a configurable external ERC-4626 yield vault; yield accrues to lenders.
 
 Tracks two balances: `availableLiquidity` and `activeLoans`. Lenders can withdraw up to available liquidity; settlement proceeds are reflected once bridged to L1.
 
@@ -422,7 +422,7 @@ Monitors for situations such as the bridge being down or fast withdrawal limits 
 ## 8. Deployment and Configuration
 
 - Deploy the L2 TSA contract inheriting from `BaseOnChainSigningTSA`. Configure authorized signers/submitters, derivative asset addresses, and the vault subaccount used for deposits, trades, and settlement.
-- Deploy the liquidity vault (ERC-4626), integrate with Euler V2 and configure deposit/withdraw functions for the vault contract.
+- Deploy the liquidity vault (ERC-4626), integrate with an external ERC-4626 yield vault and configure deposit/withdraw functions for the vault contract.
 - Set up the fast bridge by referencing the Derive bridge contract addresses for each asset and granting necessary approvals.
 - Deploy the strategy contract if risk checks or fee schedules are custom. Otherwise, reuse Derive's existing modules.
 - Initialize the vault executor with credentials for Derive's API and keys for signing actions.
