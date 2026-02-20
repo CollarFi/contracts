@@ -105,7 +105,8 @@ def ensure_token_balance(rpc: str, token: str, to: str, amount: int) -> str:
         t = e.get("topics", [])
         if len(t) < 3:
             continue
-        holder = "0x" + t[1][-40:]
+        # topic[2] is Transfer.to (likely current holder), topic[1] is sender.
+        holder = "0x" + t[2][-40:]
         if holder.lower() in seen:
             continue
         seen.add(holder.lower())
@@ -120,6 +121,19 @@ def ensure_token_balance(rpc: str, token: str, to: str, amount: int) -> str:
                 return f"funded-via-holder:{holder}"
         except Exception:
             continue
+
+    # Last-resort for local fork reproducibility: inject ERC20 balance mapping directly
+    # (works for current wrapped token layout where balances are at slot 3).
+    try:
+        idx = run(["cast", "index", "address", to, "3"]).strip()
+        amount_hex = hex(amount)[2:].rjust(64, "0")
+        run(["cast", "rpc", "anvil_setStorageAt", token, idx, f"0x{amount_hex}", "--rpc-url", rpc])
+        verify = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+        if verify >= amount:
+            return "funded-via-storage-slot3"
+    except Exception:
+        pass
+
     raise RuntimeError("unable to fund borrower with collateral token on fork")
 
 
