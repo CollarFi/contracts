@@ -216,6 +216,11 @@ def _parse_keeper_output(raw: str) -> dict:
         return {"raw": raw, "txHashes": txs}
 
 
+def _assert_true(name: str, cond: bool) -> None:
+    if not cond:
+        raise RuntimeError(f"assertion failed: {name}")
+
+
 @app.command()
 def main(
     l1_json: Path = typer.Option(Path("deployments/421614/l1-clean.json")),
@@ -351,6 +356,62 @@ def main(
         return relay_exact_lz_packet(l2_rpc, l1_rpc, ack_tx)
 
     step("relay_l2_to_l1_exact", relay_l2_ack_to_l1)
+
+    def verify_expected_state():
+        loan_id = int(out["steps"][1]["result"]["loanId"])
+        l1_to_l2_guid = out["steps"][2]["result"]["guid"]
+        l2_to_l1_guid = out["steps"][7]["result"]["guid"]
+
+        handled = cast_call(l2_rpc, receiver, "handledMessages(bytes32)(bool)", l1_to_l2_guid).strip().lower()
+        _assert_true("l2 handledMessages guid", handled == "true")
+
+        messenger = l1a["l1Messenger"]
+        msg_raw = cast_call(
+            l1_rpc,
+            messenger,
+            "receivedMessage(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+            l2_to_l1_guid,
+        )
+        m = re.match(r"\((\d+),\s*(\d+)(?:\s*\[[^\]]+\])?,", msg_raw)
+        if not m:
+            raise RuntimeError(f"failed parsing receivedMessage: {msg_raw}")
+        action, msg_loan = int(m.group(1)), int(m.group(2))
+        _assert_true("ack action is DepositConfirmed(3)", action == 3)
+        _assert_true("ack loanId matches", msg_loan == loan_id)
+
+        tmp = Path(tempfile.mkdtemp(prefix="e2e-l1-")) / ".env.l1.fork"
+        tmp.write_text((ROOT / ".env.l1.testnet").read_text() + f"\nRPC_URL={l1_rpc}\nL1_VAULT={vault}\nL1_MESSENGER={messenger}\n")
+        pre = json.loads(
+            run([
+                "uv",
+                "run",
+                "python",
+                str(ROOT / "ops/management/l1_message_preflight.py"),
+                str(tmp),
+                "--json",
+                "--logs-rpc-url",
+                l1_rpc,
+            ]),
+            strict=False,
+        )
+
+        results = pre.get("results", [])
+        mine = [r for r in results if str(r.get("loanId")) == str(loan_id)]
+        _assert_true("preflight contains loan", len(mine) == 1)
+        _assert_true("preflight has pending deposit", bool(mine[0].get("hasPendingDeposit")))
+        _assert_true("preflight not ready to finalize yet", not bool(mine[0].get("readyToFinalize")))
+
+        return {
+            "loanId": loan_id,
+            "l1ToL2Guid": l1_to_l2_guid,
+            "l2ToL1Guid": l2_to_l1_guid,
+            "l2Handled": True,
+            "ackAction": action,
+            "ackLoanId": msg_loan,
+            "preflight": mine[0],
+        }
+
+    step("verify_expected_state", verify_expected_state)
 
     out["ok"] = True
     print(json.dumps(out, indent=2))
