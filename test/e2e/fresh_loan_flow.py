@@ -12,6 +12,8 @@ import typer
 ROOT = Path(__file__).resolve().parents[2]
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+# Use a dedicated borrower signer so Permit2 treats signer as EOA (not EIP-1271 contract).
+BORROWER_PK = "0x59c6995e998f97a5a0044966f0945382d77ad9e6f3c6f7f8b8d7a0f4f7f9d6f1"
 
 app = typer.Typer(add_completion=False)
 
@@ -27,15 +29,15 @@ def cast_call(rpc: str, to: str, sig: str, *args: str) -> str:
     return run(["cast", "call", to, sig, *args, "--rpc-url", rpc])
 
 
-def cast_send(rpc: str, to: str, sig: str, *args: str, value: str | None = None) -> str:
-    cmd = ["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", ANVIL_PK0]
+def cast_send(rpc: str, to: str, sig: str, *args: str, value: str | None = None, private_key: str = ANVIL_PK0) -> str:
+    cmd = ["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key]
     if value:
         cmd += ["--value", value]
     return run(cmd)
 
 
-def sign_hash_no_prefix(digest_hex: str) -> str:
-    return run(["cast", "wallet", "sign", "--no-hash", "--private-key", ANVIL_PK0, digest_hex])
+def sign_hash_no_prefix(digest_hex: str, private_key: str) -> str:
+    return run(["cast", "wallet", "sign", "--no-hash", "--private-key", private_key, digest_hex])
 
 
 def _keccak_text(text: str) -> str:
@@ -50,7 +52,7 @@ def _abi_encode(sig: str, *args: str) -> str:
     return run(["cast", "abi-encode", sig, *args]).splitlines()[0].strip()
 
 
-def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, expiration: int, nonce: int, spender: str, sig_deadline: int) -> str:
+def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, expiration: int, nonce: int, spender: str, sig_deadline: int, private_key: str) -> str:
     domain_typehash = _keccak_text("EIP712Domain(string name,uint256 chainId,address verifyingContract)")
     name_hash = _keccak_text("Permit2")
     domain_sep = _keccak_hex(_abi_encode("f(bytes32,bytes32,uint256,address)", domain_typehash, name_hash, str(chain_id), permit2))
@@ -72,7 +74,11 @@ def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, ex
 
     prefix = "0x1901"
     digest = _keccak_hex(prefix + domain_sep[2:] + struct_hash[2:])
-    return sign_hash_no_prefix(digest)
+    return sign_hash_no_prefix(digest, private_key)
+
+
+def wallet_address(private_key: str) -> str:
+    return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
 
 
 def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, amount: int) -> str:
@@ -121,8 +127,13 @@ def main(
     step("grant_l2_keeper", lambda: cast_send(l2_rpc, receiver, "grantRole(bytes32,address)", run(["cast", "keccak", "KEEPER_ROLE"]), ANVIL_ADDR0))
 
     def do_deposit():
-        # borrower balance + weth wrap + permit2 approval
-        run(["cast", "rpc", "anvil_setBalance", ANVIL_ADDR0, "0x3635C9ADC5DEA00000", "--rpc-url", l1_rpc])
+        borrower = wallet_address(BORROWER_PK)
+        # borrower balance + faucet funding + permit2 approval
+        run(["cast", "rpc", "anvil_setBalance", borrower, "0x3635C9ADC5DEA00000", "--rpc-url", l1_rpc])
+        code = run(["cast", "code", borrower, "--rpc-url", l1_rpc]).strip().lower()
+        if code != "0x":
+            raise RuntimeError(f"borrower address has code on fork (not EOA for Permit2): {borrower}")
+
         l1_env = {}
         for line in (ROOT / ".env.l1.testnet").read_text().splitlines():
             if "=" in line and not line.strip().startswith("#"):
@@ -133,16 +144,16 @@ def main(
         permit2 = cast_call(l1_rpc, vault, "permit2()(address)").splitlines()[0].strip()
         next_loan = int(cast_call(l1_rpc, vault, "nextLoanId()(uint256)").split()[0])
 
-        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet, weth, ANVIL_ADDR0, 10**18)
-        cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1))
+        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet, weth, borrower, 10**18)
+        cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1), private_key=BORROWER_PK)
 
         chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
         now = int(time.time())
         expiration = now + 3600
         sig_deadline = now + 3600
-        allow_raw = cast_call(l1_rpc, permit2, "allowance(address,address,address)(uint160,uint48,uint48)", ANVIL_ADDR0, weth, vault)
+        allow_raw = cast_call(l1_rpc, permit2, "allowance(address,address,address)(uint160,uint48,uint48)", borrower, weth, vault)
         nonce = int(allow_raw.splitlines()[2].split()[0])
-        sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline)
+        sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline, BORROWER_PK)
 
         maturity = now + 7 * 24 * 3600
         params = f"({weth},1000000000000000000,{maturity},1500000000000000000000,1500000000)"
@@ -155,9 +166,10 @@ def main(
             params,
             permit_arg,
             sig,
-            value="20000000000000000",
+            value="50000000000000000",
+            private_key=BORROWER_PK,
         )
-        return {"tx": tx, "loanId": next_loan, "fundMode": fund_mode}
+        return {"tx": tx, "loanId": next_loan, "fundMode": fund_mode, "borrower": borrower}
 
     step("create_deposit_with_permit", do_deposit)
 

@@ -126,6 +126,20 @@ def main(
 
     l1_out = ROOT_DIR / "deployments" / str(l1_chain_id) / "l1-e2e.json"
     l2_out = ROOT_DIR / "deployments" / str(l2_chain_id) / "l2-e2e.json"
+
+    l1_eid = ""
+    if l1e.get("LZ_ENDPOINT"):
+        try:
+            l1_eid = run(["cast", "call", l1e["LZ_ENDPOINT"], "eid()(uint32)", "--rpc-url", l1_rpc]).split()[0]
+        except Exception:
+            l1_eid = ""
+
+    l2_eid = ""
+    if l2e.get("LZ_ENDPOINT"):
+        try:
+            l2_eid = run(["cast", "call", l2e["LZ_ENDPOINT"], "eid()(uint32)", "--rpc-url", l2_rpc]).split()[0]
+        except Exception:
+            l2_eid = ""
     l1_out.parent.mkdir(parents=True, exist_ok=True)
     l2_out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +159,7 @@ def main(
             "OPTION_RISK_VERIFIER": "0x0000000000000000000000000000000000000000",
             "RFQ_VERIFIER": "0x0000000000000000000000000000000000000000",
             "RFQ_DELEGATE_MODULE": "0x0000000000000000000000000000000000000000",
+            "L1_EID": l1_eid,
         },
     )
     run(
@@ -171,6 +186,7 @@ def main(
         {
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l1_out.relative_to(ROOT_DIR)),
+            "L2_EID": l2_eid,
         },
     )
     run(
