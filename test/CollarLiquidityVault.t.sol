@@ -10,7 +10,7 @@ import {MockERC4626} from "./mocks/MockERC4626.sol";
 contract CollarLiquidityVaultTest is Test {
     MockERC20 internal usdc;
     CollarLiquidityVault internal vault;
-    MockERC4626 internal eulerVault;
+    MockERC4626 internal yieldVault;
 
     address internal lender = address(0x1111);
     address internal borrower = address(0x2222);
@@ -27,8 +27,8 @@ contract CollarLiquidityVaultTest is Test {
         vault.deposit(1_000_000e6, lender);
         vm.stopPrank();
 
-        eulerVault = new MockERC4626(usdc);
-        vault.setEulerVault(eulerVault);
+        yieldVault = new MockERC4626(usdc);
+        vault.setYieldVault(yieldVault);
     }
 
     function testBorrowAndRepay() public {
@@ -43,18 +43,18 @@ contract CollarLiquidityVaultTest is Test {
         _assertReserveInvariant();
     }
 
-    function testSupplyAndWithdrawEuler() public {
-        vault.supplyToEuler(200_000e6);
-        assertEq(usdc.balanceOf(address(eulerVault)), 200_000e6);
+    function testSupplyAndWithdrawYieldVault() public {
+        vault.supplyToYieldVault(200_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 200_000e6);
         _assertReserveInvariant();
 
-        vault.withdrawFromEuler(50_000e6);
-        assertEq(usdc.balanceOf(address(eulerVault)), 150_000e6);
+        vault.withdrawFromYieldVault(50_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 150_000e6);
         _assertReserveInvariant();
     }
 
-    function testWithdrawPullsFromEuler() public {
-        vault.supplyToEuler(900_000e6);
+    function testWithdrawPullsFromYieldVault() public {
+        vault.supplyToYieldVault(900_000e6);
         vm.startPrank(lender);
         uint256 shares = vault.balanceOf(lender);
         uint256 withdrawAssets = 400_000e6;
@@ -71,37 +71,37 @@ contract CollarLiquidityVaultTest is Test {
         vault.borrow(2_000_000e6);
     }
 
-    function testSetEulerVaultRevertsWhenAssetMismatch() public {
+    function testSetYieldVaultRevertsWhenAssetMismatch() public {
         MockERC20 otherAsset = new MockERC20("Other", "OTHER", 6);
-        MockERC4626 wrongEulerVault = new MockERC4626(otherAsset);
+        MockERC4626 wrongYieldVault = new MockERC4626(otherAsset);
 
-        vm.expectRevert(CollarLiquidityVault.LV_InvalidEulerAsset.selector);
-        vault.setEulerVault(wrongEulerVault);
+        vm.expectRevert(CollarLiquidityVault.LV_InvalidYieldVaultAsset.selector);
+        vault.setYieldVault(wrongYieldVault);
     }
 
-    function testSetEulerVaultRevertsWhenCurrentEulerHasFunds() public {
-        MockERC4626 newEulerVault = new MockERC4626(usdc);
-        vault.supplyToEuler(1e6);
+    function testSetYieldVaultRevertsWhenCurrentYieldVaultHasFunds() public {
+        MockERC4626 newYieldVault = new MockERC4626(usdc);
+        vault.supplyToYieldVault(1e6);
 
-        vm.expectRevert(CollarLiquidityVault.LV_EulerVaultHasFunds.selector);
-        vault.setEulerVault(newEulerVault);
+        vm.expectRevert(CollarLiquidityVault.LV_YieldVaultHasFunds.selector);
+        vault.setYieldVault(newYieldVault);
     }
 
-    function testSetEulerVaultSucceedsAfterCurrentEulerDrained() public {
-        MockERC4626 newEulerVault = new MockERC4626(usdc);
-        vault.supplyToEuler(125_000e6);
-        vault.withdrawFromEuler(125_000e6);
+    function testSetYieldVaultSucceedsAfterCurrentYieldVaultDrained() public {
+        MockERC4626 newYieldVault = new MockERC4626(usdc);
+        vault.supplyToYieldVault(125_000e6);
+        vault.withdrawFromYieldVault(125_000e6);
 
-        vault.setEulerVault(newEulerVault);
-        assertEq(address(vault.eulerVault()), address(newEulerVault));
+        vault.setYieldVault(newYieldVault);
+        assertEq(address(vault.yieldVault()), address(newYieldVault));
         _assertReserveInvariant();
     }
 
     function testReserveBlocksWithdrawableLiquidity() public {
-        vault.supplyToEuler(900_000e6);
+        vault.supplyToYieldVault(900_000e6);
         vault.reserve(1, 300_000e6);
         assertEq(usdc.balanceOf(address(vault)), 300_000e6);
-        assertEq(usdc.balanceOf(address(eulerVault)), 700_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 700_000e6);
         assertEq(vault.availableLiquidity(), 700_000e6);
         _assertReserveInvariant();
 
@@ -111,10 +111,10 @@ contract CollarLiquidityVaultTest is Test {
     }
 
     function testConsumeAndReleaseReserve() public {
-        vault.supplyToEuler(800_000e6);
+        vault.supplyToYieldVault(800_000e6);
         vault.reserve(1, 200_000e6);
         assertEq(usdc.balanceOf(address(vault)), 200_000e6);
-        assertEq(usdc.balanceOf(address(eulerVault)), 800_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 800_000e6);
 
         vault.consume(1, 120_000e6);
         assertEq(usdc.balanceOf(address(this)), 120_000e6);
@@ -126,40 +126,40 @@ contract CollarLiquidityVaultTest is Test {
         assertEq(vault.reservedByLoan(1), 0);
         assertEq(vault.reservedLiquidity(), 0);
         assertEq(usdc.balanceOf(address(vault)), 0);
-        assertEq(usdc.balanceOf(address(eulerVault)), 880_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 880_000e6);
         _assertReserveInvariant();
     }
 
-    function testReservePrincipalPullsFromEulerAndReleaseRedeposits() public {
-        vault.supplyToEuler(900_000e6);
+    function testReservePrincipalPullsFromYieldVaultAndReleaseRedeposits() public {
+        vault.supplyToYieldVault(900_000e6);
         vault.reservePrincipal(7, 250_000e6);
         assertEq(usdc.balanceOf(address(vault)), 250_000e6);
-        assertEq(usdc.balanceOf(address(eulerVault)), 750_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 750_000e6);
         _assertReserveInvariant();
 
         vault.releasePrincipal(7);
         assertEq(vault.reservedPrincipal(), 0);
         assertEq(vault.reservedPrincipalByLoan(7), 0);
         assertEq(usdc.balanceOf(address(vault)), 0);
-        assertEq(usdc.balanceOf(address(eulerVault)), 1_000_000e6);
+        assertEq(usdc.balanceOf(address(yieldVault)), 1_000_000e6);
         _assertReserveInvariant();
     }
 
-    function testCannotSupplyReservedLiquidityToEuler() public {
-        vault.supplyToEuler(900_000e6);
+    function testCannotSupplyReservedLiquidityToYieldVault() public {
+        vault.supplyToYieldVault(900_000e6);
         vault.reserve(1, 250_000e6);
 
         vm.expectRevert(CollarLiquidityVault.LV_ReservedLiquidityLocked.selector);
-        vault.supplyToEuler(120_000e6);
+        vault.supplyToYieldVault(120_000e6);
         _assertReserveInvariant();
     }
 
-    function testReserveRevertsWhenEulerFundsCannotBeWithdrawn() public {
-        vault.supplyToEuler(900_000e6);
+    function testReserveRevertsWhenYieldVaultFundsCannotBeWithdrawn() public {
+        vault.supplyToYieldVault(900_000e6);
 
-        uint256 eulerBalance = usdc.balanceOf(address(eulerVault));
-        vm.prank(address(eulerVault));
-        usdc.transfer(address(0xBEEF), eulerBalance);
+        uint256 yieldVaultBalance = usdc.balanceOf(address(yieldVault));
+        vm.prank(address(yieldVault));
+        usdc.transfer(address(0xBEEF), yieldVaultBalance);
 
         vm.expectRevert();
         vault.reserve(1, 200_000e6);
@@ -180,13 +180,13 @@ contract CollarLiquidityVaultTest is Test {
                 uint256 freeOnHand = _freeOnHand();
                 if (freeOnHand > 0) {
                     uint256 amount = bound((roll >> 32) % (freeOnHand + 1), 1, freeOnHand);
-                    vault.supplyToEuler(amount);
+                    vault.supplyToYieldVault(amount);
                 }
             } else if (op == 1) {
-                uint256 eulerBal = usdc.balanceOf(address(eulerVault));
-                if (eulerBal > 0) {
-                    uint256 amount = bound((roll >> 32) % (eulerBal + 1), 1, eulerBal);
-                    vault.withdrawFromEuler(amount);
+                uint256 yieldVaultBal = usdc.balanceOf(address(yieldVault));
+                if (yieldVaultBal > 0) {
+                    uint256 amount = bound((roll >> 32) % (yieldVaultBal + 1), 1, yieldVaultBal);
+                    vault.withdrawFromYieldVault(amount);
                 }
             } else if (op == 2) {
                 if (reservedLiquidityBySlot[slot - 1] == 0) {
