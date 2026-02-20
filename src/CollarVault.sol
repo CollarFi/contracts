@@ -11,7 +11,7 @@ import {EIP712Upgradeable} from "openzeppelin-upgradeable/utils/cryptography/EIP
 import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
-import {IEulerAdapter} from "./interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "./interfaces/ILendingAdapter.sol";
 import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
 import {CollarLZMessages} from "./bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "./interfaces/ICollarVaultMessenger.sol";
@@ -92,7 +92,7 @@ contract CollarVault is
     );
     event BridgeConfigUpdated(address indexed asset, address indexed adapter);
     event L2RecipientUpdated(address indexed recipient);
-    event EulerAdapterUpdated(address indexed adapter);
+    event LendingAdapterUpdated(address indexed adapter);
     event SubaccountUpdated(uint256 subaccountId);
     event RfqSignerUpdated(address indexed signer, bool allowed);
     event LZMessengerUpdated(address indexed messenger);
@@ -128,7 +128,7 @@ contract CollarVault is
     function initialize(
         address admin,
         ILiquidityVault liquidityVault_,
-        IEulerAdapter eulerAdapter_,
+        ILendingAdapter lendingAdapter_,
         IAllowanceTransfer permit2_,
         address l2Recipient_,
         address treasury_
@@ -140,7 +140,7 @@ contract CollarVault is
         __EIP712_init("CollarVault", "1");
 
         if (
-            admin == address(0) || address(liquidityVault_) == address(0) || address(eulerAdapter_) == address(0)
+            admin == address(0) || address(liquidityVault_) == address(0) || address(lendingAdapter_) == address(0)
                 || address(permit2_) == address(0) || l2Recipient_ == address(0) || treasury_ == address(0)
         ) {
             revert CV_InvalidConfig();
@@ -148,7 +148,7 @@ contract CollarVault is
 
         $.liquidityVault = liquidityVault_;
         $.usdc = IERC20(liquidityVault_.asset());
-        $.eulerAdapter = eulerAdapter_;
+        $.lendingAdapter = lendingAdapter_;
         $.permit2 = permit2_;
         $.l2Recipient = l2Recipient_;
         $.treasury = treasury_;
@@ -176,9 +176,15 @@ contract CollarVault is
         return $.permit2;
     }
 
-    function eulerAdapter() external view returns (IEulerAdapter) {
+    function lendingAdapter() external view returns (ILendingAdapter) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        return $.eulerAdapter;
+        return $.lendingAdapter;
+    }
+
+    /// @dev Backward-compatible alias. Prefer lendingAdapter().
+    function eulerAdapter() external view returns (ILendingAdapter) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.lendingAdapter;
     }
 
     function l2Recipient() external view returns (address) {
@@ -666,14 +672,19 @@ contract CollarVault is
         emit BridgeConfigUpdated(asset, address(adapter));
     }
 
-    /// @notice Update the Euler adapter.
-    function setEulerAdapter(IEulerAdapter newAdapter) external onlyRole(PARAMETER_ROLE) {
+    /// @notice Update the lending adapter.
+    function setLendingAdapter(ILendingAdapter newAdapter) public onlyRole(PARAMETER_ROLE) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (address(newAdapter) == address(0)) {
             revert CV_InvalidConfig();
         }
-        $.eulerAdapter = newAdapter;
-        emit EulerAdapterUpdated(address(newAdapter));
+        $.lendingAdapter = newAdapter;
+        emit LendingAdapterUpdated(address(newAdapter));
+    }
+
+    /// @dev Backward-compatible alias. Prefer setLendingAdapter().
+    function setEulerAdapter(ILendingAdapter newAdapter) external onlyRole(PARAMETER_ROLE) {
+        setLendingAdapter(newAdapter);
     }
 
     /// @notice Update the Derive subaccount id used for action validation.

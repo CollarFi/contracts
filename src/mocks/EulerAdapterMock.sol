@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IEulerAdapter} from "../interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 
 /// @dev Minimal mock for local/fork dev. No real lending occurs.
-contract EulerAdapterMock is IEulerAdapter {
+contract EulerAdapterMock is ILendingAdapter {
     event DepositCollateral(address asset, uint256 amount, address onBehalfOf);
     event WithdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to);
     event Borrow(address asset, uint256 amount, address onBehalfOf, address to);

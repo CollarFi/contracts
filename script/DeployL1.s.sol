@@ -16,7 +16,7 @@ import {SocketBridgeAdapterOld} from "../src/bridge/SocketBridgeAdapterOld.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
-import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
 import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
@@ -169,7 +169,7 @@ contract DeployL1 is Script {
             (
                 cfg.vaultOwner,
                 ILiquidityVault(liquidityVault),
-                IEulerAdapter(eulerAdapter),
+                ILendingAdapter(eulerAdapter),
                 IAllowanceTransfer(cfg.permit2),
                 cfg.l2Recipient,
                 cfg.treasury

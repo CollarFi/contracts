@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
-import {IEulerAdapter} from "../interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 import {IBridgeAdapter} from "../interfaces/IBridgeAdapter.sol";
 import {ICollarVaultMessenger} from "../interfaces/ICollarVaultMessenger.sol";
 import {ILiquidityVault} from "../interfaces/ILiquidityVault.sol";
@@ -98,7 +98,7 @@ library CollarVaultShared {
         IERC20 usdc;
         IAllowanceTransfer permit2;
         mapping(address => SocketBridgeConfig) socketBridgeConfigs;
-        IEulerAdapter eulerAdapter;
+        ILendingAdapter lendingAdapter;
         address l2Recipient;
         address treasury;
         uint256 treasuryBps;

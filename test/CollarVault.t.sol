@@ -12,7 +12,7 @@ import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.so
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
-import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {ICollarVaultFinalizeModule} from "../src/interfaces/ICollarVaultFinalizeModule.sol";
 
@@ -78,7 +78,7 @@ contract CollarVaultTest is Test {
             (
                 address(this),
                 ILiquidityVault(address(liquidityVault)),
-                IEulerAdapter(address(eulerAdapter)),
+                ILendingAdapter(address(eulerAdapter)),
                 permit2,
                 address(0x1001),
                 treasury

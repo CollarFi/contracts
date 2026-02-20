@@ -120,10 +120,10 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         }
         _releaseCommittedPrincipal(loan.principal);
         _releaseReserve(loanId);
-        IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.eulerAdapter), collateralAmount);
-        $.eulerAdapter.depositCollateral(loan.collateralAsset, collateralAmount, loan.borrower);
+        IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.lendingAdapter), collateralAmount);
+        $.lendingAdapter.depositCollateral(loan.collateralAsset, collateralAmount, loan.borrower);
         uint256 totalDue = loan.principal + loan.interestOwed;
-        $.eulerAdapter.borrow(address($.usdc), totalDue, loan.borrower, address(this));
+        $.lendingAdapter.borrow(address($.usdc), totalDue, loan.borrower, address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
         if (loan.interestOwed > 0) {
