@@ -12,6 +12,11 @@ from pathlib import Path
 import typer
 
 ROOT = Path(__file__).resolve().parents[2]
+THIS_DIR = Path(__file__).resolve().parent
+import sys
+sys.path.insert(0, str(THIS_DIR))
+from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L2_ANVIL_PORT, L2_ARTIFACT_JSON
+
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 BORROWER_PK = "0x59c6995e998f97a5a0044966f0945382d77ad9e6f3c6f7f8b8d7a0f4f7f9d6f1"
@@ -223,10 +228,10 @@ def _assert_true(name: str, cond: bool) -> None:
 
 @app.command()
 def main(
-    l1_json: Path = typer.Option(Path("deployments/421614/l1-clean.json")),
-    l2_json: Path = typer.Option(Path("deployments/901/l2-clean.json")),
-    l1_rpc: str = typer.Option("http://127.0.0.1:8868"),
-    l2_rpc: str = typer.Option("http://127.0.0.1:8869"),
+    l1_json: Path = typer.Option(L1_ARTIFACT_JSON),
+    l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
+    l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
+    l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
 ):
     l1 = json.loads((ROOT / l1_json).read_text())
     l2 = json.loads((ROOT / l2_json).read_text())

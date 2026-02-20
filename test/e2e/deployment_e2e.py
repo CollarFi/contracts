@@ -12,9 +12,12 @@ import typer
 import sys
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR / "ops"))
+sys.path.insert(0, str(THIS_DIR))
 from lz_harness.common import load_env, run  # noqa: E402
 from py_lib.lz import encode_lz_receive_option  # noqa: E402
+from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_CHAIN_ID, L2_ANVIL_PORT, L2_ARTIFACT_JSON, L2_CHAIN_ID  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
@@ -108,10 +111,10 @@ def _wait_for_chain_id(rpc_url: str, expected_chain_id: int, timeout_s: int, pol
 def main(
     l1_env: Path = typer.Option(ROOT_DIR / ".env.l1.testnet"),
     l2_env: Path = typer.Option(ROOT_DIR / ".env.l2.testnet"),
-    l1_port: int = typer.Option(8758),
-    l2_port: int = typer.Option(8759),
-    l1_chain_id: int = typer.Option(421614),
-    l2_chain_id: int = typer.Option(901),
+    l1_port: int = typer.Option(L1_ANVIL_PORT),
+    l2_port: int = typer.Option(L2_ANVIL_PORT),
+    l1_chain_id: int = typer.Option(L1_CHAIN_ID),
+    l2_chain_id: int = typer.Option(L2_CHAIN_ID),
     derive_registry_profile: str = typer.Option("testnet"),
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
     anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),
@@ -133,8 +136,8 @@ def main(
     l1_fork_env = tmpdir / "l1.fork.env"
     l2_fork_env = tmpdir / "l2.fork.env"
 
-    l1_out = ROOT_DIR / "deployments" / str(l1_chain_id) / "l1-e2e.json"
-    l2_out = ROOT_DIR / "deployments" / str(l2_chain_id) / "l2-e2e.json"
+    l1_out = ROOT_DIR / "deployments" / str(l1_chain_id) / L1_ARTIFACT_JSON.name
+    l2_out = ROOT_DIR / "deployments" / str(l2_chain_id) / L2_ARTIFACT_JSON.name
 
     l1_eid = ""
     if l1e.get("LZ_ENDPOINT"):
