@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import typer
+from eth_abi import decode
 
 ROOT = Path(__file__).resolve().parents[2]
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -94,6 +95,76 @@ def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, 
         return "funded-via-faucet"
 
     raise RuntimeError("faucet funding failed for required collateral token amount")
+
+
+def _cast_rpc(rpc: str, method: str, params: dict) -> dict:
+    return json.loads(run(["cast", "rpc", method, json.dumps(params), "--rpc-url", rpc]))
+
+
+def _iter_calls(node: dict):
+    yield node
+    for c in node.get("calls", []) or []:
+        yield from _iter_calls(c)
+
+
+def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
+    trace = _cast_rpc(
+        src_rpc,
+        "debug_traceTransaction",
+        {"txHash": tx_hash, "tracer": "callTracer", "tracerConfig": {"withLog": False}},
+    )
+
+    for call in _iter_calls(trace):
+        data = (call.get("input") or "").lower()
+        if data.startswith("0x4389e58f"):
+            payload = bytes.fromhex(data[10:])
+            params, _options, _pay_in_lz = decode(["(uint64,uint32,address,uint32,bytes32,bytes32,bytes)", "bytes", "bool"], payload)
+            nonce, src_eid, sender, dst_eid, receiver_b32, guid, message = params
+            receiver_addr = "0x" + receiver_b32[-20:].hex()
+            sender_b32 = "0x" + ("00" * 12) + sender.lower().removeprefix("0x")
+            return {
+                "nonce": int(nonce),
+                "srcEid": int(src_eid),
+                "dstEid": int(dst_eid),
+                "sender": sender.lower(),
+                "senderB32": sender_b32,
+                "receiver": receiver_addr,
+                "guid": "0x" + guid.hex(),
+                "message": "0x" + message.hex(),
+            }
+
+    raise RuntimeError(f"send((...),bytes,bool) call not found in tx trace: {tx_hash}")
+
+
+def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str) -> dict:
+    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash)
+    endpoint = cast_call(dst_rpc, pkt["receiver"], "endpoint()(address)").splitlines()[0].strip()
+
+    run(["cast", "rpc", "anvil_setBalance", endpoint, "0x3635C9ADC5DEA00000", "--rpc-url", dst_rpc])
+
+    tx = run(
+        [
+            "cast",
+            "send",
+            pkt["receiver"],
+            "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
+            f"({pkt['srcEid']},{pkt['senderB32']},{pkt['nonce']})",
+            pkt["guid"],
+            pkt["message"],
+            "0x0000000000000000000000000000000000000000",
+            "0x",
+            "--rpc-url",
+            dst_rpc,
+            "--unlocked",
+            "--from",
+            endpoint,
+            "--gas-limit",
+            "1500000",
+        ]
+    )
+    pkt["relayTx"] = tx
+    pkt["endpoint"] = endpoint
+    return pkt
 
 
 @app.command()
@@ -189,18 +260,30 @@ def main(
 
     step("create_deposit_with_permit", do_deposit)
 
-    loan_id = out["steps"][-1]["result"]["loanId"]
+    deposit_tx = out["steps"][-1]["result"]["tx"]
+
+    step("relay_l1_to_l2_exact", lambda: relay_exact_lz_packet(l1_rpc, l2_rpc, deposit_tx))
 
     def run_l2_keeper_once():
         base = (ROOT / ".env.l2.testnet").read_text()
         tmp = Path(tempfile.mkdtemp(prefix="e2e-l2-")) / ".env.l2.fork"
         tmp.write_text(base + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
-        return run([
+        return json.loads(run([
             "uv", "run", "python", str(ROOT / "ops/management/l2_keeper_handle_messages.py"),
             str(tmp), "--once", "--broadcast", "--private-key", ANVIL_PK0, "--json"
-        ])
+        ]))
 
     step("l2_keeper_handle_deposit", run_l2_keeper_once)
+
+    def relay_l2_ack_to_l1():
+        k = out["steps"][-1]["result"]
+        handled = k.get("handled", [])
+        sent = [h for h in handled if h.get("status") == "sent" and h.get("tx")]
+        if not sent:
+            raise RuntimeError(f"no sent ack tx in keeper output: {json.dumps(k)}")
+        return relay_exact_lz_packet(l2_rpc, l1_rpc, sent[0]["tx"])
+
+    step("relay_l2_to_l1_exact", relay_l2_ack_to_l1)
 
     out["ok"] = True
     print(json.dumps(out, indent=2))
