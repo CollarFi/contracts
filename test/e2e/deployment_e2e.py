@@ -80,6 +80,21 @@ def _find_default_admin(rpc: str, contract: str, candidates: list[str]) -> str:
     raise RuntimeError(f"could not find DEFAULT_ADMIN_ROLE holder for {contract}")
 
 
+def _wait_for_chain_id(rpc_url: str, expected_chain_id: int, timeout_s: int, poll_s: float) -> None:
+    deadline = time.time() + timeout_s
+    last_err = ""
+    while time.time() < deadline:
+        try:
+            got = run(["cast", "chain-id", "--rpc-url", rpc_url]).strip()
+            if int(got) == expected_chain_id:
+                return
+            last_err = f"chain id mismatch: got {got}, want {expected_chain_id}"
+        except Exception as exc:
+            last_err = str(exc)
+        time.sleep(poll_s)
+    raise RuntimeError(f"rpc not ready at {rpc_url} within {timeout_s}s ({last_err})")
+
+
 @app.command()
 def main(
     l1_env: Path = typer.Option(ROOT_DIR / ".env.l1.testnet"),
@@ -89,6 +104,8 @@ def main(
     l1_chain_id: int = typer.Option(421614),
     l2_chain_id: int = typer.Option(901),
     derive_registry_profile: str = typer.Option("testnet"),
+    anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
+    anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),
     keep_anvil: bool = typer.Option(False, help="Keep anvil processes running"),
 ) -> None:
     l1e = load_env(l1_env)
@@ -96,10 +113,12 @@ def main(
 
     p1 = _spawn_anvil(l1e["RPC_URL"], l1_port, l1_chain_id)
     p2 = _spawn_anvil(l2e["RPC_URL"], l2_port, l2_chain_id)
-    time.sleep(1.2)
 
     l1_rpc = f"http://127.0.0.1:{l1_port}"
     l2_rpc = f"http://127.0.0.1:{l2_port}"
+
+    _wait_for_chain_id(l1_rpc, l1_chain_id, anvil_ready_timeout_s, anvil_ready_poll_s)
+    _wait_for_chain_id(l2_rpc, l2_chain_id, anvil_ready_timeout_s, anvil_ready_poll_s)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="collar-e2e-"))
     l1_fork_env = tmpdir / "l1.fork.env"
