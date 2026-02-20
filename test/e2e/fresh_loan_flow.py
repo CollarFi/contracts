@@ -75,66 +75,18 @@ def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, ex
     return sign_hash_no_prefix(digest)
 
 
-def ensure_token_balance(rpc: str, token: str, to: str, amount: int) -> str:
-    bal = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
-    if bal >= amount:
+def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, amount: int) -> str:
+    bal_before = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+    if bal_before >= amount:
         return "already-funded"
-    try:
-        cast_send(rpc, token, "deposit()", value=str(amount - bal))
-        return "funded-via-deposit"
-    except Exception:
-        pass
 
-    logs = run([
-        "cast",
-        "logs",
-        "Transfer(address,address,uint256)",
-        "--address",
-        token,
-        "--from-block",
-        "0",
-        "--to-block",
-        "latest",
-        "--rpc-url",
-        rpc,
-        "--json",
-    ])
-    entries = json.loads(logs)
-    seen: set[str] = set()
-    for e in reversed(entries[-2000:]):
-        t = e.get("topics", [])
-        if len(t) < 3:
-            continue
-        # topic[2] is Transfer.to (likely current holder), topic[1] is sender.
-        holder = "0x" + t[2][-40:]
-        if holder.lower() in seen:
-            continue
-        seen.add(holder.lower())
-        try:
-            hbal = int(cast_call(rpc, token, "balanceOf(address)(uint256)", holder).split()[0])
-            if hbal >= amount:
-                run(["cast", "rpc", "anvil_setBalance", holder, "0x56BC75E2D63100000", "--rpc-url", rpc])
-                run([
-                    "cast", "send", token, "transfer(address,uint256)", to, str(amount),
-                    "--rpc-url", rpc, "--unlocked", "--from", holder
-                ])
-                return f"funded-via-holder:{holder}"
-        except Exception:
-            continue
+    cast_send(rpc, faucet, "getTokens(address,address[])", to, f"[{token}]")
 
-    # Last-resort for local fork reproducibility: inject ERC20 balance mapping directly
-    # (works for current wrapped token layout where balances are at slot 3).
-    try:
-        idx = run(["cast", "index", "address", to, "3"]).strip()
-        amount_hex = hex(amount)[2:].rjust(64, "0")
-        run(["cast", "rpc", "anvil_setStorageAt", token, idx, f"0x{amount_hex}", "--rpc-url", rpc])
-        verify = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
-        if verify >= amount:
-            return "funded-via-storage-slot3"
-    except Exception:
-        pass
+    bal_after = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+    if bal_after >= amount:
+        return "funded-via-faucet"
 
-    raise RuntimeError("unable to fund borrower with collateral token on fork")
+    raise RuntimeError("faucet funding failed for required collateral token amount")
 
 
 @app.command()
@@ -177,10 +129,11 @@ def main(
                 k, v = line.split("=", 1)
                 l1_env[k.strip()] = v.strip()
         weth = l1_env["WETH_ASSET"]
+        faucet = l1_env["FAUCET"]
         permit2 = cast_call(l1_rpc, vault, "permit2()(address)").splitlines()[0].strip()
         next_loan = int(cast_call(l1_rpc, vault, "nextLoanId()(uint256)").split()[0])
 
-        fund_mode = ensure_token_balance(l1_rpc, weth, ANVIL_ADDR0, 10**18)
+        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet, weth, ANVIL_ADDR0, 10**18)
         cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1))
 
         chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
