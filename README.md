@@ -142,13 +142,9 @@ uv run python ops/management/enable_collateral.py --env testnet --broadcast
 uv run python ops/management/set_l2_message_asset.py --env testnet --l1-asset <L1_ASSET> --l2-asset <L2_WRAPPED_ASSET>
 uv run python ops/management/set_l2_message_asset.py --env testnet --broadcast
 
-# Preflight L1->L2 message asset mapping vs TSA wrappedDepositAsset
-uv run python ops/preflight/l1_l2_message_asset_preflight.py --env testnet
-uv run python ops/preflight/l1_l2_message_asset_preflight.py --env testnet --json
-
-# L2 preflight: inspect pending message guids before handleMessage (asset/subaccount/socket/balance checks)
-uv run python ops/preflight/l2_message_preflight.py --env testnet --guid <GUID>
-uv run python ops/preflight/l2_message_preflight.py --env testnet --json
+# Preflight all route/message readiness checks through unified entrypoint
+uv run python ops/preflight.py --env testnet --include-messages
+uv run python ops/preflight.py --env testnet --include-messages --json
 
 # L2 keeper: watch MessageReceived on CollarTSAReceiver and handle DepositIntent messages
 # (dry-run default; stores cursor in deployments/keeper_l2_state.json)
