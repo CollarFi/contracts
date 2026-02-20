@@ -70,6 +70,9 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         if (deadline <= block.timestamp) {
             revert CV_InvalidState();
         }
+        if (deadline > block.timestamp + $.maxMandateDuration) {
+            revert CV_InvalidState();
+        }
 
         CollarVaultShared.Mandate memory existing = $.mandates[loanId];
         bool hadMandate = existing.borrower != address(0);
@@ -109,6 +112,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
 
         if (!hadMandate) {
             _commitPrincipal(pending.borrowAmount);
+            $.liquidityVault.reservePrincipal(loanId, pending.borrowAmount);
         } else if (existing.maxNegativeC > 0) {
             $.liquidityVault.release(loanId);
         }
@@ -238,7 +242,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             variableDebt: 0
         });
 
-        $.liquidityVault.borrow(pending.borrowAmount);
+        $.liquidityVault.borrowReserved(finalizedLoanId, pending.borrowAmount);
         $.usdc.safeTransfer(mandate.borrower, pending.borrowAmount);
 
         emit LoanCreated(

@@ -51,3 +51,9 @@ def resolve_l2_subaccount_id_from_tsa(l2_env_file: Path) -> int:
         return int(value.split()[0], 10)
     except Exception as exc:
         raise ValueError(f"failed to parse TSA subAccount() output: {value}") from exc
+
+
+
+def resolve_l2_receiver_from_env_file(l2_env_file: Path) -> str:
+    l2 = load_env(l2_env_file)
+    return resolve_l2_receiver(l2)

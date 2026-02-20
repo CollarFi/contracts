@@ -11,7 +11,8 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {CollarVault} from "../src/CollarVault.sol";
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
-import {SocketBridgeAdapter} from "../src/bridge/SocketBridgeAdapter.sol";
+import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
+import {SocketBridgeAdapterOld} from "../src/bridge/SocketBridgeAdapterOld.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
@@ -87,7 +88,7 @@ contract DeployL1 is Script {
 
         address defaultPermit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
         cfg.permit2 = vm.envOr("PERMIT2", defaultPermit2);
-        cfg.l2Recipient = vm.envOr("L2_RECIPIENT", cfg.admin);
+        cfg.l2Recipient = vm.envOr("L2_RECIPIENT", address(0));
 
         cfg.liquidityVault = vm.envOr("LIQUIDITY_VAULT", address(0));
         cfg.usdcAsset = vm.envOr("USDC_ASSET", address(0));
@@ -102,7 +103,9 @@ contract DeployL1 is Script {
         cfg.wethSocketVault = vm.envOr("WETH_SOCKET_VAULT", address(0));
         cfg.wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
         cfg.wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
-        cfg.wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        // Socket adapter gas limit follows LZ receive gas by default.
+        // Backward-compat: WETH_MSG_GAS_LIMIT still works if LZ_RECEIVE_GAS is unset.
+        cfg.wethMsgGasLimit = vm.envOr("LZ_RECEIVE_GAS", vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000)));
         cfg.wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
         cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
         cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
@@ -159,6 +162,7 @@ contract DeployL1 is Script {
         internal
         returns (CollarVault vault, address vaultImpl)
     {
+        if (cfg.l2Recipient == address(0)) revert("L2_RECIPIENT required");
         vaultImpl = address(new CollarVault());
         bytes memory initData = abi.encodeCall(
             CollarVault.initialize,
@@ -191,27 +195,29 @@ contract DeployL1 is Script {
     function _maybeDeployWethAdapter(EnvConfig memory cfg, CollarVault vault) internal returns (address) {
         if (cfg.wethAsset == address(0) || cfg.wethSocketConnector == address(0)) return address(0);
 
-        SocketBridgeAdapter.BridgeType bridgeType = SocketBridgeAdapter.BridgeType.NONE;
         if (cfg.wethSocketVault != address(0)) {
-            bridgeType = SocketBridgeAdapter.BridgeType.OLD;
-        } else if (cfg.wethSocketBridge != address(0)) {
-            bridgeType = SocketBridgeAdapter.BridgeType.NEW;
+            SocketBridgeAdapterOld adapter = new SocketBridgeAdapterOld(
+                cfg.wethAsset, cfg.wethSocketVault, cfg.wethSocketConnector, cfg.wethMsgGasLimit
+            );
+            vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
+            return address(adapter);
         }
 
-        if (bridgeType == SocketBridgeAdapter.BridgeType.NONE) return address(0);
+        if (cfg.wethSocketBridge != address(0)) {
+            SocketBridgeAdapterNew adapter = new SocketBridgeAdapterNew(
+                cfg.wethAsset,
+                cfg.wethSocketBridge,
+                cfg.wethSocketConnector,
+                cfg.wethMsgGasLimit,
+                cfg.wethPayloadSize,
+                "",
+                ""
+            );
+            vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
+            return address(adapter);
+        }
 
-        SocketBridgeAdapter adapter = new SocketBridgeAdapter(
-            bridgeType,
-            cfg.wethSocketBridge,
-            cfg.wethSocketVault,
-            cfg.wethSocketConnector,
-            cfg.wethMsgGasLimit,
-            cfg.wethPayloadSize,
-            "",
-            ""
-        );
-        vault.setSocketVaultConfig(cfg.wethAsset, IBridgeAdapter(address(adapter)));
-        return address(adapter);
+        return address(0);
     }
 
     function _proxyAdminOf(address proxy) internal view returns (address) {

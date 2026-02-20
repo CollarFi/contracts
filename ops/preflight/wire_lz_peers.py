@@ -7,6 +7,10 @@ from pathlib import Path
 import typer
 from rich import print
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lz_harness.common import ROOT_DIR, address_to_peer_bytes32, cast_call, cast_send, load_env, must
 from py_lib.deployments import resolve_addr
 from py_lib.envs import resolve_l1_l2_env_paths

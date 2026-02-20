@@ -103,23 +103,27 @@ uv run python ops/lz_harness/deploy.py --broadcast
 uv run python ops/deploy_l1.py --env testnet
 
 # Broadcast L1 deployment (CollarVault via ERC1967 proxy with atomic initialize)
+# If L2_RECIPIENT is empty, deploy_l1.py auto-resolves it to the L2 receiver address via --l2-env-file.
 # If WETH_ASSET is set and L2_WRAPPED_WETH_ASSET is empty in L1 env,
 # deploy_l1.py auto-resolves it from L2 TSA via --l2-env-file (default: .env.l2.<env>).
 # If DERIVE_SUBACCOUNT_ID is empty, deploy_l1.py also auto-resolves TSA subAccount() from L2.
+# Socket adapter msg gas follows LZ_RECEIVE_GAS (legacy WETH_MSG_GAS_LIMIT remains as override fallback).
 # L2 receiver lookup order: L2_RECEIVER env -> L2 OUTPUT_JSON -> DeployL2 broadcast run-latest artifact.
 uv run python ops/deploy_l1.py --env testnet --broadcast
 
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
+# SOCKET_TRACKER is required and must be a real socket tracker address (no mock fallback).
 # Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
-# Wire L1<->L2 LayerZero peers after both sides are deployed
-uv run python ops/wire_lz_peers.py --env testnet --broadcast
+# Wire/check L1<->L2 route via the unified route command (includes peer wiring)
+uv run python ops/ensure_lz_route.py --env testnet --broadcast
 
-# Check LayerZero ULN/route config for deployed messenger/receiver using current env files
-uv run python ops/check_lz_uln.py --env testnet
-uv run python ops/check_lz_uln.py --env testnet --json
+# Unified preflight entrypoint: recipient wiring + ULN/route + asset mapping (+ optional message scan)
+uv run python ops/preflight.py --env testnet
+uv run python ops/preflight.py --env testnet --include-messages
+uv run python ops/preflight.py --env testnet --json
 
 # Apply ULN config to both OApps using current effective endpoint configs (dry-run by default)
 # Also enforces OApp remoteEid + defaultOptions from env (LZ_RECEIVE_GAS/LZ_RECEIVE_VALUE)
@@ -138,13 +142,9 @@ uv run python ops/management/enable_collateral.py --env testnet --broadcast
 uv run python ops/management/set_l2_message_asset.py --env testnet --l1-asset <L1_ASSET> --l2-asset <L2_WRAPPED_ASSET>
 uv run python ops/management/set_l2_message_asset.py --env testnet --broadcast
 
-# Preflight L1->L2 message asset mapping vs TSA wrappedDepositAsset
-uv run python ops/management/l1_l2_message_asset_preflight.py --env testnet
-uv run python ops/management/l1_l2_message_asset_preflight.py --env testnet --json
-
-# L2 preflight: inspect pending message guids before handleMessage (asset/subaccount/socket/balance checks)
-uv run python ops/management/l2_message_preflight.py --env testnet --guid <GUID>
-uv run python ops/management/l2_message_preflight.py --env testnet --json
+# Preflight all route/message readiness checks through unified entrypoint
+uv run python ops/preflight.py --env testnet --include-messages
+uv run python ops/preflight.py --env testnet --include-messages --json
 
 # L2 keeper: watch MessageReceived on CollarTSAReceiver and handle DepositIntent messages
 # (dry-run default; stores cursor in deployments/keeper_l2_state.json)

@@ -95,6 +95,9 @@ def main(
     env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet. Loads .env.l2.<env> (and .env.l1.<env> fallback)."),
     broadcast: bool = typer.Option(False, help="Execute onchain txs"),
     verify: bool = typer.Option(True, help="Verify contracts during deployment"),
+    private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
+    from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
+    unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     l1_output_json: str = typer.Option("", help="Optional L1 deployment JSON to auto-fill L1_MESSENGER/L1_VAULT"),
     verifier: str = typer.Option("", help="Optional forge verifier (e.g. blockscout, etherscan)") ,
     verifier_url: str = typer.Option("", help="Optional verifier URL"),
@@ -121,11 +124,24 @@ def main(
         else:
             raise FileNotFoundError(f"expected L1 env file not found for --env {resolved_env}: {l1_env_file}")
 
-    for k in ("RPC_URL", "ACCOUNT"):
+    for k in ("RPC_URL", "SOCKET_TRACKER"):
         must(l2, k)
 
+    account = l2.get("ACCOUNT", "")
+    pk = private_key or l2.get("PRIVATE_KEY", "")
+    sender = from_addr or l2.get("FROM", "")
+    use_unlocked = unlocked or (str(l2.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
+
+    if not account and not pk and not (use_unlocked and sender):
+        raise ValueError("provide ACCOUNT, or --private-key, or --unlocked --from")
+
     if not l2.get("ADMIN"):
-        l2["ADMIN"] = run(["cast", "wallet", "address", "--account", l2["ACCOUNT"]])
+        if pk:
+            l2["ADMIN"] = run(["cast", "wallet", "address", "--private-key", pk])
+        elif use_unlocked and sender:
+            l2["ADMIN"] = sender
+        else:
+            l2["ADMIN"] = run(["cast", "wallet", "address", "--account", account])
 
     if not l2.get("OUTPUT_JSON"):
         chain_id = run(["cast", "chain-id", "--rpc-url", l2["RPC_URL"]])
@@ -256,10 +272,13 @@ def main(
     forge_out = forge_script(
         "script/DeployL2.s.sol:DeployL2",
         l2["RPC_URL"],
-        l2["ACCOUNT"],
+        account or None,
         broadcast,
         env_overrides,
         extra_args=extra_args,
+        private_key=pk or None,
+        from_addr=sender or None,
+        unlocked=use_unlocked,
     )
 
     if json_out:
@@ -269,7 +288,10 @@ def main(
                     "outputJson": str(out_abs),
                     "broadcast": broadcast,
                     "verify": verify_enabled,
-                    "account": l2["ACCOUNT"],
+                    "account": account or None,
+                    "privateKey": bool(pk),
+                    "from": sender or None,
+                    "unlocked": use_unlocked,
                     "envProfile": resolved_env or None,
                     "registryProfile": profile or None,
                     "registryChainId": (registry_chain_id_used or None),

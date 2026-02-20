@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import typer
+
+ROOT = Path(__file__).resolve().parents[2]
+THIS_DIR = Path(__file__).resolve().parent
+import sys
+sys.path.insert(0, str(THIS_DIR))
+from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L2_ANVIL_PORT, L2_ARTIFACT_JSON
+
+ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+BORROWER_PK = "0x59c6995e998f97a5a0044966f0945382d77ad9e6f3c6f7f8b8d7a0f4f7f9d6f1"
+L2_WETH_MOCK_CONTROLLER = "0xdcABb6d7E88396498FFF4CD987F60e354BF2a44b"
+SOCKET_MOCK_CACHE: dict[str, str] = {}
+
+app = typer.Typer(add_completion=False)
+
+
+def _describe_step(step_name: str) -> str:
+    descriptions = {
+        "grant_l2_keeper": "Grant keeper role on L2 receiver",
+        "create_deposit_with_permit": "Create L1 deposit intent via Permit2",
+        "relay_l1_to_l2_exact": "Relay exact LayerZero packet L1 → L2",
+        "simulate_socket_finalized": "Mark socket transfer as finalized on fork",
+        "fund_l2_receiver_for_deposit": "Ensure L2 receiver has bridged asset balance",
+        "grant_tsa_signer": "Grant receiver signer role on TSA",
+        "l2_keeper_handle_deposit": "Run L2 keeper once to process deposit and send ACK",
+        "relay_l2_to_l1_exact": "Relay exact LayerZero packet L2 → L1",
+        "verify_expected_state": "Verify expected post-run protocol state",
+    }
+    return descriptions.get(step_name, step_name)
+
+
+def _print_human_summary(out: dict) -> None:
+    print("\n=== collar.fi fresh loan flow e2e ===")
+    for s in out.get("steps", []):
+        title = _describe_step(s.get("step", ""))
+        if s.get("ok"):
+            print(f"✅ {title}")
+        else:
+            print(f"❌ {title}")
+            if s.get("error"):
+                print(f"   ↳ {s['error']}")
+
+    verify = next((s.get("result") for s in out.get("steps", []) if s.get("step") == "verify_expected_state" and s.get("ok")), None)
+    if isinstance(verify, dict):
+        print("\nVerification snapshot")
+        print(f"- Loan ID: {verify.get('loanId')}")
+        print(f"- L1→L2 guid handled on L2: {verify.get('l2Handled')}")
+        print(f"- L2→L1 ACK action: {verify.get('ackAction')} (loanId={verify.get('ackLoanId')})")
+
+    print("\nResult: SUCCESS" if out.get("ok") else "\nResult: FAILED")
+
+
+def run(cmd: list[str], env: dict | None = None) -> str:
+    p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    if p.returncode != 0:
+        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def extract_tx_hash(raw: str) -> str:
+    s = raw.strip()
+    if re.fullmatch(r"0x[a-fA-F0-9]{64}", s):
+        return s
+    m = re.search(r"transactionHash\s+(0x[a-fA-F0-9]{64})", s)
+    if m:
+        return m.group(1)
+    hashes = re.findall(r"0x[a-fA-F0-9]{64}", s)
+    if hashes:
+        return hashes[-1]
+    raise RuntimeError(f"could not extract tx hash: {raw[:240]}")
+
+
+def cast_call(rpc: str, to: str, sig: str, *args: str) -> str:
+    return run(["cast", "call", to, sig, *args, "--rpc-url", rpc])
+
+
+def cast_send(rpc: str, to: str, sig: str, *args: str, value: str | None = None, private_key: str = ANVIL_PK0) -> str:
+    cmd = ["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key]
+    if value:
+        cmd += ["--value", value]
+    return extract_tx_hash(run(cmd))
+
+
+def sign_hash_no_prefix(digest_hex: str, private_key: str) -> str:
+    return run(["cast", "wallet", "sign", "--no-hash", "--private-key", private_key, digest_hex])
+
+
+def _keccak_text(text: str) -> str:
+    return run(["cast", "keccak", text]).splitlines()[0].strip()
+
+
+def _keccak_hex(hex_data: str) -> str:
+    return run(["cast", "keccak", hex_data]).splitlines()[0].strip()
+
+
+def _abi_encode(sig: str, *args: str) -> str:
+    return run(["cast", "abi-encode", sig, *args]).splitlines()[0].strip()
+
+
+def sign_permit2_single(chain_id: int, permit2: str, token: str, amount: int, expiration: int, nonce: int, spender: str, sig_deadline: int, private_key: str) -> str:
+    domain_typehash = _keccak_text("EIP712Domain(string name,uint256 chainId,address verifyingContract)")
+    name_hash = _keccak_text("Permit2")
+    domain_sep = _keccak_hex(_abi_encode("f(bytes32,bytes32,uint256,address)", domain_typehash, name_hash, str(chain_id), permit2))
+
+    details_typehash = _keccak_text("PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)")
+    details_hash = _keccak_hex(_abi_encode("f(bytes32,address,uint160,uint48,uint48)", details_typehash, token, str(amount), str(expiration), str(nonce)))
+
+    single_typehash = _keccak_text("PermitSingle(PermitDetails details,address spender,uint256 sigDeadline)PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)")
+    struct_hash = _keccak_hex(_abi_encode("f(bytes32,bytes32,address,uint256)", single_typehash, details_hash, spender, str(sig_deadline)))
+    digest = _keccak_hex("0x1901" + domain_sep[2:] + struct_hash[2:])
+    return sign_hash_no_prefix(digest, private_key)
+
+
+def wallet_address(private_key: str) -> str:
+    return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
+
+
+def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, amount: int) -> str:
+    bal_before = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+    if bal_before >= amount:
+        return "already-funded"
+    cast_send(rpc, faucet, "getTokens(address,address[])", to, f"[{token}]")
+    bal_after = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+    if bal_after >= amount:
+        return "funded-via-faucet"
+    raise RuntimeError("faucet funding failed")
+
+
+def _iter_calls(node: dict):
+    yield node
+    for c in node.get("calls", []) or []:
+        yield from _iter_calls(c)
+
+
+def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
+    trace = json.loads(
+        run([
+            "cast", "rpc", "debug_traceTransaction", tx_hash,
+            json.dumps({"tracer": "callTracer", "tracerConfig": {"withLog": False}}),
+            "--rpc-url", src_rpc,
+        ])
+    )
+    for call in _iter_calls(trace):
+        data = (call.get("input") or "").lower()
+        if not data.startswith("0x4389e58f"):
+            continue
+        decoded = run(["cast", "calldata-decode", "send((uint64,uint32,address,uint32,bytes32,bytes32,bytes),bytes,bool)", data])
+        first = decoded.splitlines()[0].strip()
+        m = re.match(r"\((\d+),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]*)\)", first)
+        if not m:
+            raise RuntimeError(f"parse failed for decoded send packet: {first}")
+        nonce, src_eid, sender, dst_eid, receiver_b32, guid, message = m.groups()
+        return {
+            "nonce": int(nonce),
+            "srcEid": int(src_eid),
+            "dstEid": int(dst_eid),
+            "sender": sender.lower(),
+            "senderB32": "0x" + ("00" * 12) + sender.lower().removeprefix("0x"),
+            "receiver": "0x" + receiver_b32[-40:],
+            "guid": guid,
+            "message": message,
+        }
+    raise RuntimeError(f"send((...),bytes,bool) not found in trace: {tx_hash}")
+
+
+def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str) -> dict:
+    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash)
+    endpoint = cast_call(dst_rpc, pkt["receiver"], "endpoint()(address)").splitlines()[0].strip()
+    run(["cast", "rpc", "anvil_setBalance", endpoint, "0x3635C9ADC5DEA00000", "--rpc-url", dst_rpc])
+    relay_tx = extract_tx_hash(run([
+        "cast", "send", pkt["receiver"],
+        "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
+        f"({pkt['srcEid']},{pkt['senderB32']},{pkt['nonce']})", pkt["guid"], pkt["message"],
+        "0x0000000000000000000000000000000000000000", "0x",
+        "--rpc-url", dst_rpc, "--unlocked", "--from", endpoint, "--gas-limit", "1500000",
+    ]))
+    pkt["relayTx"] = relay_tx
+    pkt["endpoint"] = endpoint
+    return pkt
+
+
+def _deploy_socket_mock(l2_rpc: str) -> str:
+    if l2_rpc in SOCKET_MOCK_CACHE:
+        return SOCKET_MOCK_CACHE[l2_rpc]
+    deployed = json.loads(run([
+        "forge", "create", "src/mocks/SocketMessageTrackerMock.sol:SocketMessageTrackerMock",
+        "--rpc-url", l2_rpc, "--private-key", ANVIL_PK0, "--broadcast", "--json",
+    ]))["deployedTo"]
+    SOCKET_MOCK_CACHE[l2_rpc] = deployed
+    return deployed
+
+
+def _pending_message_raw(l2_rpc: str, receiver: str, guid: str) -> str:
+    return cast_call(l2_rpc, receiver, "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))", guid)
+
+
+def _ensure_socket_finalized_for_guid(l2_rpc: str, receiver: str, guid: str) -> dict:
+    raw = _pending_message_raw(l2_rpc, receiver, guid)
+    m = re.search(r",\s*(0x[a-fA-F0-9]{64}),\s*\d+\s*,\s*0x[a-fA-F0-9]{64},", raw)
+    if not m:
+        raise RuntimeError(f"failed parsing socketMessageId: {raw}")
+    socket_message_id = m.group(1)
+    if socket_message_id == "0x" + "00" * 32:
+        return {"socketMessageId": socket_message_id, "updated": False}
+    mock = _deploy_socket_mock(l2_rpc)
+    set_socket_tx = cast_send(l2_rpc, receiver, "setSocket(address)", mock)
+    set_exe_tx = cast_send(l2_rpc, mock, "setExecuted(bytes32,bool)", socket_message_id, "true")
+    return {"socketMessageId": socket_message_id, "socketTracker": mock, "setSocketTx": set_socket_tx, "setExecutedTx": set_exe_tx, "updated": True}
+
+
+def _ensure_receiver_asset_balance_for_guid(l2_rpc: str, receiver: str, guid: str) -> dict:
+    raw = _pending_message_raw(l2_rpc, receiver, guid)
+    m = re.match(r"\(\d+,\s*\d+(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,", raw)
+    if not m:
+        raise RuntimeError(f"failed parse pending asset/amount: {raw}")
+    asset, amount_s = m.groups()
+    amount = int(amount_s)
+    bal_before = int(cast_call(l2_rpc, asset, "balanceOf(address)(uint256)", receiver).split()[0])
+    if bal_before >= amount:
+        return {"asset": asset, "amount": amount_s, "balanceBefore": str(bal_before), "funded": False}
+    run(["cast", "rpc", "anvil_setBalance", L2_WETH_MOCK_CONTROLLER, "0x3635C9ADC5DEA00000", "--rpc-url", l2_rpc])
+    mint_tx = extract_tx_hash(run([
+        "cast", "send", asset, "mint(address,uint256)", receiver, str(amount - bal_before),
+        "--rpc-url", l2_rpc, "--unlocked", "--from", L2_WETH_MOCK_CONTROLLER,
+    ]))
+    bal_after = int(cast_call(l2_rpc, asset, "balanceOf(address)(uint256)", receiver).split()[0])
+    if bal_after < amount:
+        raise RuntimeError(f"receiver balance still short: {bal_after} < {amount}")
+    return {"asset": asset, "amount": amount_s, "balanceBefore": str(bal_before), "balanceAfter": str(bal_after), "mintTx": mint_tx, "mintFrom": L2_WETH_MOCK_CONTROLLER, "funded": True}
+
+
+def _ensure_tsa_signer(l2_rpc: str, tsa: str, receiver: str) -> dict:
+    is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() == "true"
+    if is_signer:
+        return {"alreadySigner": True}
+    return {"alreadySigner": False, "setSignerTx": cast_send(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")}
+
+
+def _parse_keeper_output(raw: str) -> dict:
+    raw = raw.strip()
+    try:
+        return json.loads(raw, strict=False)
+    except Exception:
+        txs = re.findall(r"0x[a-fA-F0-9]{64}", raw)
+        return {"raw": raw, "txHashes": txs}
+
+
+def _assert_true(name: str, cond: bool) -> None:
+    if not cond:
+        raise RuntimeError(f"assertion failed: {name}")
+
+
+@app.command()
+def main(
+    l1_json: Path = typer.Option(L1_ARTIFACT_JSON),
+    l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
+    l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
+    l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
+):
+    l1 = json.loads((ROOT / l1_json).read_text())
+    l2 = json.loads((ROOT / l2_json).read_text())
+    l1a = l1.get("addrs", l1)
+    l2a = l2.get("addrs", l2)
+
+    vault = l1a["l1Vault"]
+    receiver = l2a["l2Receiver"]
+
+    out: dict = {"ok": False, "steps": []}
+
+    def step(name: str, fn):
+        rec = {"step": name, "ok": False}
+        try:
+            rec["result"] = fn()
+            rec["ok"] = True
+        except Exception as e:
+            rec["error"] = str(e)
+            out["steps"].append(rec)
+            if json_output:
+                print(json.dumps(out, indent=2))
+            else:
+                _print_human_summary(out)
+            raise SystemExit(1)
+        out["steps"].append(rec)
+
+    step("grant_l2_keeper", lambda: cast_send(l2_rpc, receiver, "grantRole(bytes32,address)", run(["cast", "keccak", "KEEPER_ROLE"]), ANVIL_ADDR0))
+
+    def do_deposit():
+        borrower = wallet_address(BORROWER_PK)
+        run(["cast", "rpc", "anvil_setBalance", borrower, "0x3635C9ADC5DEA00000", "--rpc-url", l1_rpc])
+        if run(["cast", "code", borrower, "--rpc-url", l1_rpc]).strip().lower() != "0x":
+            raise RuntimeError(f"borrower has code (not EOA): {borrower}")
+
+        l1_env = {}
+        for line in (ROOT / ".env.l1.testnet").read_text().splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                l1_env[k.strip()] = v.strip()
+
+        weth = l1_env["WETH_ASSET"]
+        faucet = l1_env["FAUCET"]
+        permit2 = cast_call(l1_rpc, vault, "permit2()(address)").splitlines()[0].strip()
+        next_loan = int(cast_call(l1_rpc, vault, "nextLoanId()(uint256)").split()[0])
+
+        # force l1->l2 asset mapping to TSA underlying on this fork
+        tsa = l2a["l2Tsa"]
+        base_raw = cast_call(l2_rpc, tsa, "getBaseTSAAddresses()(address,address,address,address,address,address,address)")
+        addrs = re.findall(r"0x[a-fA-F0-9]{40}", base_raw)
+        wrapped_deposit_asset = addrs[2]
+        underlying = cast_call(l2_rpc, wrapped_deposit_asset, "wrappedAsset()(address)").splitlines()[0].strip()
+        scale = cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", weth).split()[0]
+        cast_send(l1_rpc, vault, "setCollateralConfig(address,bool,uint256,address)", weth, "true", scale, underlying)
+
+        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet, weth, borrower, 10**18)
+        cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1), private_key=BORROWER_PK)
+
+        chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
+        now = int(time.time())
+        expiration = now + 3600
+        sig_deadline = now + 3600
+        allowance = cast_call(l1_rpc, permit2, "allowance(address,address,address)(uint160,uint48,uint48)", borrower, weth, vault)
+        nonce = int(allowance.splitlines()[2].split()[0])
+        sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline, BORROWER_PK)
+
+        maturity = now + 7 * 24 * 3600
+        params = f"({weth},1000000000000000000,{maturity},1500000000000000000000,1500000000)"
+        permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
+
+        l2_recipient = cast_call(l1_rpc, vault, "l2Recipient()(address)").splitlines()[0].strip()
+        bridge_fee = int(cast_call(l1_rpc, vault, "estimateBridgeFees(address,address,uint256)(uint256)", weth, l2_recipient, str(10**18)).split()[0])
+        lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+        l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", weth).splitlines()[0].strip()
+        subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
+        default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
+        quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
+        lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", quote_msg, default_opts)).group(0))
+
+        tx = cast_send(
+            l1_rpc,
+            vault,
+            "createDepositWithPermit((address,uint256,uint256,uint256,uint256),((address,uint160,uint48,uint48),address,uint256),bytes)",
+            params,
+            permit_arg,
+            sig,
+            value=str(bridge_fee + lz_fee),
+            private_key=BORROWER_PK,
+        )
+        return {"tx": tx, "loanId": next_loan, "fundMode": fund_mode, "borrower": borrower, "bridgeFee": bridge_fee, "lzFee": lz_fee}
+
+    step("create_deposit_with_permit", do_deposit)
+    step("relay_l1_to_l2_exact", lambda: relay_exact_lz_packet(l1_rpc, l2_rpc, out["steps"][-1]["result"]["tx"]))
+    step("simulate_socket_finalized", lambda: _ensure_socket_finalized_for_guid(l2_rpc, receiver, out["steps"][-1]["result"]["guid"]))
+    step("fund_l2_receiver_for_deposit", lambda: _ensure_receiver_asset_balance_for_guid(l2_rpc, receiver, out["steps"][-2]["result"]["guid"]))
+    step("grant_tsa_signer", lambda: _ensure_tsa_signer(l2_rpc, l2a["l2Tsa"], receiver))
+
+    def run_l2_keeper_once():
+        base = (ROOT / ".env.l2.testnet").read_text()
+        tmpdir = Path(tempfile.mkdtemp(prefix="e2e-l2-"))
+        tmp = tmpdir / ".env.l2.fork"
+        state = tmpdir / "keeper_l2_state.json"
+        tmp.write_text(base + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
+
+        env = dict(os.environ)
+        env.update({"NO_COLOR": "1", "CLICOLOR": "0", "TERM": "dumb"})
+        p = subprocess.run(
+            ["uv", "run", "python", str(ROOT / "ops/management/l2_keeper_handle_messages.py"), str(tmp), "--state-file", str(state), "--once", "--broadcast", "--private-key", ANVIL_PK0, "--json"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(f"l2 keeper failed ({p.returncode}): {p.stderr.strip()}\n{p.stdout}")
+        return _parse_keeper_output(p.stdout)
+
+    step("l2_keeper_handle_deposit", run_l2_keeper_once)
+
+    def relay_l2_ack_to_l1():
+        k = out["steps"][-1]["result"]
+        handled = k.get("handled", []) if isinstance(k, dict) else []
+        sent = [h for h in handled if isinstance(h, dict) and h.get("status") == "sent" and h.get("tx")]
+        if sent:
+            ack_tx = sent[0]["tx"]
+        else:
+            hashes = k.get("txHashes", []) if isinstance(k, dict) else []
+            if not hashes:
+                raise RuntimeError(f"no ack tx found in keeper output: {json.dumps(k)}")
+            ack_tx = hashes[-1]
+        return relay_exact_lz_packet(l2_rpc, l1_rpc, ack_tx)
+
+    step("relay_l2_to_l1_exact", relay_l2_ack_to_l1)
+
+    def verify_expected_state():
+        loan_id = int(out["steps"][1]["result"]["loanId"])
+        l1_to_l2_guid = out["steps"][2]["result"]["guid"]
+        l2_to_l1_guid = out["steps"][7]["result"]["guid"]
+
+        handled = cast_call(l2_rpc, receiver, "handledMessages(bytes32)(bool)", l1_to_l2_guid).strip().lower()
+        _assert_true("l2 handledMessages guid", handled == "true")
+
+        messenger = l1a["l1Messenger"]
+        msg_raw = cast_call(
+            l1_rpc,
+            messenger,
+            "receivedMessage(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+            l2_to_l1_guid,
+        )
+        m = re.match(r"\((\d+),\s*(\d+)(?:\s*\[[^\]]+\])?,", msg_raw)
+        if not m:
+            raise RuntimeError(f"failed parsing receivedMessage: {msg_raw}")
+        action, msg_loan = int(m.group(1)), int(m.group(2))
+        _assert_true("ack action is DepositConfirmed(3)", action == 3)
+        _assert_true("ack loanId matches", msg_loan == loan_id)
+
+        tmp = Path(tempfile.mkdtemp(prefix="e2e-l1-")) / ".env.l1.fork"
+        tmp.write_text((ROOT / ".env.l1.testnet").read_text() + f"\nRPC_URL={l1_rpc}\nL1_VAULT={vault}\nL1_MESSENGER={messenger}\n")
+        pre = json.loads(
+            run([
+                "uv",
+                "run",
+                "python",
+                str(ROOT / "ops/management/l1_message_preflight.py"),
+                str(tmp),
+                "--json",
+                "--logs-rpc-url",
+                l1_rpc,
+            ]),
+            strict=False,
+        )
+
+        results = pre.get("results", [])
+        mine = [r for r in results if str(r.get("loanId")) == str(loan_id)]
+        _assert_true("preflight contains loan", len(mine) == 1)
+        _assert_true("preflight has pending deposit", bool(mine[0].get("hasPendingDeposit")))
+        _assert_true("preflight not ready to finalize yet", not bool(mine[0].get("readyToFinalize")))
+
+        return {
+            "loanId": loan_id,
+            "l1ToL2Guid": l1_to_l2_guid,
+            "l2ToL1Guid": l2_to_l1_guid,
+            "l2Handled": True,
+            "ackAction": action,
+            "ackLoanId": msg_loan,
+            "preflight": mine[0],
+        }
+
+    step("verify_expected_state", verify_expected_state)
+
+    out["ok"] = True
+    if json_output:
+        print(json.dumps(out, indent=2))
+    else:
+        _print_human_summary(out)
+
+
+if __name__ == "__main__":
+    app()

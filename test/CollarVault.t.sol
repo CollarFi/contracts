@@ -97,6 +97,7 @@ contract CollarVaultTest is Test {
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);
         vault.setRfqSigner(rfqSigner, true);
+        vault.setMaxMandateDuration(uint64(2 days));
 
         // fund liquidity
         usdc.mint(address(this), 1_000_000e6);

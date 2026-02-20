@@ -106,6 +106,7 @@ library CollarVaultShared {
         uint256 maxTotalPrincipal;
         uint256 totalCommittedPrincipal;
         uint256 deriveSubaccountId;
+        uint64 maxMandateDuration;
         uint256 nextLoanId;
         mapping(uint256 => Loan) loans;
         mapping(uint256 => PendingDeposit) pendingDeposits;

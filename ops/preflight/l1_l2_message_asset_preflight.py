@@ -17,6 +17,10 @@ from py_lib.envs import resolve_l1_l2_env_paths  # noqa: E402
 app = typer.Typer(add_completion=False)
 
 
+def _strip_units(value: str) -> str:
+    return value.strip().split()[0]
+
+
 @app.command()
 def main(
     l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
@@ -39,10 +43,12 @@ def main(
     if not asset:
         raise ValueError("missing L1 asset: pass --l1-asset or set WETH_ASSET in L1 env")
 
-    mapped_l2_asset = cast_call(l1["RPC_URL"], vault, "l2MessageAsset(address)(address)", asset, allow_fail=True)
+    mapped_l2_asset_raw = cast_call(l1["RPC_URL"], vault, "l2MessageAsset(address)(address)", asset, allow_fail=True)
+    mapped_l2_asset = _strip_units(mapped_l2_asset_raw) if mapped_l2_asset_raw != "N/A" else "N/A"
     tsa = cast_call(l2["RPC_URL"], receiver, "tsa()(address)", allow_fail=True)
 
     wrapped = "N/A"
+    wrapped_underlying = "N/A"
     if tsa != "N/A":
         base = cast_call(
             l2["RPC_URL"],
@@ -54,8 +60,17 @@ def main(
             lines = [ln.strip() for ln in base.splitlines() if ln.strip()]
             if len(lines) >= 3:
                 wrapped = lines[2]
+                wrapped_underlying_raw = cast_call(
+                    l2["RPC_URL"], wrapped, "wrappedAsset()(address)", allow_fail=True
+                )
+                if wrapped_underlying_raw != "N/A":
+                    wrapped_underlying = _strip_units(wrapped_underlying_raw)
 
-    ok = mapped_l2_asset != "N/A" and wrapped != "N/A" and mapped_l2_asset.lower() == wrapped.lower()
+    ok = (
+        mapped_l2_asset != "N/A"
+        and wrapped_underlying != "N/A"
+        and mapped_l2_asset.lower() == wrapped_underlying.lower()
+    )
     out = {
         "vault": vault,
         "receiver": receiver,
@@ -63,11 +78,12 @@ def main(
         "l1Asset": asset,
         "mappedL2MessageAsset": mapped_l2_asset,
         "tsaWrappedDepositAsset": wrapped,
+        "tsaWrappedUnderlyingAsset": wrapped_underlying,
         "ok": ok,
     }
 
     if json_out:
-        print(json.dumps(out, indent=2))
+        typer.echo(json.dumps(out, indent=2))
         return
 
     icon = "[green]OK[/green]" if ok else "[red]MISMATCH[/red]"
@@ -77,8 +93,9 @@ def main(
     print(f"  L1 asset: {asset}")
     print(f"  mapped L2 message asset: {mapped_l2_asset}")
     print(f"  TSA wrappedDepositAsset: {wrapped}")
+    print(f"  TSA wrapped underlying asset: {wrapped_underlying}")
     if not ok:
-        print("  hint: setL2MessageAsset(l1Asset, tsaWrappedDepositAsset) on L1 vault")
+        print("  hint: setL2MessageAsset(l1Asset, wrappedDepositAsset.wrappedAsset()) on L1 vault")
 
 
 if __name__ == "__main__":

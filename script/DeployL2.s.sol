@@ -11,7 +11,6 @@ import {CollarTSAReceiver} from "../src/bridge/CollarTSAReceiver.sol";
 import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
 import {ICollarLoanStore} from "../src/interfaces/ICollarLoanStore.sol";
 import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol";
-import {SocketMessageTrackerMock} from "../src/mocks/SocketMessageTrackerMock.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
 import {BaseTSA} from "v2-matching/src/tokenizedSubaccounts/BaseTSA.sol";
@@ -49,7 +48,7 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 ///
 /// Optional:
 /// - LZ_ENDPOINT (address)            (if omitted, deploys a placeholder mock endpoint)
-/// - SOCKET_TRACKER (address)         (if omitted, deploys SocketMessageTrackerMock)
+/// - SOCKET_TRACKER (address)         (required; real socket message tracker)
 /// - LOAN_STORE (address)             (if omitted, deploys CollarLoanStore)
 /// - TSA_PROXY (address)              (if omitted, deploys ERC1967 proxy)
 /// - TSA_IMPLEMENTATION (address)     (if omitted and TSA_PROXY not provided, deploys CollarTSA implementation)
@@ -118,7 +117,7 @@ contract DeployL2 is Script {
         address l1Vault = vm.envOr("L1_VAULT", address(0));
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
-        address socketTracker = vm.envOr("SOCKET_TRACKER", address(0));
+        address socketTracker = vm.envAddress("SOCKET_TRACKER");
         address loanStoreAddr = vm.envOr("LOAN_STORE", address(0));
 
         address tsaProxyAddr = vm.envOr("TSA_PROXY", address(0));
@@ -134,10 +133,6 @@ contract DeployL2 is Script {
 
         if (lzEndpoint == address(0)) {
             lzEndpoint = address(new LZEndpointV2Mock());
-        }
-
-        if (socketTracker == address(0)) {
-            socketTracker = address(new SocketMessageTrackerMock());
         }
 
         if (loanStoreAddr == address(0)) {

@@ -17,6 +17,7 @@ import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
 import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
 import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
+import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
 import {ICollarLoanStore} from "../interfaces/ICollarLoanStore.sol";
@@ -67,6 +68,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_RfqModuleNotSet();
     error CTR_RfqTradeNotConfirmed();
     error CTR_InvalidSubaccount();
+    error CTR_InvalidAsset();
     error CTR_ReturnAlreadyRequested();
     error CTR_ReturnAlreadyCompleted();
     error CTR_ReturnNotRequested();
@@ -415,8 +417,12 @@ contract CollarTSAReceiver is AccessControl, OApp {
         ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
         (, address depositModule,,,,) = tsa.getCollarTSAAddresses();
         (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
+        address underlyingDepositAsset = address(IERC20BasedAsset(wrappedDepositAsset).wrappedAsset());
+        if (message.asset != underlyingDepositAsset) {
+            revert CTR_InvalidAsset();
+        }
 
-        IERC20(message.asset).safeTransfer(address(tsa), message.amount);
+        IERC20(underlyingDepositAsset).safeTransfer(address(tsa), message.amount);
 
         IDepositModule.DepositData memory depositData = IDepositModule.DepositData({
             amount: message.amount, asset: wrappedDepositAsset, managerForNewAccount: address(0)

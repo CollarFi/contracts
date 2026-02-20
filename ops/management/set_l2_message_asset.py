@@ -18,6 +18,10 @@ from py_lib.l2_discovery import resolve_l2_wrapped_asset_from_tsa  # noqa: E402
 app = typer.Typer(add_completion=False)
 
 
+def _strip_units(value: str) -> str:
+    return value.strip().split()[0]
+
+
 @app.command()
 def main(
     l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
@@ -49,9 +53,9 @@ def main(
     if not l1_asset or not l2_asset:
         raise ValueError("set --l1-asset and provide --l2-asset or L2 TSA must be resolvable")
 
-    current = cast_call(rpc_url, vault, "l2MessageAsset(address)(address)", l1_asset, allow_fail=True)
-    allowed = cast_call(rpc_url, vault, "collateralAllowed(address)(bool)", l1_asset, allow_fail=True)
-    scale = cast_call(rpc_url, vault, "strikeScale(address)(uint256)", l1_asset, allow_fail=True)
+    current = _strip_units(cast_call(rpc_url, vault, "l2MessageAsset(address)(address)", l1_asset, allow_fail=True))
+    allowed = _strip_units(cast_call(rpc_url, vault, "collateralAllowed(address)(bool)", l1_asset, allow_fail=True)).lower()
+    scale = _strip_units(cast_call(rpc_url, vault, "strikeScale(address)(uint256)", l1_asset, allow_fail=True))
     needs_update = current.lower() != l2_asset.lower()
 
     tx = None

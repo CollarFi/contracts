@@ -8,6 +8,10 @@ from typing import Any
 import typer
 from rich import print
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lz_harness.common import ROOT_DIR, address_to_peer_bytes32, cast_call, load_env, must
 from py_lib.deployments import resolve_addr
 from py_lib.envs import resolve_l1_l2_env_paths
@@ -107,7 +111,7 @@ def _snapshot_side(
             "ok": peer.lower() == expected_peer_b32.lower(),
             "actual": peer,
             "expected": expected_peer_b32,
-            "hint": "Run ops/wire_lz_peers.py --broadcast if mismatch.",
+            "hint": "Run ops/preflight/wire_lz_peers.py --broadcast if mismatch.",
         }
     )
     checks.append(
@@ -314,7 +318,7 @@ def main(
     }
 
     if json_out:
-        print(json.dumps(summary, indent=2))
+        typer.echo(json.dumps(summary, indent=2))
         return
 
     icon = "[green]OK[/green]" if summary["ok"] else "[red]ISSUES FOUND[/red]"
