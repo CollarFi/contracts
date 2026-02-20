@@ -14,6 +14,7 @@ import sys
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR / "ops"))
 from lz_harness.common import load_env, run  # noqa: E402
+from py_lib.lz import encode_lz_receive_option  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
@@ -56,8 +57,16 @@ def _cast_send(rpc: str, frm: str, to: str, sig: str, *args: str) -> str:
     return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--unlocked", "--from", frm])
 
 
+def _cast_send_pk(rpc: str, to: str, sig: str, *args: str, private_key: str = ANVIL_PK0) -> str:
+    return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key])
+
+
 def _loads_json_relaxed(raw: str) -> dict:
     return json.loads(raw, strict=False)
+
+
+def _peer_bytes32(addr: str) -> str:
+    return "0x" + "00" * 12 + addr.lower().removeprefix("0x")
 
 
 def _grant_role_if_needed(rpc: str, contract: str, role: str, account: str, admin: str) -> None:
@@ -207,6 +216,20 @@ def main(
 
     l1a = _read_addrs(l1_out)
     l2a = _read_addrs(l2_out)
+
+    # Ensure LZ peer wiring + default options are set for fresh fork deploys.
+    l1_messenger = l1a["l1Messenger"]
+    l2_receiver_addr = l2a["l2Receiver"]
+    if l2_eid:
+        _cast_send_pk(l1_rpc, l1_messenger, "setPeer(uint32,bytes32)", l2_eid, _peer_bytes32(l2_receiver_addr))
+    if l1_eid:
+        _cast_send_pk(l2_rpc, l2_receiver_addr, "setPeer(uint32,bytes32)", l1_eid, _peer_bytes32(l1_messenger))
+
+    receive_gas = int(l1e.get("LZ_RECEIVE_GAS") or l2e.get("LZ_RECEIVE_GAS") or "200000")
+    receive_value = int(l1e.get("LZ_RECEIVE_VALUE") or l2e.get("LZ_RECEIVE_VALUE") or "0")
+    default_options = encode_lz_receive_option(receive_gas, receive_value)
+    _cast_send_pk(l1_rpc, l1_messenger, "setDefaultOptions(bytes)", default_options)
+    _cast_send_pk(l2_rpc, l2_receiver_addr, "setDefaultOptions(bytes)", default_options)
 
     # refresh envs with concrete deployed addresses
     _write_env(

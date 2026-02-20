@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -159,6 +160,21 @@ def main(
         params = f"({weth},1000000000000000000,{maturity},1500000000000000000000,1500000000)"
         permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
 
+        # Quote exact native value needed: bridge fee + LZ fee.
+        l2_recipient = cast_call(l1_rpc, vault, "l2Recipient()(address)").splitlines()[0].strip()
+        bridge_fee = int(cast_call(l1_rpc, vault, "estimateBridgeFees(address,address,uint256)(uint256)", weth, l2_recipient, str(10**18)).split()[0])
+        lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+        l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", weth).splitlines()[0].strip()
+        subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
+        default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
+        quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
+        lz_fee_raw = cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", quote_msg, default_opts)
+        m = re.search(r"\d+", lz_fee_raw)
+        if not m:
+            raise RuntimeError(f"unable to parse LZ fee from quote: {lz_fee_raw}")
+        lz_fee = int(m.group(0))
+        total_value = bridge_fee + lz_fee
+
         tx = cast_send(
             l1_rpc,
             vault,
@@ -166,10 +182,10 @@ def main(
             params,
             permit_arg,
             sig,
-            value="50000000000000000",
+            value=str(total_value),
             private_key=BORROWER_PK,
         )
-        return {"tx": tx, "loanId": next_loan, "fundMode": fund_mode, "borrower": borrower}
+        return {"tx": tx, "loanId": next_loan, "fundMode": fund_mode, "borrower": borrower, "bridgeFee": bridge_fee, "lzFee": lz_fee}
 
     step("create_deposit_with_permit", do_deposit)
 
