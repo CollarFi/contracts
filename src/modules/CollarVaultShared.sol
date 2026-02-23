@@ -101,6 +101,7 @@ library CollarVaultShared {
         IAllowanceTransfer permit2;
         mapping(address => SocketBridgeConfig) socketBridgeConfigs;
         ILendingAdapter lendingAdapter;
+        address variableLoanPositionImplementation;
         address l2Recipient;
         address treasury;
         uint256 treasuryBps;
@@ -111,6 +112,7 @@ library CollarVaultShared {
         uint64 maxMandateDuration;
         uint256 nextLoanId;
         mapping(uint256 => Loan) loans;
+        mapping(uint256 => address) variableLoanPositions;
         mapping(uint256 => PendingDeposit) pendingDeposits;
         mapping(uint256 => Mandate) mandates;
         mapping(bytes32 => bool) usedBaselineRfqs;

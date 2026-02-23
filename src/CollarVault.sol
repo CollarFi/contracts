@@ -94,6 +94,7 @@ contract CollarVault is
     event BridgeConfigUpdated(address indexed asset, address indexed adapter);
     event L2RecipientUpdated(address indexed recipient);
     event LendingAdapterUpdated(address indexed adapter);
+    event VariableLoanPositionImplementationUpdated(address indexed implementation);
     event SubaccountUpdated(uint256 subaccountId);
     event RfqSignerUpdated(address indexed signer, bool allowed);
     event LZMessengerUpdated(address indexed messenger);
@@ -180,6 +181,16 @@ contract CollarVault is
     function lendingAdapter() external view returns (ILendingAdapter) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.lendingAdapter;
+    }
+
+    function variableLoanPositionImplementation() external view returns (address) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.variableLoanPositionImplementation;
+    }
+
+    function variableLoanPosition(uint256 loanId) external view returns (address) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.variableLoanPositions[loanId];
     }
 
     /// @dev Backward-compatible alias. Prefer lendingAdapter().
@@ -755,6 +766,15 @@ contract CollarVault is
     /// @dev Backward-compatible alias. Prefer setLendingAdapter().
     function setEulerAdapter(ILendingAdapter newAdapter) external onlyRole(PARAMETER_ROLE) {
         setLendingAdapter(newAdapter);
+    }
+
+    function setVariableLoanPositionImplementation(address implementation) external onlyRole(PARAMETER_ROLE) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        if (implementation == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        $.variableLoanPositionImplementation = implementation;
+        emit VariableLoanPositionImplementationUpdated(implementation);
     }
 
     /// @notice Update the Derive subaccount id used for action validation.

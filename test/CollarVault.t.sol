@@ -10,6 +10,7 @@ import {CollarVaultShared} from "../src/modules/CollarVaultShared.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
+import {VariableLoanPosition} from "../src/adapters/VariableLoanPosition.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
 import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
@@ -45,6 +46,7 @@ contract CollarVaultTest is Test {
     CollarVaultFinalizeModule internal finalizeModule;
     CollarVaultSettleModule internal settleModule;
     CollarVaultRolloverModule internal rolloverModule;
+    VariableLoanPosition internal positionImpl;
 
     uint256 internal borrowerKey = 0xB0B0;
     address internal borrower;
@@ -65,6 +67,7 @@ contract CollarVaultTest is Test {
         finalizeModule = new CollarVaultFinalizeModule();
         settleModule = new CollarVaultSettleModule();
         rolloverModule = new CollarVaultRolloverModule();
+        positionImpl = new VariableLoanPosition();
         borrower = vm.addr(borrowerKey);
         rfqSigner = vm.addr(rfqSignerKey);
 
@@ -90,6 +93,7 @@ contract CollarVaultTest is Test {
         vault.setFinalizeModule(address(finalizeModule));
         vault.setSettleModule(address(settleModule));
         vault.setRolloverModule(address(rolloverModule));
+        vault.setVariableLoanPositionImplementation(address(positionImpl));
 
         // Unit-test setup uses same asset on both sides.
         vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));

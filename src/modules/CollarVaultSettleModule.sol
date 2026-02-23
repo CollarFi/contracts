@@ -7,10 +7,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {CollarLZMessages} from "../bridge/CollarLZMessages.sol";
 import {ICollarVaultSettleModule} from "../interfaces/ICollarVaultSettleModule.sol";
+import {IVariableLoanPosition} from "../interfaces/IVariableLoanPosition.sol";
 import {CollarVaultShared} from "./CollarVaultShared.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 contract CollarVaultSettleModule is ICollarVaultSettleModule {
     using SafeERC20 for IERC20;
+    using Clones for address;
     error CV_InvalidState();
     error CV_InvalidInput();
 
@@ -137,15 +140,29 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];
         uint256 totalDue = loan.principal + loan.interestOwed;
-        if ($.lendingAdapter.availableLiquidity(address($.usdc)) < totalDue) {
+
+        address position = $.variableLoanPositions[loanId];
+        if (position == address(0)) {
+            address impl = $.variableLoanPositionImplementation;
+            if (impl == address(0)) revert CV_InvalidInput();
+            position = impl.clone();
+            IVariableLoanPosition(position)
+                .initialize(
+                    address(this), address($.lendingAdapter), loan.borrower, loan.collateralAsset, address($.usdc)
+                );
+            $.variableLoanPositions[loanId] = position;
+        }
+
+        if (IVariableLoanPosition(position).availableLiquidity() < totalDue) {
             return false;
         }
 
         _releaseCommittedPrincipal(loan.principal);
         _releaseReserve(loanId);
-        IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.lendingAdapter), loan.collateralAmount);
-        $.lendingAdapter.depositCollateral(loan.collateralAsset, loan.collateralAmount, address(this));
-        $.lendingAdapter.borrow(address($.usdc), totalDue, address(this), address(this));
+
+        IERC20(loan.collateralAsset).safeIncreaseAllowance(position, loan.collateralAmount);
+        IVariableLoanPosition(position).open(loan.collateralAmount, totalDue, address(this), address(this));
+
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
         if (loan.interestOwed > 0) {
@@ -166,8 +183,11 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         uint256 debt = loan.variableDebt;
         repaid = amount > debt ? debt : amount;
 
-        $.usdc.safeIncreaseAllowance(address($.lendingAdapter), repaid);
-        $.lendingAdapter.repay(address($.usdc), repaid, address(this));
+        address position = $.variableLoanPositions[loanId];
+        if (position == address(0)) revert CV_InvalidState();
+
+        $.usdc.safeIncreaseAllowance(position, repaid);
+        IVariableLoanPosition(position).repay(repaid, address(this));
 
         uint256 remaining = debt - repaid;
         loan.variableDebt = remaining;
@@ -191,7 +211,10 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             revert CV_InvalidInput();
         }
 
-        $.lendingAdapter.withdrawCollateral(loan.collateralAsset, amount, address(this), loan.borrower);
+        address position = $.variableLoanPositions[loanId];
+        if (position == address(0)) revert CV_InvalidState();
+
+        IVariableLoanPosition(position).withdraw(amount, loan.borrower);
         loan.collateralAmount -= amount;
         withdrawn = amount;
         emit VariableCollateralWithdrawn(loanId, amount);
