@@ -256,8 +256,9 @@ sequenceDiagram
 
 - Both options expire OTM. The collateral remains on Derive and is not encumbered.
 - The vault contract bridges the collateral back to L1 via the fast bridge. The L2 receiver sends a `CollateralReturned` message with the Socket `messageId` so L1 can finalize the conversion once the bridge completes.
-- On L1, the collateral is deposited into the Euler V2 market as standard collateral. The borrower may immediately borrow USDC up to a variable rate (subject to Euler's LTV). This variable-rate loan repays the original principal `D`, converting the zero-cost loan to a `VARIABLE` loan.
-- The borrower's position remains liquidatable by Euler if the collateral price drops.
+- On L1, the loan is marked `READY_FOR_VARIABLE` and collateral is parked in `CollarVault` until conversion liquidity is available.
+- Keeper later opens a variable position through a per-loan adapter position contract (1167 clone) controlled by `CollarVault` and repays principal/interest to CLV.
+- The resulting variable position remains market-liquidatable (adapter-specific, e.g., Euler or Morpho).
 
 ```mermaid
 sequenceDiagram
@@ -268,16 +269,19 @@ sequenceDiagram
   participant L2Recv as L2 CollarTSAReceiver
   participant LZ as L1 CollarVaultMessenger
   participant Vault as L1 CollarVault
-  participant Euler as L1 EulerAdapter
+  participant AdapterPos as L1 VariableLoanPosition(loan clone)
   participant Liquidity as L1 CollarLiquidityVault
 
   Keeper->>TSA: signActionData(WithdrawalModule collateral)
   Keeper->>Socket: bridge collateral to L1
   Keeper->>L2Recv: sendCollateralReturned(loanId, amount, socketMessageId)
   L2Recv-->>LZ: send CollateralReturned
-  Keeper->>Vault: settleLoan(loanId, Neutral, lzGuid)
-  Vault->>Euler: depositCollateral + borrow(USDC)
-  Vault->>Liquidity: repay(principal)
+  Keeper->>Vault: convertToVariable(loanId, lzGuid) // marks READY_FOR_VARIABLE
+  loop until adapter liquidity is available
+    Keeper->>Vault: tryConvertReadyLoan(loanId)
+  end
+  Vault->>AdapterPos: open(collateral, debt)
+  Vault->>Liquidity: repay(principal + fixedInterest)
 ```
 
 #### Outcome 3: Call ITM / Take profit (`S_t > K_c`)
@@ -324,12 +328,13 @@ sequenceDiagram
 Since the fast bridge is available for all fund movement, the protocol can remove the dAsset receipts previously proposed for slow bridging. Instead:
 
 - Collateral release: Upon neutral maturity, the collateral is unencumbered on Derive. The executor uses the Withdrawal Module to withdraw the collateral to L2 and bridges it back to L1.
-- Euler deposit: The collateral is deposited into a standard Euler V2 market on L1. The borrower borrows USDC up to the maximum LTV permitted by Euler. The borrowed USDC repays the zero-cost loan principal.
-- Accounting: On neutral expiry conversion, collateral is moved into borrower-owned Euler position and the Vault-side loan is closed; borrower manages the variable position directly in Euler thereafter.
+- Adapter position open: A per-loan `VariableLoanPosition` clone (EIP-1167) is used to interact with the configured lending adapter.
+- Liquidity gate: Keeper retries conversion only when adapter-reported debt-asset liquidity is sufficient.
+- Accounting: On successful open, the zero-cost loan is transitioned to `ACTIVE_VARIABLE`; debt is tracked on L1 and users interact via `CollarVault` facade calls (`repayVariableLoan`, `withdrawVariableCollateral`).
 
 ### 5.4 Rolling a variable loan into a new collar
 
-Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan, withdraw the collateral from Euler, and initiate a new collar loan via the standard origination flow.
+Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan via `CollarVault`, withdraw collateral via `CollarVault`, and initiate a new collar loan via the standard origination flow.
 
 ## 6. Smart Contracts and Interactions
 
@@ -349,8 +354,10 @@ Provides functions:
 - `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
 - `settleLoan(loanId)` - restricted to keeper roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
-- `convertToVariable(loanId)` - borrower/keeper callable after maturity; consumes `CollateralReturned` and marks the loan `READY_FOR_VARIABLE` (collateral parked in L1 vault) if immediate adapter liquidity is not guaranteed.
-- `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and only converts when `lendingAdapter.availableLiquidity(USDC)` is sufficient.
+- `convertToVariable(loanId)` - borrower/keeper callable after maturity; consumes `CollateralReturned` and marks the loan `READY_FOR_VARIABLE` (collateral parked in L1 vault).
+- `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
+- `repayVariableLoan(loanId, amount)` - borrower/keeper callable; repays variable debt via the vault facade.
+- `withdrawVariableCollateral(loanId, amount)` - borrower/keeper callable; withdraws variable-phase collateral via the vault facade.
 - `setMaxTotalPrincipal(max)` - parameter role; caps the total committed principal (pending + active zero-cost loans) to scale TVL gradually.
 
 Exposes events for state changes (`LoanCreated`, `LoanSettled`, etc.).
