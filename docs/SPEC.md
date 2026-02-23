@@ -349,7 +349,8 @@ Provides functions:
 - `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
 - `settleLoan(loanId)` - restricted to keeper roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
-- `convertToVariable(loanId)` - restricted to keeper roles; bridges collateral back and interacts with Euler. Reverts on-chain if `block.timestamp < maturity`.
+- `convertToVariable(loanId)` - borrower/keeper callable after maturity; consumes `CollateralReturned` and marks the loan `READY_FOR_VARIABLE` (collateral parked in L1 vault) if immediate adapter liquidity is not guaranteed.
+- `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and only converts when `lendingAdapter.availableLiquidity(USDC)` is sufficient.
 - `setMaxTotalPrincipal(max)` - parameter role; caps the total committed principal (pending + active zero-cost loans) to scale TVL gradually.
 
 Exposes events for state changes (`LoanCreated`, `LoanSettled`, etc.).
@@ -375,11 +376,13 @@ Exposes functions `borrow(uint256 amount)` and `repay(uint256 amount)` for the v
 
 May cap the total notional per maturity bucket to manage risk.
 
-### 6.4 Euler integration
+### 6.4 Lending adapter integration (Euler-first)
 
-On neutral maturity, the vault contract deposits collateral into Euler V2 as collateral. It then borrows USDC; interest accrues at the variable rate.
+On neutral maturity, collateral is returned to L1 and parked in `CollarVault`. The loan is marked `READY_FOR_VARIABLE`.
 
-When the borrower repays, the vault contract returns the collateral to the borrower and repays the Euler debt.
+Keeper then retries `tryConvertReadyLoan` opportunistically. Conversion succeeds only when the configured lending adapter reports enough debt-asset liquidity (`availableLiquidity(USDC) >= principal + fixedInterest`).
+
+When liquid, the adapter path deposits collateral on behalf of the borrower and borrows USDC to repay CLV principal + fixed interest. If not liquid, the loan remains in `READY_FOR_VARIABLE` until liquidity unlocks.
 
 ### 6.5 Bridging contracts
 
@@ -397,7 +400,12 @@ The RFQ module produces off-chain quotes that inform the keeper’s execution. T
 
 A keeper service must monitor block timestamps and call `settleLoan` once a loan's maturity is reached. It ensures the Derive position is closed and bridging initiated. Settlement uses Derive's official expiry settlement price at maturity (`S_t`).
 
-Monitors for situations such as the bridge being down or fast withdrawal limits reached; in such cases it may delay new originations or enforce variable-rate conversion.
+For neutral outcomes, keeper should:
+1. call `convertToVariable` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
+2. periodically call `tryConvertReadyLoan` for queued loans,
+3. skip gracefully when adapter liquidity is insufficient.
+
+Monitors for situations such as bridge downtime, fast withdrawal limits, or lending-adapter liquidity shortages; in such cases loans remain queued in `READY_FOR_VARIABLE` until constraints clear.
 
 ## 7. Security and Risk Controls
 
