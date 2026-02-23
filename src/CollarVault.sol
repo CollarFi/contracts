@@ -624,7 +624,7 @@ contract CollarVault is
         _delegateTo(module, abi.encodeCall(ICollarVaultRolloverModule.finalizeRollover, (loanId, confirmationGuid)));
     }
 
-    /// @notice Convert a neutral-expiry loan into a variable-rate Euler position.
+    /// @notice Convert a neutral-expiry loan into a variable-rate adapter position managed by this vault.
     function convertToVariable(uint256 loanId, bytes32 lzGuid) external nonReentrant whenNotPaused {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         CollarVaultShared.Loan storage loan = $.loans[loanId];
@@ -654,6 +654,33 @@ contract CollarVault is
         }
         bytes memory ret = _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.tryConvertReadyLoan, (loanId)));
         converted = abi.decode(ret, (bool));
+    }
+
+    /// @notice Repay an active variable loan via the vault; collateral is returned when debt reaches zero.
+    function repayVariableLoan(uint256 loanId, uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 repaid, bool closed)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (msg.sender != loan.borrower && !hasRole(KEEPER_ROLE, msg.sender)) {
+            revert CV_Unauthorized();
+        }
+        if (amount == 0) {
+            revert CV_InvalidInput();
+        }
+
+        $.usdc.safeTransferFrom(msg.sender, address(this), amount);
+
+        address module = $.settleModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret =
+            _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.repayVariableLoan, (loanId, amount)));
+        (repaid, closed) = abi.decode(ret, (uint256, bool));
     }
 
     // (removed) hashQuote: quote-based flow removed.

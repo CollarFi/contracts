@@ -17,6 +17,7 @@ library CollarVaultShared {
         NONE,
         ACTIVE_ZERO_COST,
         READY_FOR_VARIABLE,
+        ACTIVE_VARIABLE,
         CLOSED
     }
 

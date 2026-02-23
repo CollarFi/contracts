@@ -143,18 +143,40 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         _releaseCommittedPrincipal(loan.principal);
         _releaseReserve(loanId);
         IERC20(loan.collateralAsset).safeIncreaseAllowance(address($.lendingAdapter), loan.collateralAmount);
-        $.lendingAdapter.depositCollateral(loan.collateralAsset, loan.collateralAmount, loan.borrower);
-        $.lendingAdapter.borrow(address($.usdc), totalDue, loan.borrower, address(this));
+        $.lendingAdapter.depositCollateral(loan.collateralAsset, loan.collateralAmount, address(this));
+        $.lendingAdapter.borrow(address($.usdc), totalDue, address(this), address(this));
         $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
         $.liquidityVault.repay(loan.principal);
         if (loan.interestOwed > 0) {
             $.usdc.safeTransfer(address($.liquidityVault), loan.interestOwed);
         }
-        loan.state = CollarVaultShared.LoanState.CLOSED;
-        loan.variableDebt = 0;
+        loan.state = CollarVaultShared.LoanState.ACTIVE_VARIABLE;
+        loan.variableDebt = totalDue;
         emit LoanConverted(loanId, totalDue);
-        emit LoanClosed(loanId);
         return true;
+    }
+
+    function repayVariableLoan(uint256 loanId, uint256 amount) external returns (uint256 repaid, bool closed) {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.ACTIVE_VARIABLE) {
+            revert CV_InvalidState();
+        }
+        uint256 debt = loan.variableDebt;
+        repaid = amount > debt ? debt : amount;
+
+        $.usdc.safeIncreaseAllowance(address($.lendingAdapter), repaid);
+        $.lendingAdapter.repay(address($.usdc), repaid, address(this));
+
+        uint256 remaining = debt - repaid;
+        loan.variableDebt = remaining;
+        if (remaining == 0) {
+            $.lendingAdapter
+                .withdrawCollateral(loan.collateralAsset, loan.collateralAmount, address(this), loan.borrower);
+            loan.state = CollarVaultShared.LoanState.CLOSED;
+            emit LoanClosed(loanId);
+            closed = true;
+        }
     }
 
     function _releaseCommittedPrincipal(uint256 amount) internal {

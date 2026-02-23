@@ -1070,7 +1070,53 @@ contract CollarVaultTest is Test {
         assertEq(converted, true);
 
         CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
+        assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.ACTIVE_VARIABLE));
+        assertEq(afterLoan.variableDebt, totalDue);
+    }
+
+    function testBorrowerRepaysVariableLoanViaVaultAndGetsCollateralBack() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9850 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.convertToVariable(loanId, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(address(eulerAdapter), totalDue);
+        eulerAdapter.setLiquidity(address(usdc), totalDue);
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, true);
+
+        usdc.mint(borrower, totalDue);
+        vm.startPrank(borrower);
+        usdc.approve(address(vault), totalDue);
+        vault.repayVariableLoan(loanId, totalDue);
+        vm.stopPrank();
+
+        CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
         assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.CLOSED));
+        assertEq(wbtc.balanceOf(borrower), 1e8);
     }
 
     function testSettleConsumesAndReleasesReserve() public {
