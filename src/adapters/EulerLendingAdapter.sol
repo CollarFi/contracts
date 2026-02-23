@@ -24,6 +24,7 @@ interface IEVaultMinimal {
     function withdraw(uint256 amount, address receiver, address owner) external returns (uint256);
     function borrow(uint256 amount, address receiver) external returns (uint256);
     function repay(uint256 amount, address receiver) external returns (uint256);
+    function cash() external view returns (uint256);
 }
 
 /// @notice Generic lending adapter implementation for Euler Vault Kit (EVC-based).
@@ -120,6 +121,12 @@ contract EulerLendingAdapter is ILendingAdapter, Ownable {
         IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
         IERC20(asset).forceApprove(debtVault, amount);
         evc.call(debtVault, account, 0, abi.encodeCall(IEVaultMinimal.repay, (amount, account)));
+    }
+
+    function availableLiquidity(address debtAsset) external view returns (uint256) {
+        address debtVault = debtVaultOf[debtAsset];
+        if (debtVault == address(0)) return 0;
+        return IEVaultMinimal(debtVault).cash();
     }
 
     function _resolveAccount(address borrower) internal returns (address account) {

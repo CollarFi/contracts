@@ -6,4 +6,5 @@ interface ILendingAdapter {
     function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external;
     function borrow(address asset, uint256 amount, address onBehalfOf, address to) external;
     function repay(address asset, uint256 amount, address onBehalfOf) external;
+    function availableLiquidity(address debtAsset) external view returns (uint256);
 }

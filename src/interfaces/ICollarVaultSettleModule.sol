@@ -4,4 +4,5 @@ pragma solidity ^0.8.20;
 interface ICollarVaultSettleModule {
     function settleLoan(uint256 loanId, uint8 outcome, bytes32 lzGuid) external;
     function convertToVariable(uint256 loanId, bytes32 lzGuid) external;
+    function tryConvertReadyLoan(uint256 loanId) external returns (bool converted);
 }

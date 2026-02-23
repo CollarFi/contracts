@@ -81,6 +81,7 @@ contract CollarVault is
     );
     event LoanSettled(uint256 indexed loanId, CollarVaultShared.SettlementOutcome outcome, uint256 settlementAmount);
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
+    event LoanReadyForVariable(uint256 indexed loanId, uint256 requiredDebt);
     event LoanConverted(uint256 indexed loanId, uint256 variableDebt);
     event LoanClosed(uint256 indexed loanId);
     event TreasuryUpdated(address indexed treasury, uint256 bps);
@@ -636,6 +637,23 @@ contract CollarVault is
             revert CV_InvalidConfig();
         }
         _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.convertToVariable, (loanId, lzGuid)));
+    }
+
+    /// @notice Keeper-triggered retry to convert a READY_FOR_VARIABLE loan once adapter liquidity is sufficient.
+    function tryConvertReadyLoan(uint256 loanId)
+        external
+        nonReentrant
+        whenNotPaused
+        onlyKeeper
+        returns (bool converted)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        address module = $.settleModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret = _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.tryConvertReadyLoan, (loanId)));
+        converted = abi.decode(ret, (bool));
     }
 
     // (removed) hashQuote: quote-based flow removed.

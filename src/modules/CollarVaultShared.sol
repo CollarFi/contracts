@@ -16,6 +16,7 @@ library CollarVaultShared {
     enum LoanState {
         NONE,
         ACTIVE_ZERO_COST,
+        READY_FOR_VARIABLE,
         CLOSED
     }
 

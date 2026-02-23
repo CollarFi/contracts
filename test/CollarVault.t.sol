@@ -998,6 +998,81 @@ contract CollarVaultTest is Test {
         vault.finalizeDepositReturn(loanId, wrongGuid);
     }
 
+    function testConvertToVariableMarksReadyWhenLiquidityMissing() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9700 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.convertToVariable(loanId, guid);
+
+        CollarVaultShared.Loan memory marked = vault.getLoan(loanId);
+        assertEq(uint256(marked.state), uint256(CollarVaultShared.LoanState.READY_FOR_VARIABLE));
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, false);
+
+        CollarVaultShared.Loan memory stillMarked = vault.getLoan(loanId);
+        assertEq(uint256(stillMarked.state), uint256(CollarVaultShared.LoanState.READY_FOR_VARIABLE));
+    }
+
+    function testTryConvertReadyLoanSucceedsWhenLiquidityAvailable() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9800 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.convertToVariable(loanId, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(address(eulerAdapter), totalDue);
+        eulerAdapter.setLiquidity(address(usdc), totalDue);
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, true);
+
+        CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
+        assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.CLOSED));
+    }
+
     function testSettleConsumesAndReleasesReserve() public {
         vault.setOriginationFeeApr(0.1e18);
         uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);

@@ -25,4 +25,8 @@ contract EulerAdapterMock is ILendingAdapter {
     function repay(address asset, uint256 amount, address onBehalfOf) external {
         emit Repay(asset, amount, onBehalfOf);
     }
+
+    function availableLiquidity(address) external pure returns (uint256) {
+        return type(uint256).max;
+    }
 }

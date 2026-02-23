@@ -11,6 +11,7 @@ contract MockEulerAdapter is ILendingAdapter {
 
     mapping(address => mapping(address => uint256)) public collateralBalances;
     mapping(address => uint256) public debts;
+    mapping(address => uint256) public liquidity;
 
     error MEA_InsufficientCollateral();
     error MEA_RepayTooMuch();
@@ -30,6 +31,11 @@ contract MockEulerAdapter is ILendingAdapter {
     }
 
     function borrow(address asset, uint256 amount, address onBehalfOf, address to) external override {
+        uint256 liq = liquidity[asset];
+        if (liq != 0) {
+            require(liq >= amount, "insufficient-liquidity");
+            liquidity[asset] = liq - amount;
+        }
         debts[onBehalfOf] += amount;
         IERC20(asset).safeTransfer(to, amount);
     }
@@ -41,5 +47,16 @@ contract MockEulerAdapter is ILendingAdapter {
         }
         IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
         debts[onBehalfOf] = debt - amount;
+        liquidity[asset] += amount;
+    }
+
+    function setLiquidity(address asset, uint256 amount) external {
+        liquidity[asset] = amount;
+    }
+
+    function availableLiquidity(address debtAsset) external view override returns (uint256) {
+        uint256 liq = liquidity[debtAsset];
+        if (liq != 0) return liq;
+        return IERC20(debtAsset).balanceOf(address(this));
     }
 }
