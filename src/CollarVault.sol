@@ -656,7 +656,7 @@ contract CollarVault is
         converted = abi.decode(ret, (bool));
     }
 
-    /// @notice Repay an active variable loan via the vault; collateral is returned when debt reaches zero.
+    /// @notice Repay an active variable loan via the vault.
     function repayVariableLoan(uint256 loanId, uint256 amount)
         external
         nonReentrant
@@ -681,6 +681,31 @@ contract CollarVault is
         bytes memory ret =
             _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.repayVariableLoan, (loanId, amount)));
         (repaid, closed) = abi.decode(ret, (uint256, bool));
+    }
+
+    /// @notice Withdraw collateral from an active variable loan position via the vault.
+    function withdrawVariableCollateral(uint256 loanId, uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 withdrawn, bool closed)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (msg.sender != loan.borrower && !hasRole(KEEPER_ROLE, msg.sender)) {
+            revert CV_Unauthorized();
+        }
+        if (amount == 0) {
+            revert CV_InvalidInput();
+        }
+
+        address module = $.settleModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret =
+            _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.withdrawVariableCollateral, (loanId, amount)));
+        (withdrawn, closed) = abi.decode(ret, (uint256, bool));
     }
 
     // (removed) hashQuote: quote-based flow removed.

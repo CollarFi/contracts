@@ -28,3 +28,6 @@
 [submodule "lib/v2-core"]
 	path = lib/v2-core
 	url = https://github.com/derivexyz/v2-core
+[submodule "lib/morpho-blue"]
+	path = lib/morpho-blue
+	url = git@github.com:morpho-org/morpho-blue

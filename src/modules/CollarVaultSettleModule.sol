@@ -18,6 +18,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
     event LoanReadyForVariable(uint256 indexed loanId, uint256 requiredDebt);
     event LoanConverted(uint256 indexed loanId, uint256 variableDebt);
+    event VariableCollateralWithdrawn(uint256 indexed loanId, uint256 amount);
     event LoanClosed(uint256 indexed loanId);
 
     function settleLoan(uint256 loanId, uint8 outcomeRaw, bytes32 lzGuid) external {
@@ -170,9 +171,32 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
 
         uint256 remaining = debt - repaid;
         loan.variableDebt = remaining;
-        if (remaining == 0) {
-            $.lendingAdapter
-                .withdrawCollateral(loan.collateralAsset, loan.collateralAmount, address(this), loan.borrower);
+        if (remaining == 0 && loan.collateralAmount == 0) {
+            loan.state = CollarVaultShared.LoanState.CLOSED;
+            emit LoanClosed(loanId);
+            closed = true;
+        }
+    }
+
+    function withdrawVariableCollateral(uint256 loanId, uint256 amount)
+        external
+        returns (uint256 withdrawn, bool closed)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.ACTIVE_VARIABLE) {
+            revert CV_InvalidState();
+        }
+        if (amount > loan.collateralAmount) {
+            revert CV_InvalidInput();
+        }
+
+        $.lendingAdapter.withdrawCollateral(loan.collateralAsset, amount, address(this), loan.borrower);
+        loan.collateralAmount -= amount;
+        withdrawn = amount;
+        emit VariableCollateralWithdrawn(loanId, amount);
+
+        if (loan.variableDebt == 0 && loan.collateralAmount == 0) {
             loan.state = CollarVaultShared.LoanState.CLOSED;
             emit LoanClosed(loanId);
             closed = true;

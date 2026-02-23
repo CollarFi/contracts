@@ -1074,7 +1074,7 @@ contract CollarVaultTest is Test {
         assertEq(afterLoan.variableDebt, totalDue);
     }
 
-    function testBorrowerRepaysVariableLoanViaVaultAndGetsCollateralBack() public {
+    function testBorrowerRepaysAndWithdrawsVariableCollateralViaVault() public {
         uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
         CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
 
@@ -1108,10 +1108,17 @@ contract CollarVaultTest is Test {
         bool converted = vault.tryConvertReadyLoan(loanId);
         assertEq(converted, true);
 
+        uint256 partialRepay = totalDue / 2;
         usdc.mint(borrower, totalDue);
         vm.startPrank(borrower);
         usdc.approve(address(vault), totalDue);
-        vault.repayVariableLoan(loanId, totalDue);
+        vault.repayVariableLoan(loanId, partialRepay);
+
+        uint256 partialWithdraw = loanBefore.collateralAmount / 2;
+        vault.withdrawVariableCollateral(loanId, partialWithdraw);
+
+        vault.repayVariableLoan(loanId, totalDue - partialRepay);
+        vault.withdrawVariableCollateral(loanId, loanBefore.collateralAmount - partialWithdraw);
         vm.stopPrank();
 
         CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);

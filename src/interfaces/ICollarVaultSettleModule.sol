@@ -6,4 +6,7 @@ interface ICollarVaultSettleModule {
     function convertToVariable(uint256 loanId, bytes32 lzGuid) external;
     function tryConvertReadyLoan(uint256 loanId) external returns (bool converted);
     function repayVariableLoan(uint256 loanId, uint256 amount) external returns (uint256 repaid, bool closed);
+    function withdrawVariableCollateral(uint256 loanId, uint256 amount)
+        external
+        returns (uint256 withdrawn, bool closed);
 }
