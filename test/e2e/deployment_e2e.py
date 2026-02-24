@@ -21,6 +21,9 @@ from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_CHAIN_ID, L2_ANVIL_PORT
 
 app = typer.Typer(add_completion=False)
 
+DEFAULT_WETH_SOCKET_VAULT = "0x07e11D1A1543B0D0b91684eb741d1ab7D51ae237"
+DEFAULT_WETH_SOCKET_CONNECTOR = "0x2d7F2B4CEe097F08ed8d30D928A40eB1379071Fe"
+
 
 def _status_mark(ok: bool) -> str:
     return "✅" if ok else "⚠️"
@@ -154,6 +157,8 @@ def main(
     l2_chain_id: int = typer.Option(L2_CHAIN_ID),
     l1_usdc_asset: str = typer.Option("", help="Override L1 USDC_ASSET for deploy env"),
     l1_weth_asset: str = typer.Option("", help="Override L1 WETH_ASSET for deploy env"),
+    weth_socket_vault: str = typer.Option(DEFAULT_WETH_SOCKET_VAULT, help="Override WETH_SOCKET_VAULT for fork deploy env"),
+    weth_socket_connector: str = typer.Option(DEFAULT_WETH_SOCKET_CONNECTOR, help="Override WETH_SOCKET_CONNECTOR for fork deploy env"),
     disable_weth_socket_adapter: bool = typer.Option(False, help="Clear WETH socket adapter envs for fork deploy"),
     derive_registry_profile: str = typer.Option("testnet"),
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
@@ -245,6 +250,11 @@ def main(
         l1_updates["WETH_SOCKET_VAULT"] = "0x0000000000000000000000000000000000000000"
         l1_updates["WETH_SOCKET_BRIDGE"] = "0x0000000000000000000000000000000000000000"
         l1_updates["WETH_SOCKET_CONNECTOR"] = "0x0000000000000000000000000000000000000000"
+    else:
+        if weth_socket_vault:
+            l1_updates["WETH_SOCKET_VAULT"] = weth_socket_vault
+        if weth_socket_connector:
+            l1_updates["WETH_SOCKET_CONNECTOR"] = weth_socket_connector
 
     _write_env(l1e, l1_fork_env, l1_rpc, l1_updates)
     run(
