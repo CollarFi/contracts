@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 
@@ -25,134 +24,101 @@ interface IEVaultMinimal {
     function borrow(uint256 amount, address receiver) external returns (uint256);
     function repay(uint256 amount, address receiver) external returns (uint256);
     function cash() external view returns (uint256);
+    function debtOf(address account) external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function convertToAssets(uint256 shares) external view returns (uint256);
 }
 
-/// @notice Generic lending adapter implementation for Euler Vault Kit (EVC-based).
-/// @dev Borrowers must authorize this adapter as EVC operator on at least one supported subaccount.
-contract EulerLendingAdapter is ILendingAdapter, Ownable {
+/// @notice Single-market Euler adapter: fixed collateral asset + fixed debt asset.
+/// @dev Uses only subaccount 0 (`account = onBehalfOf`) and requires this adapter to be EVC operator for account.
+contract EulerLendingAdapter is ILendingAdapter {
     using SafeERC20 for IERC20;
 
     error ELA_InvalidConfig();
     error ELA_UnsupportedAsset();
-    error ELA_NoAuthorizedSubaccount();
+    error ELA_NotOperator();
 
     IEVCMinimal public immutable evc;
+    address public immutable collateralAsset;
+    address public immutable collateralVault;
+    address public immutable debtAsset;
+    address public immutable debtVault;
 
-    mapping(address => address) public collateralVaultOf;
-    mapping(address => address) public debtVaultOf;
-    mapping(address => address) public selectedAccountOf;
-    uint8[] public subaccountCandidates;
-
-    event CollateralVaultConfigured(address indexed asset, address indexed vault);
-    event DebtVaultConfigured(address indexed asset, address indexed vault);
-    event SubaccountCandidatesUpdated(uint8[] candidates);
-    event BorrowerAccountSelected(address indexed borrower, address indexed account, uint8 subaccountId);
-
-    constructor(address evc_, address owner_) Ownable(owner_) {
-        if (evc_ == address(0) || owner_ == address(0)) revert ELA_InvalidConfig();
+    constructor(
+        address evc_,
+        address collateralAsset_,
+        address collateralVault_,
+        address debtAsset_,
+        address debtVault_
+    ) {
+        if (
+            evc_ == address(0) || collateralAsset_ == address(0) || collateralVault_ == address(0)
+                || debtAsset_ == address(0) || debtVault_ == address(0)
+        ) revert ELA_InvalidConfig();
         evc = IEVCMinimal(evc_);
-        subaccountCandidates.push(0);
-        subaccountCandidates.push(1);
-        subaccountCandidates.push(2);
-        subaccountCandidates.push(3);
-    }
-
-    function setCollateralVault(address asset, address vault) external onlyOwner {
-        if (asset == address(0) || vault == address(0)) revert ELA_InvalidConfig();
-        collateralVaultOf[asset] = vault;
-        emit CollateralVaultConfigured(asset, vault);
-    }
-
-    function setDebtVault(address asset, address vault) external onlyOwner {
-        if (asset == address(0) || vault == address(0)) revert ELA_InvalidConfig();
-        debtVaultOf[asset] = vault;
-        emit DebtVaultConfigured(asset, vault);
-    }
-
-    function setSubaccountCandidates(uint8[] calldata candidates) external onlyOwner {
-        if (candidates.length == 0) revert ELA_InvalidConfig();
-        delete subaccountCandidates;
-        for (uint256 i = 0; i < candidates.length; i++) {
-            subaccountCandidates.push(candidates[i]);
-        }
-        emit SubaccountCandidatesUpdated(candidates);
+        collateralAsset = collateralAsset_;
+        collateralVault = collateralVault_;
+        debtAsset = debtAsset_;
+        debtVault = debtVault_;
     }
 
     function depositCollateral(address asset, uint256 amount, address onBehalfOf) external {
-        address collateralVault = collateralVaultOf[asset];
-        if (collateralVault == address(0)) revert ELA_UnsupportedAsset();
+        if (asset != collateralAsset) revert ELA_UnsupportedAsset();
+        _requireOperator(onBehalfOf);
 
-        address account = _pickAuthorizedAccount(onBehalfOf);
-        selectedAccountOf[onBehalfOf] = account;
-
-        if (!evc.isCollateralEnabled(account, collateralVault)) {
-            evc.enableCollateral(account, collateralVault);
+        if (!evc.isCollateralEnabled(onBehalfOf, collateralVault)) {
+            evc.enableCollateral(onBehalfOf, collateralVault);
         }
 
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(asset).forceApprove(collateralVault, amount);
-        evc.call(collateralVault, account, 0, abi.encodeCall(IEVaultMinimal.deposit, (amount, account)));
+        IERC20(collateralAsset).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(collateralAsset).forceApprove(collateralVault, amount);
+        evc.call(collateralVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.deposit, (amount, onBehalfOf)));
     }
 
     function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external {
-        address collateralVault = collateralVaultOf[asset];
-        if (collateralVault == address(0)) revert ELA_UnsupportedAsset();
+        if (asset != collateralAsset) revert ELA_UnsupportedAsset();
+        _requireOperator(onBehalfOf);
 
-        address account = _resolveAccount(onBehalfOf);
-        evc.call(collateralVault, account, 0, abi.encodeCall(IEVaultMinimal.withdraw, (amount, to, account)));
+        evc.call(collateralVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.withdraw, (amount, to, onBehalfOf)));
     }
 
     function borrow(address asset, uint256 amount, address onBehalfOf, address to) external {
-        address debtVault = debtVaultOf[asset];
-        if (debtVault == address(0)) revert ELA_UnsupportedAsset();
+        if (asset != debtAsset) revert ELA_UnsupportedAsset();
+        _requireOperator(onBehalfOf);
 
-        address account = _resolveAccount(onBehalfOf);
-        if (!evc.isControllerEnabled(account, debtVault)) {
-            evc.enableController(account, debtVault);
+        if (!evc.isControllerEnabled(onBehalfOf, debtVault)) {
+            evc.enableController(onBehalfOf, debtVault);
         }
-        evc.call(debtVault, account, 0, abi.encodeCall(IEVaultMinimal.borrow, (amount, to)));
+        evc.call(debtVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.borrow, (amount, to)));
     }
 
     function repay(address asset, uint256 amount, address onBehalfOf) external {
-        address debtVault = debtVaultOf[asset];
-        if (debtVault == address(0)) revert ELA_UnsupportedAsset();
+        if (asset != debtAsset) revert ELA_UnsupportedAsset();
+        _requireOperator(onBehalfOf);
 
-        address account = _resolveAccount(onBehalfOf);
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(asset).forceApprove(debtVault, amount);
-        evc.call(debtVault, account, 0, abi.encodeCall(IEVaultMinimal.repay, (amount, account)));
+        IERC20(debtAsset).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(debtAsset).forceApprove(debtVault, amount);
+        evc.call(debtVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.repay, (amount, onBehalfOf)));
     }
 
-    function availableLiquidity(address debtAsset) external view returns (uint256) {
-        address debtVault = debtVaultOf[debtAsset];
-        if (debtVault == address(0)) return 0;
+    function availableLiquidity(address debtAsset_) external view returns (uint256) {
+        if (debtAsset_ != debtAsset) return 0;
         return IEVaultMinimal(debtVault).cash();
     }
 
-    function _resolveAccount(address borrower) internal returns (address account) {
-        account = selectedAccountOf[borrower];
-        if (account == address(0) || !evc.isAccountOperatorAuthorized(account, address(this))) {
-            account = _pickAuthorizedAccount(borrower);
-            selectedAccountOf[borrower] = account;
-        }
+    function currentDebt(address debtAsset_, address onBehalfOf) external view returns (uint256) {
+        if (debtAsset_ != debtAsset) return 0;
+        return IEVaultMinimal(debtVault).debtOf(onBehalfOf);
     }
 
-    function _pickAuthorizedAccount(address borrower) internal returns (address account) {
-        uint8 selectedSubId = 0;
-        for (uint256 i = 0; i < subaccountCandidates.length; i++) {
-            uint8 subId = subaccountCandidates[i];
-            address candidate = _subaccount(borrower, subId);
-            if (evc.isAccountOperatorAuthorized(candidate, address(this))) {
-                account = candidate;
-                selectedSubId = subId;
-                break;
-            }
-        }
-        if (account == address(0)) revert ELA_NoAuthorizedSubaccount();
-        emit BorrowerAccountSelected(borrower, account, selectedSubId);
+    function currentCollateral(address collateralAsset_, address onBehalfOf) external view returns (uint256) {
+        if (collateralAsset_ != collateralAsset) return 0;
+        IEVaultMinimal v = IEVaultMinimal(collateralVault);
+        uint256 shares = v.balanceOf(onBehalfOf);
+        return v.convertToAssets(shares);
     }
 
-    function _subaccount(address owner, uint8 subaccountId) internal pure returns (address) {
-        return address(uint160(owner) ^ uint160(subaccountId));
+    function _requireOperator(address onBehalfOf) internal view {
+        if (!evc.isAccountOperatorAuthorized(onBehalfOf, address(this))) revert ELA_NotOperator();
     }
 }

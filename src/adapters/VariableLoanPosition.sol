@@ -15,6 +15,10 @@ contract VariableLoanPosition is IVariableLoanPosition {
 
     bool public initialized;
     address public vault;
+
+    constructor() {
+        initialized = true;
+    }
     address public borrower;
     address public collateralAsset;
     address public debtAsset;
@@ -63,5 +67,13 @@ contract VariableLoanPosition is IVariableLoanPosition {
 
     function availableLiquidity() external view returns (uint256) {
         return adapter.availableLiquidity(debtAsset);
+    }
+
+    function currentDebt() external view returns (uint256) {
+        return adapter.currentDebt(debtAsset, address(this));
+    }
+
+    function currentCollateral() external view returns (uint256) {
+        return adapter.currentCollateral(collateralAsset, address(this));
     }
 }

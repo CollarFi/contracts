@@ -59,4 +59,13 @@ contract MockEulerAdapter is ILendingAdapter {
         if (liq != 0) return liq;
         return IERC20(debtAsset).balanceOf(address(this));
     }
+
+    function currentDebt(address debtAsset, address onBehalfOf) external view override returns (uint256) {
+        debtAsset;
+        return debts[onBehalfOf];
+    }
+
+    function currentCollateral(address collateralAsset, address onBehalfOf) external view override returns (uint256) {
+        return collateralBalances[onBehalfOf][collateralAsset];
+    }
 }

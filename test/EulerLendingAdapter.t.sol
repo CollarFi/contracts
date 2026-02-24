@@ -31,14 +31,24 @@ contract MockEVault {
     }
 
     function borrow(uint256 amount, address receiver) external returns (uint256) {
-        debtOf[msg.sender] += amount;
         asset.safeTransfer(receiver, amount);
         return amount;
     }
 
-    function repay(uint256 amount, address receiver) external returns (uint256) {
-        debtOf[receiver] -= amount;
+    function repay(uint256 amount, address) external returns (uint256) {
         return amount;
+    }
+
+    function cash() external view returns (uint256) {
+        return asset.balanceOf(address(this));
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return collateralOf[account];
+    }
+
+    function convertToAssets(uint256 shares) external pure returns (uint256) {
+        return shares;
     }
 }
 
@@ -91,43 +101,27 @@ contract EulerLendingAdapterTest is Test {
         collateralVault = new MockEVault(IERC20(address(collateral)));
         debtVault = new MockEVault(IERC20(address(usdc)));
 
-        adapter = new EulerLendingAdapter(address(evc), address(this));
-        adapter.setCollateralVault(address(collateral), address(collateralVault));
-        adapter.setDebtVault(address(usdc), address(debtVault));
+        adapter = new EulerLendingAdapter(
+            address(evc), address(collateral), address(collateralVault), address(usdc), address(debtVault)
+        );
 
         collateral.mint(address(this), 10 ether);
         collateral.approve(address(adapter), type(uint256).max);
         usdc.mint(address(debtVault), 1_000_000e6);
     }
 
-    function testSelectsFallbackSubaccountWhenZeroIsNotAuthorized() public {
-        address sub0 = _subaccount(borrower, 0);
-        address sub1 = _subaccount(borrower, 1);
-        evc.setOperator(sub0, address(adapter), false);
-        evc.setOperator(sub1, address(adapter), true);
-
-        adapter.depositCollateral(address(collateral), 1 ether, borrower);
-
-        assertEq(adapter.selectedAccountOf(borrower), sub1);
-        assertEq(collateralVault.collateralOf(sub1), 1 ether);
-    }
-
-    function testBorrowUsesSelectedFallbackSubaccount() public {
-        address sub1 = _subaccount(borrower, 1);
-        evc.setOperator(sub1, address(adapter), true);
+    function testUsesSubaccountZeroOnly() public {
+        evc.setOperator(borrower, address(adapter), true);
 
         adapter.depositCollateral(address(collateral), 1 ether, borrower);
         adapter.borrow(address(usdc), 500e6, borrower, receiver);
 
+        assertEq(collateralVault.collateralOf(borrower), 1 ether);
         assertEq(usdc.balanceOf(receiver), 500e6);
     }
 
-    function testRevertsWhenNoAuthorizedSubaccount() public {
-        vm.expectRevert(EulerLendingAdapter.ELA_NoAuthorizedSubaccount.selector);
+    function testRevertsWhenNotAuthorizedOperator() public {
+        vm.expectRevert(EulerLendingAdapter.ELA_NotOperator.selector);
         adapter.depositCollateral(address(collateral), 1 ether, borrower);
-    }
-
-    function _subaccount(address owner, uint8 subaccountId) internal pure returns (address) {
-        return address(uint160(owner) ^ uint160(subaccountId));
     }
 }

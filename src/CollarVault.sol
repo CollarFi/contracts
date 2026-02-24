@@ -193,12 +193,6 @@ contract CollarVault is
         return $.variableLoanPositions[loanId];
     }
 
-    /// @dev Backward-compatible alias. Prefer lendingAdapter().
-    function eulerAdapter() external view returns (ILendingAdapter) {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        return $.lendingAdapter;
-    }
-
     function l2Recipient() external view returns (address) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.l2Recipient;
@@ -761,11 +755,6 @@ contract CollarVault is
         }
         $.lendingAdapter = newAdapter;
         emit LendingAdapterUpdated(address(newAdapter));
-    }
-
-    /// @dev Backward-compatible alias. Prefer setLendingAdapter().
-    function setEulerAdapter(ILendingAdapter newAdapter) external onlyRole(PARAMETER_ROLE) {
-        setLendingAdapter(newAdapter);
     }
 
     function setVariableLoanPositionImplementation(address implementation) external onlyRole(PARAMETER_ROLE) {

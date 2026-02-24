@@ -11,4 +11,6 @@ interface IVariableLoanPosition {
     function repay(uint256 amount, address payer) external;
     function withdraw(uint256 amount, address to) external;
     function availableLiquidity() external view returns (uint256);
+    function currentDebt() external view returns (uint256);
+    function currentCollateral() external view returns (uint256);
 }

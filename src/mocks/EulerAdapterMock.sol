@@ -29,4 +29,12 @@ contract EulerAdapterMock is ILendingAdapter {
     function availableLiquidity(address) external pure returns (uint256) {
         return type(uint256).max;
     }
+
+    function currentDebt(address, address) external pure returns (uint256) {
+        return 0;
+    }
+
+    function currentCollateral(address, address) external pure returns (uint256) {
+        return 0;
+    }
 }
