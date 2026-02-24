@@ -620,8 +620,11 @@ def main(
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
 
     position_addr = _predict_next_create_address(l1_rpc, vault)
+    # Euler fork quirk: collateral deposit path can pull from the position account during EVC call,
+    # so preseed both allowance and minimal balance on the predicted clone address.
     if not _force_set_erc20_allowance_on_anvil(l1_rpc, sepolia_weth, position_addr, collateral_vault, 2**256 - 1):
         raise RuntimeError(f"failed to preseed collateral allowance for variable position {position_addr}")
+    _ensure_token_balance(l1_rpc, sepolia_weth, position_addr, int(p_collateral))
 
     cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
 
