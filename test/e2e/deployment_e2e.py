@@ -152,6 +152,9 @@ def main(
     l2_port: int = typer.Option(L2_ANVIL_PORT),
     l1_chain_id: int = typer.Option(L1_CHAIN_ID),
     l2_chain_id: int = typer.Option(L2_CHAIN_ID),
+    l1_usdc_asset: str = typer.Option("", help="Override L1 USDC_ASSET for deploy env"),
+    l1_weth_asset: str = typer.Option("", help="Override L1 WETH_ASSET for deploy env"),
+    disable_weth_socket_adapter: bool = typer.Option(True, help="Clear WETH socket adapter envs for fork deploy"),
     derive_registry_profile: str = typer.Option("testnet"),
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
     anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),
@@ -229,16 +232,21 @@ def main(
     )
 
     # Deploy fresh L1 wired to the new L2.
-    _write_env(
-        l1e,
-        l1_fork_env,
-        l1_rpc,
-        {
-            "ACCOUNT": "CDPDeployer",
-            "OUTPUT_JSON": str(l1_out.relative_to(ROOT_DIR)),
-            "L2_EID": l2_eid,
-        },
-    )
+    l1_updates = {
+        "ACCOUNT": "CDPDeployer",
+        "OUTPUT_JSON": str(l1_out.relative_to(ROOT_DIR)),
+        "L2_EID": l2_eid,
+    }
+    if l1_usdc_asset:
+        l1_updates["USDC_ASSET"] = l1_usdc_asset
+    if l1_weth_asset:
+        l1_updates["WETH_ASSET"] = l1_weth_asset
+    if disable_weth_socket_adapter:
+        l1_updates["WETH_SOCKET_VAULT"] = "0x0000000000000000000000000000000000000000"
+        l1_updates["WETH_SOCKET_BRIDGE"] = "0x0000000000000000000000000000000000000000"
+        l1_updates["WETH_SOCKET_CONNECTOR"] = "0x0000000000000000000000000000000000000000"
+
+    _write_env(l1e, l1_fork_env, l1_rpc, l1_updates)
     run(
         [
             "uv",
