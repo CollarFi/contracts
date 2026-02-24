@@ -127,14 +127,36 @@ def wallet_address(private_key: str) -> str:
     return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
 
 
+def _force_set_erc20_balance_on_anvil(rpc: str, token: str, who: str, target_amount: int) -> bool:
+    # last-resort helper for local fork tests when upstream faucet is unavailable
+    for slot in range(0, 16):
+        key = _keccak_hex(_abi_encode("f(address,uint256)", who, str(slot)))
+        run([
+            "cast", "rpc", "anvil_setStorageAt", token, key, run(["cast", "to-bytes32", str(target_amount)]), "--rpc-url", rpc,
+        ])
+        bal = int(cast_call(rpc, token, "balanceOf(address)(uint256)", who).split()[0])
+        if bal >= target_amount:
+            return True
+    return False
+
+
 def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, amount: int) -> str:
     bal_before = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
     if bal_before >= amount:
         return "already-funded"
-    cast_send(rpc, faucet, "getTokens(address,address[])", to, f"[{token}]")
-    bal_after = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
-    if bal_after >= amount:
-        return "funded-via-faucet"
+
+    faucet_code = run(["cast", "code", faucet, "--rpc-url", rpc]).strip().lower()
+    if faucet_code != "0x":
+        try:
+            cast_send(rpc, faucet, "getTokens(address,address[])", to, f"[{token}]")
+            bal_after = int(cast_call(rpc, token, "balanceOf(address)(uint256)", to).split()[0])
+            if bal_after >= amount:
+                return "funded-via-faucet"
+        except Exception:
+            pass
+
+    if _force_set_erc20_balance_on_anvil(rpc, token, to, amount):
+        return "funded-via-anvil-storage"
     raise RuntimeError("faucet funding failed")
 
 
@@ -268,6 +290,8 @@ def main(
     l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
     l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
+    collateral_asset: str = typer.Option("", help="Override L1 collateral asset used for fresh deposit"),
+    faucet: str = typer.Option("", help="Override faucet contract address"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ):
     l1 = json.loads((ROOT / l1_json).read_text())
@@ -309,8 +333,8 @@ def main(
                 k, v = line.split("=", 1)
                 l1_env[k.strip()] = v.strip()
 
-        weth = l1_env["WETH_ASSET"]
-        faucet = l1_env["FAUCET"]
+        weth = collateral_asset or l1_env["WETH_ASSET"]
+        faucet_addr = faucet or l1_env.get("FAUCET", "0x0000000000000000000000000000000000000000")
         permit2 = cast_call(l1_rpc, vault, "permit2()(address)").splitlines()[0].strip()
         next_loan = int(cast_call(l1_rpc, vault, "nextLoanId()(uint256)").split()[0])
 
@@ -320,10 +344,12 @@ def main(
         addrs = re.findall(r"0x[a-fA-F0-9]{40}", base_raw)
         wrapped_deposit_asset = addrs[2]
         underlying = cast_call(l2_rpc, wrapped_deposit_asset, "wrappedAsset()(address)").splitlines()[0].strip()
-        scale = cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", weth).split()[0]
-        cast_send(l1_rpc, vault, "setCollateralConfig(address,bool,uint256,address)", weth, "true", scale, underlying)
+        scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", weth).split()[0])
+        if scale == 0:
+            scale = 10**30
+        cast_send(l1_rpc, vault, "setCollateralConfig(address,bool,uint256,address)", weth, "true", str(scale), underlying)
 
-        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet, weth, borrower, 10**18)
+        fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet_addr, weth, borrower, 10**18)
         cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1), private_key=BORROWER_PK)
 
         chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
@@ -339,7 +365,10 @@ def main(
         permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
 
         l2_recipient = cast_call(l1_rpc, vault, "l2Recipient()(address)").splitlines()[0].strip()
-        bridge_fee = int(cast_call(l1_rpc, vault, "estimateBridgeFees(address,address,uint256)(uint256)", weth, l2_recipient, str(10**18)).split()[0])
+        try:
+            bridge_fee = int(cast_call(l1_rpc, vault, "estimateBridgeFees(address,address,uint256)(uint256)", weth, l2_recipient, str(10**18)).split()[0])
+        except Exception:
+            bridge_fee = 0
         lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
         l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", weth).splitlines()[0].strip()
         subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])

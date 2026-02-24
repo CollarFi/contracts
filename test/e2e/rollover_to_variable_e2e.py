@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
 import typer
 
 ROOT = Path(__file__).resolve().parents[2]
+THIS_DIR = Path(__file__).resolve().parent
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+BORROWER_PK = "0x59c6995e998f97a5a0044966f0945382d77ad9e6f3c6f7f8b8d7a0f4f7f9d6f1"
 SEED_USDC_HOLDER = "0xDf4fF02E2dDe3A08590829d7398Cc31B0255bAb5"
-ORACLE_PRICE_SCALE = 10**36
 WETH_PRICE_USD = 3000 * 10**18
 USDC_PRICE_USD = 1 * 10**30
 
@@ -20,8 +22,6 @@ app = typer.Typer(add_completion=False)
 
 
 def run(cmd: list[str]) -> str:
-    import subprocess
-
     p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode != 0:
         raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{p.stderr.strip()}")
@@ -32,12 +32,18 @@ def cast_call(rpc: str, to: str, sig: str, *args: str) -> str:
     return run(["cast", "call", to, sig, *args, "--rpc-url", rpc]).strip()
 
 
-def cast_send_pk(rpc: str, to: str, sig: str, *args: str, private_key: str = ANVIL_PK0) -> str:
-    return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key])
+def cast_send_pk(rpc: str, to: str, sig: str, *args: str, private_key: str = ANVIL_PK0, value: str | None = None) -> str:
+    cmd = ["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key]
+    if value:
+        cmd += ["--value", value]
+    return run(cmd)
 
 
-def cast_send_from(rpc: str, frm: str, to: str, sig: str, *args: str) -> str:
-    return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--unlocked", "--from", frm])
+def cast_send_from(rpc: str, frm: str, to: str, sig: str, *args: str, value: str | None = None) -> str:
+    cmd = ["cast", "send", to, sig, *args, "--rpc-url", rpc, "--unlocked", "--from", frm]
+    if value:
+        cmd += ["--value", value]
+    return run(cmd)
 
 
 def _print_step(ok: bool, text: str) -> None:
@@ -82,19 +88,16 @@ def _set_eth_balance(rpc: str, who: str, wei_hex: str = "0x3635C9ADC5DEA00000") 
     run(["cast", "rpc", "anvil_setBalance", who, wei_hex, "--rpc-url", rpc])
 
 
-def _deploy_fixed_oracle(rpc: str, price: int) -> str:
-    out = run([
-        "forge",
-        "create",
-        "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock",
-        "--rpc-url",
-        rpc,
-        "--private-key",
-        ANVIL_PK0,
+def _deploy_contract(rpc: str, contract: str, *ctor_args: str) -> str:
+    cmd = [
+        "forge", "create", contract,
+        "--rpc-url", rpc,
+        "--private-key", ANVIL_PK0,
         "--broadcast",
-        "--constructor-args",
-        str(price),
-    ])
+    ]
+    if ctor_args:
+        cmd += ["--constructor-args", *ctor_args]
+    out = run(cmd)
     return _extract_address_from_forge_create(out)
 
 
@@ -106,22 +109,12 @@ def _create_evault(rpc: str, factory: str, implementation: str, asset: str, orac
 
 
 def _configure_vault_basics(rpc: str, vault: str) -> None:
-    # ensure hooks are disabled for plain deposit/borrow paths in this synthetic E2E setup
     cast_send_pk(rpc, vault, "setHookConfig(address,uint32)", "0x0000000000000000000000000000000000000000", "0")
-    # no caps for this synthetic e2e setup
     cast_send_pk(rpc, vault, "setCaps(uint16,uint16)", "0", "0")
 
 
 def _set_ltv(rpc: str, debt_vault: str, collateral_vault: str, borrow_ltv_bps: int = 8500, liq_ltv_bps: int = 9000) -> None:
-    cast_send_pk(
-        rpc,
-        debt_vault,
-        "setLTV(address,uint16,uint16,uint32)",
-        collateral_vault,
-        str(borrow_ltv_bps),
-        str(liq_ltv_bps),
-        "0",
-    )
+    cast_send_pk(rpc, debt_vault, "setLTV(address,uint16,uint16,uint32)", collateral_vault, str(borrow_ltv_bps), str(liq_ltv_bps), "0")
 
 
 def _seed_usdc_liquidity(rpc: str, usdc: str, debt_vault: str, amount: int) -> None:
@@ -130,12 +123,59 @@ def _seed_usdc_liquidity(rpc: str, usdc: str, debt_vault: str, amount: int) -> N
     cast_send_from(rpc, SEED_USDC_HOLDER, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0)
 
 
+def _run_fresh_loan_flow(l1_json: Path, l2_json: Path, l1_rpc: str, l2_rpc: str, collateral_asset: str) -> dict:
+    out = run([
+        "uv", "run", "python", str(ROOT / "test/e2e/fresh_loan_flow.py"),
+        "--l1-json", str(l1_json),
+        "--l2-json", str(l2_json),
+        "--l1-rpc", l1_rpc,
+        "--l2-rpc", l2_rpc,
+        "--collateral-asset", collateral_asset,
+        "--json",
+    ])
+    return json.loads(out)
+
+
+def _borrower_address() -> str:
+    return run(["cast", "wallet", "address", "--private-key", BORROWER_PK]).strip()
+
+
+def _sign_no_prefix(digest_hex: str, private_key: str) -> str:
+    return run(["cast", "wallet", "sign", "--no-hash", "--private-key", private_key, digest_hex]).strip()
+
+
+def _abi_encode(sig: str, *args: str) -> str:
+    return run(["cast", "abi-encode", sig, *args]).strip()
+
+
+def _inject_lz_message(l1_rpc: str, messenger: str, guid: str, message_payload: str) -> None:
+    endpoint = cast_call(l1_rpc, messenger, "endpoint()(address)").splitlines()[0].strip()
+    _set_eth_balance(l1_rpc, endpoint)
+    sender_b32 = "0x" + "00" * 12 + ANVIL_ADDR0[2:]
+    cast_send_from(
+        l1_rpc,
+        endpoint,
+        messenger,
+        "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
+        f"(1234,{sender_b32},1)",
+        guid,
+        message_payload,
+        "0x0000000000000000000000000000000000000000",
+        "0x",
+    )
+
+
+def _set_time(rpc: str, ts: int) -> None:
+    run(["cast", "rpc", "evm_setNextBlockTimestamp", hex(ts), "--rpc-url", rpc])
+    run(["cast", "rpc", "evm_mine", "--rpc-url", rpc])
+
+
 @app.command()
 def main(
     l1_json: Path = typer.Option(Path("deployments/11155111/l1-e2e.json")),
     l2_json: Path = typer.Option(Path("deployments/901/l2-e2e.json")),
     l1_rpc: str = typer.Option("http://127.0.0.1:10111"),
-    l2_rpc: str = typer.Option("http://127.0.0.1:10019"),
+    l2_rpc: str = typer.Option("http://127.0.0.1:10119"),
     sepolia_usdc: str = typer.Option("0x565810cbfa3cf1390963e5afa2fb953795686339"),
     sepolia_weth: str = typer.Option("0xe67abda0d43f7ac8f37876bbf00d1dfadbb93aaa"),
     usdc_seed: int = typer.Option(200_000 * 10**6),
@@ -154,56 +194,121 @@ def main(
 
     l1_path = ROOT / l1_json
     l2_path = ROOT / l2_json
-    if not l1_path.exists() or not l2_path.exists():
-        _print_step(False, "Missing deployment artifacts for Sepolia/Derive pairing")
-        raise SystemExit(1)
-
     l1 = _load_json(l1_path).get("addrs", _load_json(l1_path))
     l2 = _load_json(l2_path).get("addrs", _load_json(l2_path))
-    _print_step(True, f"Loaded deployments: L1 vault={l1.get('l1Vault')} L2 receiver={l2.get('l2Receiver')}")
+    vault = l1["l1Vault"]
+    messenger = l1["l1Messenger"]
+    _print_step(True, f"Loaded deployments: L1 vault={vault} L2 receiver={l2.get('l2Receiver')}")
 
-    # 1) Deploy fixed-price oracles for synthetic test markets.
-    weth_oracle = _deploy_fixed_oracle(l1_rpc, WETH_PRICE_USD)
-    usdc_oracle = _deploy_fixed_oracle(l1_rpc, USDC_PRICE_USD)
-    _print_step(True, f"Deployed fixed oracles (WETH={weth_oracle}, USDC={usdc_oracle})")
-
-    # 2) Create EVaults for requested assets with hardcoded-price oracles.
+    weth_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(WETH_PRICE_USD))
+    usdc_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(USDC_PRICE_USD))
     collateral_vault = _create_evault(l1_rpc, factory, implementation, sepolia_weth, weth_oracle, sepolia_usdc)
     debt_vault = _create_evault(l1_rpc, factory, implementation, sepolia_usdc, usdc_oracle, sepolia_usdc)
-    _print_step(True, f"Created EVaults (collateral={collateral_vault}, debt={debt_vault})")
-
     _configure_vault_basics(l1_rpc, collateral_vault)
     _configure_vault_basics(l1_rpc, debt_vault)
-    _print_step(True, "Configured EVault basics (hooks off, caps open)")
-
-    # 3) Allow borrowing USDC against WETH at 85% LTV.
     _set_ltv(l1_rpc, debt_vault, collateral_vault, 8500, 9000)
-    _print_step(True, "Configured debt EVault LTV (borrow=85%, liquidation=90%)")
-
-    # 4) Seed debt-vault liquidity from provided holder.
     _seed_usdc_liquidity(l1_rpc, sepolia_usdc, debt_vault, usdc_seed)
-    _print_step(True, f"Seeded USDC liquidity in debt EVault ({usdc_seed} units)")
+    _print_step(True, "Bootstrapped EVaults/oracles/liquidity")
 
-    # TODO(next): wire adapter + run neutral rollover/conversion assertions.
+    adapter = _deploy_contract(
+        l1_rpc,
+        "src/adapters/EulerLendingAdapter.sol:EulerLendingAdapter",
+        evc,
+        sepolia_weth,
+        collateral_vault,
+        sepolia_usdc,
+        debt_vault,
+    )
+    position_impl = _deploy_contract(l1_rpc, "src/adapters/VariableLoanPosition.sol:VariableLoanPosition")
+    cast_send_pk(l1_rpc, vault, "setLendingAdapter(address)", adapter)
+    cast_send_pk(l1_rpc, vault, "setVariableLoanPositionImplementation(address)", position_impl)
+    _print_step(True, f"Wired adapter={adapter} and positionImpl={position_impl}")
+
+    flow = _run_fresh_loan_flow(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
+    if not flow.get("ok"):
+        raise RuntimeError("fresh_loan_flow failed")
+    verify = next((s.get("result") for s in flow.get("steps", []) if s.get("step") == "verify_expected_state"), None)
+    if not isinstance(verify, dict):
+        raise RuntimeError("fresh_loan_flow verify result missing")
+    loan_id = int(verify["loanId"])
+    deposit_guid = verify["l2ToL1Guid"]
+    _print_step(True, f"Created pending loan via fresh flow (loanId={loan_id})")
+
+    borrower = _borrower_address()
+    pending_raw = cast_call(l1_rpc, vault, "pendingDeposits(uint256)((address,address,uint256,uint256,uint256,uint256))", str(loan_id))
+    m = re.search(r"\((0x[a-fA-F0-9]{40}),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", pending_raw)
+    if not m:
+        raise RuntimeError(f"failed to parse pending: {pending_raw}")
+    p_borrower, p_asset, p_collateral, p_maturity, p_put, p_borrow = m.groups()
+    if p_borrower.lower() != borrower.lower() or p_asset.lower() != sepolia_weth.lower():
+        raise RuntimeError("pending deposit does not match expected borrower/asset")
+
+    now_ts = int(run(["cast", "block", "latest", "--rpc-url", l1_rpc]).split("timestamp            ")[1].splitlines()[0].strip())
+    rfq_expiry = now_ts + 3600
+    mandate_deadline = now_ts + 1800
+    rfq_tuple = f"({loan_id},{borrower},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{p_borrow},{int(p_put)+1},{0},{rfq_expiry})"
+    rfq_hash = cast_call(l1_rpc, vault, "hashBaselineRfq((uint256,address,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64))(bytes32)", rfq_tuple).splitlines()[0].strip()
+    rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
+    cast_send_pk(
+        l1_rpc,
+        vault,
+        "acceptMandate(uint256,(uint256,address,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64),bytes,uint64)",
+        str(loan_id),
+        rfq_tuple,
+        rfq_sig,
+        str(mandate_deadline),
+        private_key=BORROWER_PK,
+        value=str(10**17),
+    )
+    _print_step(True, "Accepted mandate on L1")
+
+    subaccount_id = cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0]
+    trade_data = _abi_encode("f(uint256,uint256,uint64,int256)", str(int(p_put) + 1), str(p_put), str(p_maturity), "0")
+    trade_msg = _abi_encode(
+        "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+        f"(5,{loan_id},0x0000000000000000000000000000000000000000,0,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,{trade_data})",
+    )
+    trade_guid = "0x" + format(10_000_000 + loan_id, "064x")
+    _inject_lz_message(l1_rpc, messenger, trade_guid, trade_msg)
+
+    cast_send_pk(l1_rpc, vault, "finalizeLoan(uint256,bytes32,bytes32)", str(loan_id), deposit_guid, trade_guid)
+    _print_step(True, "Finalized loan to ACTIVE_ZERO_COST")
+
+    maturity = int(p_maturity)
+    _set_time(l1_rpc, maturity + 1)
+    collat_msg = _abi_encode(
+        "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+        f"(4,{loan_id},{sepolia_weth},{p_collateral},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)",
+    )
+    collat_guid = "0x" + format(20_000_000 + loan_id, "064x")
+    _inject_lz_message(l1_rpc, messenger, collat_guid, collat_msg)
+
+    cast_send_pk(l1_rpc, vault, "convertToVariable(uint256,bytes32)", str(loan_id), collat_guid)
+    converted = cast_call(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id)).strip().lower()
+    if converted != "true":
+        raise RuntimeError("tryConvertReadyLoan returned false")
+
+    loan_raw = cast_call(l1_rpc, vault, "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)", str(loan_id))
+    if ", 4," not in loan_raw and ",4," not in loan_raw:
+        raise RuntimeError(f"loan not ACTIVE_VARIABLE: {loan_raw}")
+    _print_step(True, "Converted to ACTIVE_VARIABLE")
+
     out = {
-        "status": "evault-bootstrap-complete",
-        "l1Vault": l1.get("l1Vault"),
-        "l2Receiver": l2.get("l2Receiver"),
-        "evc": evc,
+        "status": "success",
+        "loanId": loan_id,
+        "depositGuid": deposit_guid,
+        "tradeGuid": trade_guid,
+        "collateralGuid": collat_guid,
+        "adapter": adapter,
+        "positionImplementation": position_impl,
         "collateralVault": collateral_vault,
         "debtVault": debt_vault,
-        "wethOracle": weth_oracle,
-        "usdcOracle": usdc_oracle,
     }
-    p = Path(tempfile.mkdtemp(prefix="rollover-var-e2e-")) / "bootstrap.json"
+    p = Path(tempfile.mkdtemp(prefix="rollover-var-e2e-")) / "result.json"
     p.write_text(json.dumps(out, indent=2))
-    _print_step(True, f"Bootstrap artifact written: {p}")
+    _print_step(True, f"Result artifact written: {p}")
 
-    print("\nResult: PARTIAL_SUCCESS (EVault bootstrap complete)")
-
-
-if __name__ == "__main__":
-    app()
+    print("\nResult: SUCCESS")
 
 
 if __name__ == "__main__":
