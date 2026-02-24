@@ -154,7 +154,7 @@ def main(
     l2_chain_id: int = typer.Option(L2_CHAIN_ID),
     l1_usdc_asset: str = typer.Option("", help="Override L1 USDC_ASSET for deploy env"),
     l1_weth_asset: str = typer.Option("", help="Override L1 WETH_ASSET for deploy env"),
-    disable_weth_socket_adapter: bool = typer.Option(True, help="Clear WETH socket adapter envs for fork deploy"),
+    disable_weth_socket_adapter: bool = typer.Option(False, help="Clear WETH socket adapter envs for fork deploy"),
     derive_registry_profile: str = typer.Option("testnet"),
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
     anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),

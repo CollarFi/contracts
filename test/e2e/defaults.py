@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-L1_CHAIN_ID = 421614
+L1_CHAIN_ID = 11155111
 L2_CHAIN_ID = 901
 
 L1_ANVIL_PORT = 10018

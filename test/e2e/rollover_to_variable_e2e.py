@@ -88,6 +88,17 @@ def _set_eth_balance(rpc: str, who: str, wei_hex: str = "0x3635C9ADC5DEA00000") 
     run(["cast", "rpc", "anvil_setBalance", who, wei_hex, "--rpc-url", rpc])
 
 
+def _has_code(rpc: str, addr: str) -> bool:
+    return run(["cast", "code", addr, "--rpc-url", rpc]).strip().lower() != "0x"
+
+
+def _require_code(rpc: str, addr: str, label: str) -> None:
+    if not _has_code(rpc, addr):
+        raise RuntimeError(
+            f"missing code for {label} at {addr} on {rpc}; switch L1 fork URL to Sepolia source with Euler deployment (e.g. https://sepolia.gateway.tenderly.co)"
+        )
+
+
 def _deploy_contract(rpc: str, contract: str, *ctor_args: str) -> str:
     cmd = [
         "forge", "create", contract,
@@ -117,7 +128,34 @@ def _set_ltv(rpc: str, debt_vault: str, collateral_vault: str, borrow_ltv_bps: i
     cast_send_pk(rpc, debt_vault, "setLTV(address,uint16,uint16,uint32)", collateral_vault, str(borrow_ltv_bps), str(liq_ltv_bps), "0")
 
 
+def _keccak_hex(hex_data: str) -> str:
+    return run(["cast", "keccak", hex_data]).splitlines()[0].strip()
+
+
+def _abi_encode(sig: str, *args: str) -> str:
+    return run(["cast", "abi-encode", sig, *args]).strip()
+
+
+def _force_set_erc20_balance_on_anvil(rpc: str, token: str, who: str, target_amount: int) -> bool:
+    for slot in range(0, 16):
+        key = _keccak_hex(_abi_encode("f(address,uint256)", who, str(slot)))
+        run([
+            "cast", "rpc", "anvil_setStorageAt", token, key, run(["cast", "to-bytes32", str(target_amount)]), "--rpc-url", rpc,
+        ])
+        bal = int(cast_call(rpc, token, "balanceOf(address)(uint256)", who).split()[0])
+        if bal >= target_amount:
+            return True
+    return False
+
+
 def _seed_usdc_liquidity(rpc: str, usdc: str, debt_vault: str, amount: int) -> None:
+    if amount <= 0:
+        return
+    if _force_set_erc20_balance_on_anvil(rpc, usdc, ANVIL_ADDR0, amount):
+        cast_send_pk(rpc, usdc, "approve(address,uint256)", debt_vault, str(amount), private_key=ANVIL_PK0)
+        cast_send_pk(rpc, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0, private_key=ANVIL_PK0)
+        return
+
     _set_eth_balance(rpc, SEED_USDC_HOLDER)
     cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", debt_vault, str(amount))
     cast_send_from(rpc, SEED_USDC_HOLDER, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0)
@@ -142,10 +180,6 @@ def _borrower_address() -> str:
 
 def _sign_no_prefix(digest_hex: str, private_key: str) -> str:
     return run(["cast", "wallet", "sign", "--no-hash", "--private-key", private_key, digest_hex]).strip()
-
-
-def _abi_encode(sig: str, *args: str) -> str:
-    return run(["cast", "abi-encode", sig, *args]).strip()
 
 
 def _inject_lz_message(l1_rpc: str, messenger: str, guid: str, message_payload: str) -> None:
@@ -176,9 +210,9 @@ def main(
     l2_json: Path = typer.Option(Path("deployments/901/l2-e2e.json")),
     l1_rpc: str = typer.Option("http://127.0.0.1:10111"),
     l2_rpc: str = typer.Option("http://127.0.0.1:10119"),
-    sepolia_usdc: str = typer.Option("0x565810cbfa3cf1390963e5afa2fb953795686339"),
-    sepolia_weth: str = typer.Option("0xe67abda0d43f7ac8f37876bbf00d1dfadbb93aaa"),
-    usdc_seed: int = typer.Option(200_000 * 10**6),
+    sepolia_usdc: str = typer.Option("0x8537307810fC40F4073A12a38554D4Ff78EfFf41"),
+    sepolia_weth: str = typer.Option("0x565810cbfa3Cf1390963E5aFa2fB953795686339"),
+    usdc_seed: int = typer.Option(0),
 ):
     print("=== collar.fi rollover-to-variable e2e ===")
 
@@ -190,6 +224,13 @@ def main(
     evc = core["evc"]
     factory = core["eVaultFactory"]
     implementation = core["eVaultImplementation"]
+    protocol_config = core["protocolConfig"]
+    _require_code(l1_rpc, evc, "Euler EVC")
+    _require_code(l1_rpc, factory, "Euler eVaultFactory")
+    _require_code(l1_rpc, implementation, "Euler eVaultImplementation")
+    _require_code(l1_rpc, protocol_config, "Euler protocolConfig")
+    _require_code(l1_rpc, sepolia_weth, "Sepolia WETH collateral")
+    _require_code(l1_rpc, sepolia_usdc, "Sepolia USDC debt")
     _print_step(True, f"Euler core loaded (evc={evc}, factory={factory})")
 
     l1_path = ROOT / l1_json
