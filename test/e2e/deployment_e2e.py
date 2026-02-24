@@ -21,7 +21,7 @@ from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_CHAIN_ID, L2_ANVIL_PORT
 
 app = typer.Typer(add_completion=False)
 
-DEFAULT_WETH_SOCKET_VAULT = "0x07e11D1A1543B0D0b91684eb741d1ab7D51ae237"
+DEFAULT_WETH_SOCKET_VAULT = "0xd9cb39b5ad36c6d2ec4e8d5337b62a1c1b71bacc"
 DEFAULT_WETH_SOCKET_CONNECTOR = "0x2d7F2B4CEe097F08ed8d30D928A40eB1379071Fe"
 
 
@@ -251,6 +251,9 @@ def main(
         l1_updates["WETH_SOCKET_BRIDGE"] = "0x0000000000000000000000000000000000000000"
         l1_updates["WETH_SOCKET_CONNECTOR"] = "0x0000000000000000000000000000000000000000"
     else:
+        # Force old Socket adapter path in fork e2e unless explicitly disabled.
+        # Keep new-bridge mode off to avoid env contamination from base .env files.
+        l1_updates["WETH_SOCKET_BRIDGE"] = "0x0000000000000000000000000000000000000000"
         if weth_socket_vault:
             l1_updates["WETH_SOCKET_VAULT"] = weth_socket_vault
         if weth_socket_connector:
