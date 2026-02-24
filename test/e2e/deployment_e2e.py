@@ -17,12 +17,20 @@ sys.path.insert(0, str(ROOT_DIR / "ops"))
 sys.path.insert(0, str(THIS_DIR))
 from lz_harness.common import load_env, run  # noqa: E402
 from py_lib.lz import encode_lz_receive_option  # noqa: E402
-from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_CHAIN_ID, L2_ANVIL_PORT, L2_ARTIFACT_JSON, L2_CHAIN_ID  # noqa: E402
+from defaults import (  # noqa: E402
+    L1_ANVIL_PORT,
+    L1_ARTIFACT_JSON,
+    L1_CHAIN_ID,
+    L1_COLLATERAL_ASSET,
+    L1_DEBT_ASSET,
+    L1_WETH_SOCKET_CONNECTOR,
+    L1_WETH_SOCKET_VAULT,
+    L2_ANVIL_PORT,
+    L2_ARTIFACT_JSON,
+    L2_CHAIN_ID,
+)
 
 app = typer.Typer(add_completion=False)
-
-DEFAULT_WETH_SOCKET_VAULT = "0xd9cb39b5ad36c6d2ec4e8d5337b62a1c1b71bacc"
-DEFAULT_WETH_SOCKET_CONNECTOR = "0x2d7F2B4CEe097F08ed8d30D928A40eB1379071Fe"
 
 
 def _status_mark(ok: bool) -> str:
@@ -155,10 +163,10 @@ def main(
     l2_port: int = typer.Option(L2_ANVIL_PORT),
     l1_chain_id: int = typer.Option(L1_CHAIN_ID),
     l2_chain_id: int = typer.Option(L2_CHAIN_ID),
-    l1_usdc_asset: str = typer.Option("", help="Override L1 USDC_ASSET for deploy env"),
-    l1_weth_asset: str = typer.Option("", help="Override L1 WETH_ASSET for deploy env"),
-    weth_socket_vault: str = typer.Option(DEFAULT_WETH_SOCKET_VAULT, help="Override WETH_SOCKET_VAULT for fork deploy env"),
-    weth_socket_connector: str = typer.Option(DEFAULT_WETH_SOCKET_CONNECTOR, help="Override WETH_SOCKET_CONNECTOR for fork deploy env"),
+    l1_usdc_asset: str = typer.Option(L1_DEBT_ASSET, help="Override L1 USDC_ASSET for deploy env"),
+    l1_weth_asset: str = typer.Option(L1_COLLATERAL_ASSET, help="Override L1 WETH_ASSET for deploy env"),
+    weth_socket_vault: str = typer.Option(L1_WETH_SOCKET_VAULT, help="Override WETH_SOCKET_VAULT for fork deploy env"),
+    weth_socket_connector: str = typer.Option(L1_WETH_SOCKET_CONNECTOR, help="Override WETH_SOCKET_CONNECTOR for fork deploy env"),
     disable_weth_socket_adapter: bool = typer.Option(False, help="Clear WETH socket adapter envs for fork deploy"),
     derive_registry_profile: str = typer.Option("testnet"),
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),

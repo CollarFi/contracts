@@ -6,11 +6,26 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 
 ROOT = Path(__file__).resolve().parents[2]
 THIS_DIR = Path(__file__).resolve().parent
+
+import sys
+sys.path.insert(0, str(THIS_DIR))
+from defaults import (
+    L1_ANVIL_PORT,
+    L1_ARTIFACT_JSON,
+    L1_COLLATERAL_ASSET,
+    L1_DEBT_ASSET,
+    L1_WETH_SOCKET_CONNECTOR,
+    L1_WETH_SOCKET_VAULT,
+    L2_ANVIL_PORT,
+    L2_ARTIFACT_JSON,
+)
+
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 BORROWER_PK = "0x59c6995e998f97a5a0044966f0945382d77ad9e6f3c6f7f8b8d7a0f4f7f9d6f1"
@@ -19,6 +34,7 @@ WETH_PRICE_USD = 3000 * 10**18
 USDC_PRICE_USD = 1 * 10**30
 
 app = typer.Typer(add_completion=False)
+ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 def run(cmd: list[str]) -> str:
@@ -52,6 +68,139 @@ def _print_step(ok: bool, text: str) -> None:
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text())
+
+
+def _load_addrs(path: Path) -> dict:
+    data = _load_json(path)
+    return data.get("addrs", data)
+
+
+def _extract_local_port(rpc: str) -> int | None:
+    try:
+        parsed = urlparse(rpc)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.hostname not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        return None
+    return parsed.port
+
+
+def _deployment_artifact_issues(
+    l1_path: Path,
+    l2_path: Path,
+    l1_rpc: str,
+    l2_rpc: str,
+    expected_l1_usdc: str,
+) -> tuple[list[str], dict | None, dict | None]:
+    issues: list[str] = []
+    l1 = None
+    l2 = None
+
+    if not l1_path.exists():
+        issues.append(f"missing artifact: {l1_path}")
+    else:
+        try:
+            l1 = _load_addrs(l1_path)
+        except Exception as e:
+            issues.append(f"failed reading {l1_path}: {e}")
+
+    if not l2_path.exists():
+        issues.append(f"missing artifact: {l2_path}")
+    else:
+        try:
+            l2 = _load_addrs(l2_path)
+        except Exception as e:
+            issues.append(f"failed reading {l2_path}: {e}")
+
+    required_l1 = {
+        "l1Vault": "L1 vault",
+        "l1Messenger": "L1 messenger",
+        "l1LiquidityVault": "L1 liquidity vault",
+    }
+    required_l2 = {
+        "l2Receiver": "L2 receiver",
+        "l2Tsa": "L2 TSA",
+    }
+
+    if l1 is not None:
+        for key, label in required_l1.items():
+            addr = l1.get(key, "")
+            if not isinstance(addr, str) or not ADDR_RE.match(addr):
+                issues.append(f"invalid {key} in {l1_path}: {addr}")
+                continue
+            if not _has_code(l1_rpc, addr):
+                issues.append(f"no runtime code for {label} ({addr}) on {l1_rpc}")
+
+        vault = l1.get("l1Vault", "")
+        liquidity_vault = l1.get("l1LiquidityVault", "")
+        if isinstance(vault, str) and ADDR_RE.match(vault) and isinstance(liquidity_vault, str) and ADDR_RE.match(liquidity_vault):
+            try:
+                vault_usdc = cast_call(l1_rpc, vault, "usdc()(address)").splitlines()[0].strip()
+                liquidity_asset = cast_call(l1_rpc, liquidity_vault, "asset()(address)").splitlines()[0].strip()
+                if vault_usdc.lower() != expected_l1_usdc.lower():
+                    issues.append(
+                        f"vault usdc mismatch on {l1_rpc}: expected {expected_l1_usdc}, got {vault_usdc}"
+                    )
+                if liquidity_asset.lower() != expected_l1_usdc.lower():
+                    issues.append(
+                        f"liquidity vault asset mismatch on {l1_rpc}: expected {expected_l1_usdc}, got {liquidity_asset}"
+                    )
+                if vault_usdc.lower() != liquidity_asset.lower():
+                    issues.append(
+                        f"vault/liquidity vault asset mismatch on {l1_rpc}: vault={vault_usdc}, liquidityVault={liquidity_asset}"
+                    )
+            except Exception as e:
+                issues.append(f"failed reading L1 USDC wiring from live deployment: {e}")
+
+    if l2 is not None:
+        for key, label in required_l2.items():
+            addr = l2.get(key, "")
+            if not isinstance(addr, str) or not ADDR_RE.match(addr):
+                issues.append(f"invalid {key} in {l2_path}: {addr}")
+                continue
+            if not _has_code(l2_rpc, addr):
+                issues.append(f"no runtime code for {label} ({addr}) on {l2_rpc}")
+
+    return issues, l1, l2
+
+
+def _run_deployment_e2e(l1_port: int, l2_port: int, sepolia_usdc: str, sepolia_weth: str) -> None:
+    run([
+        "uv", "run", "python", str(ROOT / "test/e2e/deployment_e2e.py"),
+        "--l1-port", str(l1_port),
+        "--l2-port", str(l2_port),
+        "--l1-usdc-asset", sepolia_usdc,
+        "--l1-weth-asset", sepolia_weth,
+        "--weth-socket-vault", L1_WETH_SOCKET_VAULT,
+        "--weth-socket-connector", L1_WETH_SOCKET_CONNECTOR,
+        "--keep-anvil",
+    ])
+
+
+def _ensure_live_deployments(l1_path: Path, l2_path: Path, l1_rpc: str, l2_rpc: str, sepolia_usdc: str, sepolia_weth: str, auto_redeploy: bool) -> tuple[dict, dict, bool]:
+    issues, l1, l2 = _deployment_artifact_issues(l1_path, l2_path, l1_rpc, l2_rpc, sepolia_usdc)
+    if not issues:
+        return l1 or {}, l2 or {}, False
+
+    if not auto_redeploy:
+        raise RuntimeError("deployment artifacts are stale/invalid:\n- " + "\n- ".join(issues))
+
+    l1_port = _extract_local_port(l1_rpc)
+    l2_port = _extract_local_port(l2_rpc)
+    if l1_port is None or l2_port is None:
+        raise RuntimeError(
+            "deployment artifacts are stale/invalid and auto-redeploy requires local RPC URLs "
+            f"(got l1={l1_rpc}, l2={l2_rpc}):\n- " + "\n- ".join(issues)
+        )
+
+    _run_deployment_e2e(l1_port, l2_port, sepolia_usdc, sepolia_weth)
+
+    issues2, l1_after, l2_after = _deployment_artifact_issues(l1_path, l2_path, l1_rpc, l2_rpc, sepolia_usdc)
+    if issues2:
+        raise RuntimeError("deployment_e2e completed but artifacts/runtime still invalid:\n- " + "\n- ".join(issues2))
+    return l1_after or {}, l2_after or {}, True
 
 
 def _extract_address_from_forge_create(out: str) -> str:
@@ -148,17 +297,59 @@ def _force_set_erc20_balance_on_anvil(rpc: str, token: str, who: str, target_amo
     return False
 
 
+def _force_set_erc20_allowance_on_anvil(rpc: str, token: str, owner: str, spender: str, target_amount: int) -> bool:
+    target_b32 = "0x" + int(target_amount).to_bytes(32, "big", signed=False).hex()
+    for slot in range(0, 24):
+        owner_slot = _keccak_hex(_abi_encode("f(address,uint256)", owner, str(slot)))
+        key = _keccak_hex(_abi_encode("f(address,bytes32)", spender, owner_slot))
+        run(["cast", "rpc", "anvil_setStorageAt", token, key, target_b32, "--rpc-url", rpc])
+        allowance = int(cast_call(rpc, token, "allowance(address,address)(uint256)", owner, spender).split()[0])
+        if allowance >= target_amount:
+            return True
+    return False
+
+
 def _seed_usdc_liquidity(rpc: str, usdc: str, debt_vault: str, amount: int) -> None:
     if amount <= 0:
         return
+
+    cash_before = int(cast_call(rpc, debt_vault, "cash()(uint256)").split()[0])
+    target_cash = cash_before + amount
+
     if _force_set_erc20_balance_on_anvil(rpc, usdc, ANVIL_ADDR0, amount):
         cast_send_pk(rpc, usdc, "approve(address,uint256)", debt_vault, str(amount), private_key=ANVIL_PK0)
         cast_send_pk(rpc, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0, private_key=ANVIL_PK0)
+    else:
+        _set_eth_balance(rpc, SEED_USDC_HOLDER)
+        cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", debt_vault, str(amount))
+        cast_send_from(rpc, SEED_USDC_HOLDER, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0)
+
+    cash_after = int(cast_call(rpc, debt_vault, "cash()(uint256)").split()[0])
+    if cash_after < target_cash:
+        raise RuntimeError(
+            f"failed to seed Euler debt vault cash: target={target_cash}, actual={cash_after}, debtVault={debt_vault}, usdc={usdc}"
+        )
+
+
+def _seed_l1_liquidity_vault(rpc: str, usdc: str, liquidity_vault: str, amount: int) -> None:
+    if amount <= 0:
+        return
+    if _force_set_erc20_balance_on_anvil(rpc, usdc, ANVIL_ADDR0, amount):
+        cast_send_pk(rpc, usdc, "approve(address,uint256)", liquidity_vault, str(amount), private_key=ANVIL_PK0)
+        cast_send_pk(rpc, liquidity_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0, private_key=ANVIL_PK0)
         return
 
     _set_eth_balance(rpc, SEED_USDC_HOLDER)
-    cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", debt_vault, str(amount))
-    cast_send_from(rpc, SEED_USDC_HOLDER, debt_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0)
+    cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", liquidity_vault, str(amount))
+    cast_send_from(rpc, SEED_USDC_HOLDER, liquidity_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0)
+
+
+def _ensure_token_balance(rpc: str, token: str, who: str, amount: int) -> None:
+    current = int(cast_call(rpc, token, "balanceOf(address)(uint256)", who).split()[0])
+    if current >= amount:
+        return
+    if not _force_set_erc20_balance_on_anvil(rpc, token, who, amount):
+        raise RuntimeError(f"failed to top up {token} for {who}: {current} < {amount}")
 
 
 def _run_fresh_loan_flow(l1_json: Path, l2_json: Path, l1_rpc: str, l2_rpc: str, collateral_asset: str) -> dict:
@@ -178,6 +369,15 @@ def _borrower_address() -> str:
     return run(["cast", "wallet", "address", "--private-key", BORROWER_PK]).strip()
 
 
+def _predict_next_create_address(rpc: str, deployer: str) -> str:
+    nonce = int(run(["cast", "nonce", deployer, "--rpc-url", rpc]).split()[0])
+    out = run(["cast", "compute-address", deployer, "--nonce", str(nonce)])
+    m = re.search(r"0x[a-fA-F0-9]{40}", out)
+    if not m:
+        raise RuntimeError(f"failed to parse compute-address output: {out}")
+    return m.group(0)
+
+
 def _sign_no_prefix(digest_hex: str, private_key: str) -> str:
     return run(["cast", "wallet", "sign", "--no-hash", "--private-key", private_key, digest_hex]).strip()
 
@@ -185,13 +385,16 @@ def _sign_no_prefix(digest_hex: str, private_key: str) -> str:
 def _inject_lz_message(l1_rpc: str, messenger: str, guid: str, message_payload: str) -> None:
     endpoint = cast_call(l1_rpc, messenger, "endpoint()(address)").splitlines()[0].strip()
     _set_eth_balance(l1_rpc, endpoint)
-    sender_b32 = "0x" + "00" * 12 + ANVIL_ADDR0[2:]
+    src_eid = int(cast_call(l1_rpc, messenger, "remoteEid()(uint32)").split()[0])
+    sender_b32 = cast_call(l1_rpc, messenger, "peers(uint32)(bytes32)", str(src_eid)).splitlines()[0].strip()
+    if sender_b32.lower() == "0x" + "00" * 32:
+        sender_b32 = "0x" + "00" * 12 + ANVIL_ADDR0[2:]
     cast_send_from(
         l1_rpc,
         endpoint,
         messenger,
         "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
-        f"(1234,{sender_b32},1)",
+        f"({src_eid},{sender_b32},1)",
         guid,
         message_payload,
         "0x0000000000000000000000000000000000000000",
@@ -204,15 +407,32 @@ def _set_time(rpc: str, ts: int) -> None:
     run(["cast", "rpc", "evm_mine", "--rpc-url", rpc])
 
 
+def _ensure_liquidity_vault_role(l1_rpc: str, vault: str) -> None:
+    liquidity_vault = cast_call(l1_rpc, vault, "liquidityVault()(address)").splitlines()[0].strip()
+    vault_role = run(["cast", "keccak", "VAULT_ROLE"]).strip()
+    has = cast_call(l1_rpc, liquidity_vault, "hasRole(bytes32,address)(bool)", vault_role, vault).strip().lower() == "true"
+    if not has:
+        cast_send_pk(l1_rpc, liquidity_vault, "grantRole(bytes32,address)", vault_role, vault)
+
+
+def _ensure_keeper_role(l1_rpc: str, vault: str, keeper: str = ANVIL_ADDR0) -> None:
+    keeper_role = run(["cast", "keccak", "KEEPER_ROLE"]).strip()
+    has = cast_call(l1_rpc, vault, "hasRole(bytes32,address)(bool)", keeper_role, keeper).strip().lower() == "true"
+    if has:
+        return
+    cast_send_pk(l1_rpc, vault, "grantRole(bytes32,address)", keeper_role, keeper)
+
+
 @app.command()
 def main(
-    l1_json: Path = typer.Option(Path("deployments/11155111/l1-e2e.json")),
-    l2_json: Path = typer.Option(Path("deployments/901/l2-e2e.json")),
-    l1_rpc: str = typer.Option("http://127.0.0.1:10111"),
-    l2_rpc: str = typer.Option("http://127.0.0.1:10119"),
-    sepolia_usdc: str = typer.Option("0x8537307810fC40F4073A12a38554D4Ff78EfFf41"),
-    sepolia_weth: str = typer.Option("0x565810cbfa3Cf1390963E5aFa2fB953795686339"),
-    usdc_seed: int = typer.Option(0),
+    l1_json: Path = typer.Option(L1_ARTIFACT_JSON),
+    l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
+    l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
+    l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
+    sepolia_usdc: str = typer.Option(L1_DEBT_ASSET),
+    sepolia_weth: str = typer.Option(L1_COLLATERAL_ASSET),
+    usdc_seed: int = typer.Option(3_000_000_000),
+    auto_redeploy: bool = typer.Option(True, "--auto-redeploy/--no-auto-redeploy"),
 ):
     print("=== collar.fi rollover-to-variable e2e ===")
 
@@ -235,11 +455,25 @@ def main(
 
     l1_path = ROOT / l1_json
     l2_path = ROOT / l2_json
-    l1 = _load_json(l1_path).get("addrs", _load_json(l1_path))
-    l2 = _load_json(l2_path).get("addrs", _load_json(l2_path))
+    l1, l2, redeployed = _ensure_live_deployments(
+        l1_path,
+        l2_path,
+        l1_rpc,
+        l2_rpc,
+        sepolia_usdc,
+        sepolia_weth,
+        auto_redeploy,
+    )
+    if redeployed:
+        _print_step(True, "Detected stale deployment artifacts/runtime; ran deployment_e2e to refresh")
+
     vault = l1["l1Vault"]
     messenger = l1["l1Messenger"]
+    l1_liquidity_vault = l1["l1LiquidityVault"]
     _print_step(True, f"Loaded deployments: L1 vault={vault} L2 receiver={l2.get('l2Receiver')}")
+
+    _ensure_liquidity_vault_role(l1_rpc, vault)
+    _ensure_keeper_role(l1_rpc, vault)
 
     weth_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(WETH_PRICE_USD))
     usdc_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(USDC_PRICE_USD))
@@ -249,6 +483,7 @@ def main(
     _configure_vault_basics(l1_rpc, debt_vault)
     _set_ltv(l1_rpc, debt_vault, collateral_vault, 8500, 9000)
     _seed_usdc_liquidity(l1_rpc, sepolia_usdc, debt_vault, usdc_seed)
+    _seed_l1_liquidity_vault(l1_rpc, sepolia_usdc, l1_liquidity_vault, usdc_seed)
     _print_step(True, "Bootstrapped EVaults/oracles/liquidity")
 
     adapter = _deploy_contract(
@@ -277,29 +512,78 @@ def main(
 
     borrower = _borrower_address()
     pending_raw = cast_call(l1_rpc, vault, "pendingDeposits(uint256)((address,address,uint256,uint256,uint256,uint256))", str(loan_id))
-    m = re.search(r"\((0x[a-fA-F0-9]{40}),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", pending_raw)
+    m = re.search(
+        r"\((0x[a-fA-F0-9]{40}),\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?\)",
+        pending_raw,
+        flags=re.S,
+    )
     if not m:
         raise RuntimeError(f"failed to parse pending: {pending_raw}")
     p_borrower, p_asset, p_collateral, p_maturity, p_put, p_borrow = m.groups()
     if p_borrower.lower() != borrower.lower() or p_asset.lower() != sepolia_weth.lower():
         raise RuntimeError("pending deposit does not match expected borrower/asset")
 
-    now_ts = int(run(["cast", "block", "latest", "--rpc-url", l1_rpc]).split("timestamp            ")[1].splitlines()[0].strip())
+    block_latest = json.loads(run(["cast", "block", "latest", "--rpc-url", l1_rpc, "--json"]))
+    ts_raw = block_latest.get("timestamp")
+    now_ts = int(ts_raw, 0) if isinstance(ts_raw, str) else int(ts_raw)
     rfq_expiry = now_ts + 3600
     mandate_deadline = now_ts + 1800
-    rfq_tuple = f"({loan_id},{borrower},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{p_borrow},{int(p_put)+1},{0},{rfq_expiry})"
-    rfq_hash = cast_call(l1_rpc, vault, "hashBaselineRfq((uint256,address,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64))(bytes32)", rfq_tuple).splitlines()[0].strip()
+    call_strike = int(p_put) + 1
+    max_negative_c = 500_000_000
+    rfq_tuple = (
+        f"({loan_id},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{call_strike},"
+        f"{p_borrow},0,{max_negative_c},{rfq_expiry},{borrower},0)"
+    )
+    rfq_hash = cast_call(
+        l1_rpc,
+        vault,
+        "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
+        rfq_tuple,
+    ).splitlines()[0].strip()
     rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
+
+    lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+    subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
+    default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
+    apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
+    year = 365 * 24 * 3600
+    fixed_interest = ((int(p_borrow) * apr) // 10**18) * (int(p_maturity) - now_ts) // year
+    mandate_data = _abi_encode(
+        "f(address,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
+        borrower,
+        str(call_strike),
+        p_put,
+        "0",
+        str(fixed_interest),
+        str(max_negative_c),
+        p_maturity,
+        str(mandate_deadline),
+    )
+    quote_msg = (
+        f"(6,{loan_id},{sepolia_weth},{p_borrow},{vault},{subaccount_id},"
+        f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
+    )
+    lz_fee = int(re.search(
+        r"\d+",
+        cast_call(
+            l1_rpc,
+            lz_messenger,
+            "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+            quote_msg,
+            default_opts,
+        ),
+    ).group(0))
+
     cast_send_pk(
         l1_rpc,
         vault,
-        "acceptMandate(uint256,(uint256,address,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64),bytes,uint64)",
+        "acceptMandate(uint256,(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64)",
         str(loan_id),
         rfq_tuple,
         rfq_sig,
         str(mandate_deadline),
         private_key=BORROWER_PK,
-        value=str(10**17),
+        value=str(lz_fee),
     )
     _print_step(True, "Accepted mandate on L1")
 
@@ -311,6 +595,14 @@ def main(
     )
     trade_guid = "0x" + format(10_000_000 + loan_id, "064x")
     _inject_lz_message(l1_rpc, messenger, trade_guid, trade_msg)
+
+    # Fresh-flow ACK on fork can carry the L2-side underlying asset; rewrite the cached
+    # DepositConfirmed payload for this guid to match L1 collateral validation in finalize.
+    deposit_confirm_msg = _abi_encode(
+        "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+        f"(3,{loan_id},{sepolia_weth},{p_collateral},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)",
+    )
+    _inject_lz_message(l1_rpc, messenger, deposit_guid, deposit_confirm_msg)
 
     cast_send_pk(l1_rpc, vault, "finalizeLoan(uint256,bytes32,bytes32)", str(loan_id), deposit_guid, trade_guid)
     _print_step(True, "Finalized loan to ACTIVE_ZERO_COST")
@@ -325,13 +617,23 @@ def main(
     _inject_lz_message(l1_rpc, messenger, collat_guid, collat_msg)
 
     cast_send_pk(l1_rpc, vault, "convertToVariable(uint256,bytes32)", str(loan_id), collat_guid)
-    converted = cast_call(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id)).strip().lower()
-    if converted != "true":
-        raise RuntimeError("tryConvertReadyLoan returned false")
+    _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
+
+    position_addr = _predict_next_create_address(l1_rpc, vault)
+    if not _force_set_erc20_allowance_on_anvil(l1_rpc, sepolia_weth, position_addr, collateral_vault, 2**256 - 1):
+        raise RuntimeError(f"failed to preseed collateral allowance for variable position {position_addr}")
+
+    cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
 
     loan_raw = cast_call(l1_rpc, vault, "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)", str(loan_id))
-    if ", 4," not in loan_raw and ",4," not in loan_raw:
-        raise RuntimeError(f"loan not ACTIVE_VARIABLE: {loan_raw}")
+    loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
+    loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+    if loan_state != 3:
+        available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
+        required_debt = int(p_borrow) + fixed_interest
+        raise RuntimeError(
+            f"loan not ACTIVE_VARIABLE (state={loan_state}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
+        )
     _print_step(True, "Converted to ACTIVE_VARIABLE")
 
     out = {
@@ -342,6 +644,7 @@ def main(
         "collateralGuid": collat_guid,
         "adapter": adapter,
         "positionImplementation": position_impl,
+        "positionAddress": position_addr,
         "collateralVault": collateral_vault,
         "debtVault": debt_vault,
     }

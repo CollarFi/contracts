@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 import typer
@@ -15,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 THIS_DIR = Path(__file__).resolve().parent
 import sys
 sys.path.insert(0, str(THIS_DIR))
-from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L2_ANVIL_PORT, L2_ARTIFACT_JSON
+from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_COLLATERAL_ASSET, L2_ANVIL_PORT, L2_ARTIFACT_JSON
 
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -317,7 +316,7 @@ def main(
     l2_json: Path = typer.Option(L2_ARTIFACT_JSON),
     l1_rpc: str = typer.Option(f"http://127.0.0.1:{L1_ANVIL_PORT}"),
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
-    collateral_asset: str = typer.Option("", help="Override L1 collateral asset used for fresh deposit"),
+    collateral_asset: str = typer.Option(L1_COLLATERAL_ASSET, help="Override L1 collateral asset used for fresh deposit"),
     faucet: str = typer.Option("", help="Override faucet contract address"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ):
@@ -363,13 +362,10 @@ def main(
         configured_weth = l1_env["WETH_ASSET"]
         weth = collateral_asset or configured_weth
         if not _has_code(l1_rpc, weth):
-            if collateral_asset and weth.lower() != configured_weth.lower() and _has_code(l1_rpc, configured_weth):
-                weth = configured_weth
-            else:
-                raise RuntimeError(
-                    f"collateral asset has no code on L1 fork: {weth}"
-                    + (f" (configured WETH_ASSET={configured_weth})" if collateral_asset else "")
-                )
+            raise RuntimeError(
+                f"collateral asset has no code on L1 fork: {weth}"
+                + (f" (configured WETH_ASSET={configured_weth})" if collateral_asset else "")
+            )
 
         faucet_addr = faucet or l1_env.get("FAUCET", "0x0000000000000000000000000000000000000000")
         permit2 = cast_call(l1_rpc, vault, "permit2()(address)").splitlines()[0].strip()
@@ -390,7 +386,9 @@ def main(
         cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1), private_key=BORROWER_PK)
 
         chain_id = int(run(["cast", "chain-id", "--rpc-url", l1_rpc]))
-        now = int(time.time())
+        latest = json.loads(run(["cast", "block", "latest", "--rpc-url", l1_rpc, "--json"]))
+        ts_raw = latest.get("timestamp")
+        now = int(ts_raw, 0) if isinstance(ts_raw, str) else int(ts_raw)
         expiration = now + 3600
         sig_deadline = now + 3600
         allowance = cast_call(l1_rpc, permit2, "allowance(address,address,address)(uint160,uint48,uint48)", borrower, weth, vault)
