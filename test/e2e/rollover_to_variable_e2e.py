@@ -616,7 +616,7 @@ def main(
     collat_guid = "0x" + format(20_000_000 + loan_id, "064x")
     _inject_lz_message(l1_rpc, messenger, collat_guid, collat_msg)
 
-    cast_send_pk(l1_rpc, vault, "convertToVariable(uint256,bytes32)", str(loan_id), collat_guid)
+    cast_send_pk(l1_rpc, vault, "settleLoan(uint256,uint8,bytes32)", str(loan_id), "1", collat_guid)
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
 
     predicted_position = _predict_next_create_address(l1_rpc, vault)

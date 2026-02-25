@@ -276,7 +276,7 @@ sequenceDiagram
   Keeper->>Socket: bridge collateral to L1
   Keeper->>L2Recv: sendCollateralReturned(loanId, amount, socketMessageId)
   L2Recv-->>LZ: send CollateralReturned
-  Keeper->>Vault: convertToVariable(loanId, lzGuid) // marks READY_FOR_VARIABLE
+  Keeper->>Vault: settleLoan(loanId, Neutral, lzGuid) // marks READY_FOR_VARIABLE
   loop until adapter liquidity is available
     Keeper->>Vault: tryConvertReadyLoan(loanId)
   end
@@ -353,8 +353,7 @@ Provides functions:
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
 - `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
-- `settleLoan(loanId)` - restricted to keeper roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
-- `convertToVariable(loanId)` - borrower/keeper callable after maturity; consumes `CollateralReturned` and marks the loan `READY_FOR_VARIABLE` (collateral parked in L1 vault).
+- `settleLoan(loanId, outcome, lzGuid)` - restricted to keeper roles; consumes L2 settlement/collateral messages and advances maturity handling. Reverts on-chain if `block.timestamp < maturity`.
 - `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
 - `repayVariableLoan(loanId, amount)` - borrower/keeper callable; repays variable debt via the vault facade.
 - `withdrawVariableCollateral(loanId, amount)` - borrower/keeper callable; withdraws variable-phase collateral via the vault facade.
@@ -408,7 +407,7 @@ The RFQ module produces off-chain quotes that inform the keeper’s execution. T
 A keeper service must monitor block timestamps and call `settleLoan` once a loan's maturity is reached. It ensures the Derive position is closed and bridging initiated. Settlement uses Derive's official expiry settlement price at maturity (`S_t`).
 
 For neutral outcomes, keeper should:
-1. call `convertToVariable` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
+1. call `settleLoan(loanId, Neutral, lzGuid)` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
 2. periodically call `tryConvertReadyLoan` for queued loans,
 3. skip gracefully when adapter liquidity is insufficient.
 
