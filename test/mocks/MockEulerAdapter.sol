@@ -9,63 +9,68 @@ import {ILendingAdapter} from "../../src/interfaces/ILendingAdapter.sol";
 contract MockEulerAdapter is ILendingAdapter {
     using SafeERC20 for IERC20;
 
-    mapping(address => mapping(address => uint256)) public collateralBalances;
+    mapping(address => uint256) public collateralBalances;
     mapping(address => uint256) public debts;
-    mapping(address => uint256) public liquidity;
+    uint256 public liquidity;
+
+    IERC20 public immutable collateralAsset;
+    IERC20 public immutable debtAsset;
 
     error MEA_InsufficientCollateral();
     error MEA_RepayTooMuch();
 
-    function depositCollateral(address asset, uint256 amount, address onBehalfOf) external override {
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        collateralBalances[onBehalfOf][asset] += amount;
+    constructor(address collateralAsset_, address debtAsset_) {
+        collateralAsset = IERC20(collateralAsset_);
+        debtAsset = IERC20(debtAsset_);
     }
 
-    function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external override {
-        uint256 balance = collateralBalances[onBehalfOf][asset];
+    function depositCollateral(uint256 amount, address onBehalfOf) external override {
+        collateralAsset.safeTransferFrom(msg.sender, address(this), amount);
+        collateralBalances[onBehalfOf] += amount;
+    }
+
+    function withdrawCollateral(uint256 amount, address onBehalfOf, address to) external override {
+        uint256 balance = collateralBalances[onBehalfOf];
         if (amount > balance) {
             revert MEA_InsufficientCollateral();
         }
-        collateralBalances[onBehalfOf][asset] = balance - amount;
-        IERC20(asset).safeTransfer(to, amount);
+        collateralBalances[onBehalfOf] = balance - amount;
+        collateralAsset.safeTransfer(to, amount);
     }
 
-    function borrow(address asset, uint256 amount, address onBehalfOf, address to) external override {
-        uint256 liq = liquidity[asset];
-        if (liq != 0) {
-            require(liq >= amount, "insufficient-liquidity");
-            liquidity[asset] = liq - amount;
+    function borrow(uint256 amount, address onBehalfOf, address to) external override {
+        if (liquidity != 0) {
+            require(liquidity >= amount, "insufficient-liquidity");
+            liquidity -= amount;
         }
         debts[onBehalfOf] += amount;
-        IERC20(asset).safeTransfer(to, amount);
+        debtAsset.safeTransfer(to, amount);
     }
 
-    function repay(address asset, uint256 amount, address onBehalfOf) external override {
+    function repay(uint256 amount, address onBehalfOf) external override {
         uint256 debt = debts[onBehalfOf];
         if (amount > debt) {
             revert MEA_RepayTooMuch();
         }
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        debtAsset.safeTransferFrom(msg.sender, address(this), amount);
         debts[onBehalfOf] = debt - amount;
-        liquidity[asset] += amount;
+        liquidity += amount;
     }
 
-    function setLiquidity(address asset, uint256 amount) external {
-        liquidity[asset] = amount;
+    function setLiquidity(uint256 amount) external {
+        liquidity = amount;
     }
 
-    function availableLiquidity(address debtAsset) external view override returns (uint256) {
-        uint256 liq = liquidity[debtAsset];
-        if (liq != 0) return liq;
-        return IERC20(debtAsset).balanceOf(address(this));
+    function availableLiquidity() external view override returns (uint256) {
+        if (liquidity != 0) return liquidity;
+        return debtAsset.balanceOf(address(this));
     }
 
-    function currentDebt(address debtAsset, address onBehalfOf) external view override returns (uint256) {
-        debtAsset;
+    function currentDebt(address onBehalfOf) external view override returns (uint256) {
         return debts[onBehalfOf];
     }
 
-    function currentCollateral(address collateralAsset, address onBehalfOf) external view override returns (uint256) {
-        return collateralBalances[onBehalfOf][collateralAsset];
+    function currentCollateral(address onBehalfOf) external view override returns (uint256) {
+        return collateralBalances[onBehalfOf];
     }
 }

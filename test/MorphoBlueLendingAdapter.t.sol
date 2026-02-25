@@ -132,37 +132,34 @@ contract MorphoBlueLendingAdapterTest is Test {
     }
 
     function testDepositBorrowRepayAndWithdraw() public {
-        adapter.depositCollateral(address(collateral), 1 ether, borrower);
-        assertEq(adapter.currentCollateral(address(collateral), borrower), 1 ether);
+        adapter.depositCollateral(1 ether, borrower);
+        assertEq(adapter.currentCollateral(borrower), 1 ether);
 
-        uint256 availableBefore = adapter.availableLiquidity(address(usdc));
-        adapter.borrow(address(usdc), 500e6, borrower, receiver);
+        uint256 availableBefore = adapter.availableLiquidity();
+        adapter.borrow(500e6, borrower, receiver);
         assertEq(usdc.balanceOf(receiver), 500e6);
-        assertLt(adapter.availableLiquidity(address(usdc)), availableBefore);
+        assertLt(adapter.availableLiquidity(), availableBefore);
 
-        uint256 debt = adapter.currentDebt(address(usdc), borrower);
+        uint256 debt = adapter.currentDebt(borrower);
         usdc.mint(address(this), debt);
         usdc.approve(address(adapter), type(uint256).max);
-        adapter.repay(address(usdc), debt, borrower);
-        assertLe(adapter.currentDebt(address(usdc), borrower), 1);
+        adapter.repay(debt, borrower);
+        assertLe(adapter.currentDebt(borrower), 1);
 
         uint256 before = collateral.balanceOf(receiver);
-        adapter.withdrawCollateral(address(collateral), 1 ether, borrower, receiver);
+        adapter.withdrawCollateral(1 ether, borrower, receiver);
         assertEq(collateral.balanceOf(receiver) - before, 1 ether);
-        assertEq(adapter.currentCollateral(address(collateral), borrower), 0);
+        assertEq(adapter.currentCollateral(borrower), 0);
     }
 
-    function testRevertsOnUnsupportedAsset() public {
-        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_UnsupportedAsset.selector);
-        adapter.depositCollateral(address(usdc), 1, borrower);
+    function testRevertsWhenNotAuthorized() public {
+        address stranger = address(0xD00D);
+        adapter.depositCollateral(1 ether, stranger);
 
-        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_UnsupportedAsset.selector);
-        adapter.borrow(address(collateral), 1, borrower, receiver);
+        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_NotAuthorized.selector);
+        adapter.borrow(1, stranger, receiver);
 
-        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_UnsupportedAsset.selector);
-        adapter.repay(address(collateral), 1, borrower);
-
-        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_UnsupportedAsset.selector);
-        adapter.withdrawCollateral(address(usdc), 1, borrower, receiver);
+        vm.expectRevert(MorphoBlueLendingAdapter.MBLA_NotAuthorized.selector);
+        adapter.withdrawCollateral(1, stranger, receiver);
     }
 }

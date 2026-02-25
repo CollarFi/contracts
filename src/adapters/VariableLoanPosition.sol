@@ -61,30 +61,30 @@ contract VariableLoanPosition is IVariableLoanPosition {
         _ensureAdapterOperatorAuthorization();
         IERC20(collateralAsset).safeTransferFrom(collateralProvider, address(this), collateralAmount);
         IERC20(collateralAsset).safeIncreaseAllowance(address(adapter), collateralAmount);
-        adapter.depositCollateral(collateralAsset, collateralAmount, address(this));
-        adapter.borrow(debtAsset, debtAmount, address(this), debtReceiver);
+        adapter.depositCollateral(collateralAmount, address(this));
+        adapter.borrow(debtAmount, address(this), debtReceiver);
     }
 
     function repay(uint256 amount, address payer) external onlyVault {
         IERC20(debtAsset).safeTransferFrom(payer, address(this), amount);
         IERC20(debtAsset).safeIncreaseAllowance(address(adapter), amount);
-        adapter.repay(debtAsset, amount, address(this));
+        adapter.repay(amount, address(this));
     }
 
     function withdraw(uint256 amount, address to) external onlyVault {
-        adapter.withdrawCollateral(collateralAsset, amount, address(this), to);
+        adapter.withdrawCollateral(amount, address(this), to);
     }
 
     function availableLiquidity() external view returns (uint256) {
-        return adapter.availableLiquidity(debtAsset);
+        return adapter.availableLiquidity();
     }
 
     function currentDebt() external view returns (uint256) {
-        return adapter.currentDebt(debtAsset, address(this));
+        return adapter.currentDebt(address(this));
     }
 
     function currentCollateral() external view returns (uint256) {
-        return adapter.currentCollateral(collateralAsset, address(this));
+        return adapter.currentCollateral(address(this));
     }
 
     function _ensureAdapterOperatorAuthorization() internal {

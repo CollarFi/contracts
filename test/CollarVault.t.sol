@@ -62,7 +62,7 @@ contract CollarVaultTest is Test {
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         bridge = new MockBridge(wbtc);
         adapter = new MockBridgeAdapter();
-        eulerAdapter = new MockEulerAdapter();
+        eulerAdapter = new MockEulerAdapter(address(wbtc), address(usdc));
         messenger = new MockLZMessenger();
         finalizeModule = new CollarVaultFinalizeModule();
         settleModule = new CollarVaultSettleModule();
@@ -1067,7 +1067,7 @@ contract CollarVaultTest is Test {
 
         uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
         usdc.mint(address(eulerAdapter), totalDue);
-        eulerAdapter.setLiquidity(address(usdc), totalDue);
+        eulerAdapter.setLiquidity(totalDue);
 
         vm.prank(keeper);
         bool converted = vault.tryConvertReadyLoan(loanId);
@@ -1106,7 +1106,7 @@ contract CollarVaultTest is Test {
 
         uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
         usdc.mint(address(eulerAdapter), totalDue);
-        eulerAdapter.setLiquidity(address(usdc), totalDue);
+        eulerAdapter.setLiquidity(totalDue);
 
         vm.prank(keeper);
         bool converted = vault.tryConvertReadyLoan(loanId);

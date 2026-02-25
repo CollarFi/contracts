@@ -279,7 +279,15 @@ def _deploy_morpho_market(rpc: str, usdc: str, collateral: str, seed_amount: int
     market = _morpho_market_tuple(usdc, collateral, oracle, irm, MORPHO_LLTV)
     cast_send_pk(rpc, morpho, "createMarket((address,address,address,address,uint256))", market)
 
+    market_id = _morpho_market_id(usdc, collateral, oracle, irm, MORPHO_LLTV)
+
+    def _read_total_supply_assets() -> int:
+        market_state = cast_call(rpc, morpho, "market(bytes32)((uint128,uint128,uint128,uint128,uint128,uint128))", market_id)
+        m_supply = re.search(r"\d+", market_state)
+        return int(m_supply.group(0)) if m_supply else 0
+
     if seed_amount > 0:
+        # Path A: anvil storage-topup + supply from default funded key.
         _ensure_token_balance(rpc, usdc, ANVIL_ADDR0, seed_amount)
         cast_send_pk(rpc, usdc, "approve(address,uint256)", morpho, str(seed_amount), private_key=ANVIL_PK0)
         cast_send_pk(
@@ -294,10 +302,23 @@ def _deploy_morpho_market(rpc: str, usdc: str, collateral: str, seed_amount: int
             private_key=ANVIL_PK0,
         )
 
-    market_id = _morpho_market_id(usdc, collateral, oracle, irm, MORPHO_LLTV)
-    market_state = cast_call(rpc, morpho, "market(bytes32)((uint128,uint128,uint128,uint128,uint128,uint128))", market_id)
-    m_supply = re.search(r"\d+", market_state)
-    total_supply_assets = int(m_supply.group(0)) if m_supply else 0
+        # Path B fallback: impersonate known USDC holder if market still not funded.
+        if _read_total_supply_assets() < seed_amount:
+            _set_eth_balance(rpc, SEED_USDC_HOLDER)
+            cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", morpho, str(seed_amount))
+            cast_send_from(
+                rpc,
+                SEED_USDC_HOLDER,
+                morpho,
+                "supply((address,address,address,address,uint256),uint256,uint256,address,bytes)(uint256,uint256)",
+                market,
+                str(seed_amount),
+                "0",
+                ANVIL_ADDR0,
+                "0x",
+            )
+
+    total_supply_assets = _read_total_supply_assets()
     if total_supply_assets < seed_amount:
         raise RuntimeError(
             f"failed to seed Morpho market liquidity: target={seed_amount}, actualSupply={total_supply_assets}"

@@ -35,7 +35,6 @@ contract EulerLendingAdapter is ILendingAdapter {
     using SafeERC20 for IERC20;
 
     error ELA_InvalidConfig();
-    error ELA_UnsupportedAsset();
     error ELA_NotOperator();
 
     IEVCMinimal public immutable evc;
@@ -62,8 +61,7 @@ contract EulerLendingAdapter is ILendingAdapter {
         debtVault = debtVault_;
     }
 
-    function depositCollateral(address asset, uint256 amount, address onBehalfOf) external {
-        if (asset != collateralAsset) revert ELA_UnsupportedAsset();
+    function depositCollateral(uint256 amount, address onBehalfOf) external {
         _requireOperator(onBehalfOf);
 
         if (!evc.isCollateralEnabled(onBehalfOf, collateralVault)) {
@@ -75,15 +73,13 @@ contract EulerLendingAdapter is ILendingAdapter {
         evc.call(collateralVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.deposit, (amount, onBehalfOf)));
     }
 
-    function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external {
-        if (asset != collateralAsset) revert ELA_UnsupportedAsset();
+    function withdrawCollateral(uint256 amount, address onBehalfOf, address to) external {
         _requireOperator(onBehalfOf);
 
         evc.call(collateralVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.withdraw, (amount, to, onBehalfOf)));
     }
 
-    function borrow(address asset, uint256 amount, address onBehalfOf, address to) external {
-        if (asset != debtAsset) revert ELA_UnsupportedAsset();
+    function borrow(uint256 amount, address onBehalfOf, address to) external {
         _requireOperator(onBehalfOf);
 
         if (!evc.isControllerEnabled(onBehalfOf, debtVault)) {
@@ -92,8 +88,7 @@ contract EulerLendingAdapter is ILendingAdapter {
         evc.call(debtVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.borrow, (amount, to)));
     }
 
-    function repay(address asset, uint256 amount, address onBehalfOf) external {
-        if (asset != debtAsset) revert ELA_UnsupportedAsset();
+    function repay(uint256 amount, address onBehalfOf) external {
         _requireOperator(onBehalfOf);
 
         IERC20(debtAsset).safeTransferFrom(msg.sender, address(this), amount);
@@ -101,18 +96,15 @@ contract EulerLendingAdapter is ILendingAdapter {
         evc.call(debtVault, onBehalfOf, 0, abi.encodeCall(IEVaultMinimal.repay, (amount, onBehalfOf)));
     }
 
-    function availableLiquidity(address debtAsset_) external view returns (uint256) {
-        if (debtAsset_ != debtAsset) return 0;
+    function availableLiquidity() external view returns (uint256) {
         return IEVaultMinimal(debtVault).cash();
     }
 
-    function currentDebt(address debtAsset_, address onBehalfOf) external view returns (uint256) {
-        if (debtAsset_ != debtAsset) return 0;
+    function currentDebt(address onBehalfOf) external view returns (uint256) {
         return IEVaultMinimal(debtVault).debtOf(onBehalfOf);
     }
 
-    function currentCollateral(address collateralAsset_, address onBehalfOf) external view returns (uint256) {
-        if (collateralAsset_ != collateralAsset) return 0;
+    function currentCollateral(address onBehalfOf) external view returns (uint256) {
         IEVaultMinimal v = IEVaultMinimal(collateralVault);
         uint256 shares = v.balanceOf(onBehalfOf);
         return v.convertToAssets(shares);

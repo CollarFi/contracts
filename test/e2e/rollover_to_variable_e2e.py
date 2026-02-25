@@ -619,23 +619,34 @@ def main(
     cast_send_pk(l1_rpc, vault, "convertToVariable(uint256,bytes32)", str(loan_id), collat_guid)
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
 
-    position_addr = _predict_next_create_address(l1_rpc, vault)
+    predicted_position = _predict_next_create_address(l1_rpc, vault)
     # Euler fork quirk: collateral deposit path can pull from the position account during EVC call,
     # so preseed both allowance and minimal balance on the predicted clone address.
-    if not _force_set_erc20_allowance_on_anvil(l1_rpc, sepolia_weth, position_addr, collateral_vault, 2**256 - 1):
-        raise RuntimeError(f"failed to preseed collateral allowance for variable position {position_addr}")
-    _ensure_token_balance(l1_rpc, sepolia_weth, position_addr, int(p_collateral))
+    if not _force_set_erc20_allowance_on_anvil(l1_rpc, sepolia_weth, predicted_position, collateral_vault, 2**256 - 1):
+        raise RuntimeError(f"failed to preseed collateral allowance for variable position {predicted_position}")
+    _ensure_token_balance(l1_rpc, sepolia_weth, predicted_position, int(p_collateral))
 
     cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
 
     loan_raw = cast_call(l1_rpc, vault, "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)", str(loan_id))
     loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
     loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+
     if loan_state != 3:
-        available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
+        # Retry once to absorb occasional fork timing/liquidity propagation flake.
+        cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
+        loan_raw = cast_call(l1_rpc, vault, "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)", str(loan_id))
+        loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
+        loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+
+    position_addr = cast_call(l1_rpc, vault, "variableLoanPosition(uint256)(address)", str(loan_id)).splitlines()[0].strip()
+    if loan_state != 3:
+        available_liquidity = -1
+        if position_addr != "0x0000000000000000000000000000000000000000" and _has_code(l1_rpc, position_addr):
+            available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
         required_debt = int(p_borrow) + fixed_interest
         raise RuntimeError(
-            f"loan not ACTIVE_VARIABLE (state={loan_state}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
+            f"loan not ACTIVE_VARIABLE (state={loan_state}, position={position_addr}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
         )
     _print_step(True, "Converted to ACTIVE_VARIABLE")
 

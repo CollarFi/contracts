@@ -113,8 +113,8 @@ contract EulerLendingAdapterTest is Test {
     function testUsesSubaccountZeroOnly() public {
         evc.setOperator(borrower, address(adapter), true);
 
-        adapter.depositCollateral(address(collateral), 1 ether, borrower);
-        adapter.borrow(address(usdc), 500e6, borrower, receiver);
+        adapter.depositCollateral(1 ether, borrower);
+        adapter.borrow(500e6, borrower, receiver);
 
         assertEq(collateralVault.collateralOf(borrower), 1 ether);
         assertEq(usdc.balanceOf(receiver), 500e6);
@@ -122,6 +122,6 @@ contract EulerLendingAdapterTest is Test {
 
     function testRevertsWhenNotAuthorizedOperator() public {
         vm.expectRevert(EulerLendingAdapter.ELA_NotOperator.selector);
-        adapter.depositCollateral(address(collateral), 1 ether, borrower);
+        adapter.depositCollateral(1 ether, borrower);
     }
 }

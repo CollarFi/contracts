@@ -5,36 +5,36 @@ import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 
 /// @dev Minimal mock for local/fork dev. No real lending occurs.
 contract EulerAdapterMock is ILendingAdapter {
-    event DepositCollateral(address asset, uint256 amount, address onBehalfOf);
-    event WithdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to);
-    event Borrow(address asset, uint256 amount, address onBehalfOf, address to);
-    event Repay(address asset, uint256 amount, address onBehalfOf);
+    event DepositCollateral(uint256 amount, address onBehalfOf);
+    event WithdrawCollateral(uint256 amount, address onBehalfOf, address to);
+    event Borrow(uint256 amount, address onBehalfOf, address to);
+    event Repay(uint256 amount, address onBehalfOf);
 
-    function depositCollateral(address asset, uint256 amount, address onBehalfOf) external {
-        emit DepositCollateral(asset, amount, onBehalfOf);
+    function depositCollateral(uint256 amount, address onBehalfOf) external {
+        emit DepositCollateral(amount, onBehalfOf);
     }
 
-    function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external {
-        emit WithdrawCollateral(asset, amount, onBehalfOf, to);
+    function withdrawCollateral(uint256 amount, address onBehalfOf, address to) external {
+        emit WithdrawCollateral(amount, onBehalfOf, to);
     }
 
-    function borrow(address asset, uint256 amount, address onBehalfOf, address to) external {
-        emit Borrow(asset, amount, onBehalfOf, to);
+    function borrow(uint256 amount, address onBehalfOf, address to) external {
+        emit Borrow(amount, onBehalfOf, to);
     }
 
-    function repay(address asset, uint256 amount, address onBehalfOf) external {
-        emit Repay(asset, amount, onBehalfOf);
+    function repay(uint256 amount, address onBehalfOf) external {
+        emit Repay(amount, onBehalfOf);
     }
 
-    function availableLiquidity(address) external pure returns (uint256) {
+    function availableLiquidity() external pure returns (uint256) {
         return type(uint256).max;
     }
 
-    function currentDebt(address, address) external pure returns (uint256) {
+    function currentDebt(address) external pure returns (uint256) {
         return 0;
     }
 
-    function currentCollateral(address, address) external pure returns (uint256) {
+    function currentCollateral(address) external pure returns (uint256) {
         return 0;
     }
 }

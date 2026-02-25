@@ -18,7 +18,6 @@ contract MorphoBlueLendingAdapter is ILendingAdapter {
     using SharesMathLib for uint256;
 
     error MBLA_InvalidConfig();
-    error MBLA_UnsupportedAsset();
     error MBLA_NotAuthorized();
 
     IMorpho public immutable morpho;
@@ -53,51 +52,41 @@ contract MorphoBlueLendingAdapter is ILendingAdapter {
         marketId = _marketParams().id();
     }
 
-    function depositCollateral(address asset, uint256 amount, address onBehalfOf) external {
-        if (asset != collateralAsset) revert MBLA_UnsupportedAsset();
-
+    function depositCollateral(uint256 amount, address onBehalfOf) external {
         IERC20(collateralAsset).safeTransferFrom(msg.sender, address(this), amount);
         IERC20(collateralAsset).forceApprove(address(morpho), amount);
         morpho.supplyCollateral(_marketParams(), amount, onBehalfOf, "");
     }
 
-    function withdrawCollateral(address asset, uint256 amount, address onBehalfOf, address to) external {
-        if (asset != collateralAsset) revert MBLA_UnsupportedAsset();
+    function withdrawCollateral(uint256 amount, address onBehalfOf, address to) external {
         _requireAuthorized(onBehalfOf);
         morpho.withdrawCollateral(_marketParams(), amount, onBehalfOf, to);
     }
 
-    function borrow(address asset, uint256 amount, address onBehalfOf, address to) external {
-        if (asset != debtAsset) revert MBLA_UnsupportedAsset();
+    function borrow(uint256 amount, address onBehalfOf, address to) external {
         _requireAuthorized(onBehalfOf);
         morpho.borrow(_marketParams(), amount, 0, onBehalfOf, to);
     }
 
-    function repay(address asset, uint256 amount, address onBehalfOf) external {
-        if (asset != debtAsset) revert MBLA_UnsupportedAsset();
-
+    function repay(uint256 amount, address onBehalfOf) external {
         IERC20(debtAsset).safeTransferFrom(msg.sender, address(this), amount);
         IERC20(debtAsset).forceApprove(address(morpho), amount);
         morpho.repay(_marketParams(), amount, 0, onBehalfOf, "");
     }
 
-    function availableLiquidity(address debtAsset_) external view returns (uint256) {
-        if (debtAsset_ != debtAsset) return 0;
+    function availableLiquidity() external view returns (uint256) {
         Market memory m = morpho.market(marketId);
         if (m.totalSupplyAssets <= m.totalBorrowAssets) return 0;
         return uint256(m.totalSupplyAssets) - uint256(m.totalBorrowAssets);
     }
 
-    function currentDebt(address debtAsset_, address onBehalfOf) external view returns (uint256) {
-        if (debtAsset_ != debtAsset) return 0;
-
+    function currentDebt(address onBehalfOf) external view returns (uint256) {
         Position memory p = morpho.position(marketId, onBehalfOf);
         Market memory m = morpho.market(marketId);
         return uint256(p.borrowShares).toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
     }
 
-    function currentCollateral(address collateralAsset_, address onBehalfOf) external view returns (uint256) {
-        if (collateralAsset_ != collateralAsset) return 0;
+    function currentCollateral(address onBehalfOf) external view returns (uint256) {
         Position memory p = morpho.position(marketId, onBehalfOf);
         return uint256(p.collateral);
     }
