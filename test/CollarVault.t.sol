@@ -1026,7 +1026,7 @@ contract CollarVaultTest is Test {
         );
 
         vm.prank(keeper);
-        vault.convertToVariable(loanId, guid);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
 
         CollarVaultShared.Loan memory marked = vault.getLoan(loanId);
         assertEq(uint256(marked.state), uint256(CollarVaultShared.LoanState.READY_FOR_VARIABLE));
@@ -1063,7 +1063,7 @@ contract CollarVaultTest is Test {
         );
 
         vm.prank(keeper);
-        vault.convertToVariable(loanId, guid);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
 
         uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
         usdc.mint(address(eulerAdapter), totalDue);
@@ -1102,7 +1102,7 @@ contract CollarVaultTest is Test {
         );
 
         vm.prank(keeper);
-        vault.convertToVariable(loanId, guid);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
 
         uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
         usdc.mint(address(eulerAdapter), totalDue);

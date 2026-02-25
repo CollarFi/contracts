@@ -629,21 +629,6 @@ contract CollarVault is
         _delegateTo(module, abi.encodeCall(ICollarVaultRolloverModule.finalizeRollover, (loanId, confirmationGuid)));
     }
 
-    /// @notice Convert a neutral-expiry loan into a variable-rate adapter position managed by this vault.
-    function convertToVariable(uint256 loanId, bytes32 lzGuid) external nonReentrant whenNotPaused {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        CollarVaultShared.Loan storage loan = $.loans[loanId];
-        if (msg.sender != loan.borrower && !hasRole(KEEPER_ROLE, msg.sender)) {
-            revert CV_Unauthorized();
-        }
-
-        address module = $.settleModule;
-        if (module == address(0)) {
-            revert CV_InvalidConfig();
-        }
-        _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.convertToVariable, (loanId, lzGuid)));
-    }
-
     /// @notice Keeper-triggered retry to convert a READY_FOR_VARIABLE loan once adapter liquidity is sufficient.
     function tryConvertReadyLoan(uint256 loanId)
         external

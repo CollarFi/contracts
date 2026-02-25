@@ -616,11 +616,9 @@ def main(
     collat_guid = "0x" + format(20_000_000 + loan_id, "064x")
     _inject_lz_message(l1_rpc, messenger, collat_guid, collat_msg)
 
-    cast_send_pk(l1_rpc, vault, "convertToVariable(uint256,bytes32)", str(loan_id), collat_guid)
+    cast_send_pk(l1_rpc, vault, "settleLoan(uint256,uint8,bytes32)", str(loan_id), "1", collat_guid)
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
     cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
-
-    position_addr = cast_call(l1_rpc, vault, "variableLoanPosition(uint256)(address)", str(loan_id)).splitlines()[0].strip()
 
     loan_raw = cast_call(
         l1_rpc,
@@ -630,11 +628,27 @@ def main(
     )
     loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
     loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+
     if loan_state != 3:
-        available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
+        cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
+        loan_raw = cast_call(
+            l1_rpc,
+            vault,
+            "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)",
+            str(loan_id),
+        )
+        loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
+        loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+
+    position_addr = cast_call(l1_rpc, vault, "variableLoanPosition(uint256)(address)", str(loan_id)).splitlines()[0].strip()
+
+    if loan_state != 3:
+        available_liquidity = -1
+        if position_addr != "0x0000000000000000000000000000000000000000" and _has_code(l1_rpc, position_addr):
+            available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
         required_debt = int(p_borrow) + fixed_interest
         raise RuntimeError(
-            f"loan not ACTIVE_VARIABLE (state={loan_state}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
+            f"loan not ACTIVE_VARIABLE (state={loan_state}, position={position_addr}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
         )
     _print_step(True, "Converted to ACTIVE_VARIABLE")
 
