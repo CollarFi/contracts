@@ -62,7 +62,7 @@ contract EulerLendingAdapter is ILendingAdapter {
         debtVault = debtVault_;
     }
 
-    function openSetup(address onBehalfOf) external view returns (address target, bytes memory data) {
+    function openSetupCall(address onBehalfOf) external view returns (address target, bytes memory data) {
         target = address(evc);
         data = abi.encodeCall(IEVCMinimal.setAccountOperator, (onBehalfOf, address(this), true));
     }

@@ -7,7 +7,7 @@ import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 contract EulerAdapterMock is ILendingAdapter {
     event DepositCollateral(uint256 amount, address onBehalfOf);
 
-    function openSetup(address) external pure returns (address target, bytes memory data) {
+    function openSetupCall(address) external pure returns (address target, bytes memory data) {
         target = address(0);
         data = "";
     }

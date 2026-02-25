@@ -80,7 +80,7 @@ contract VariableLoanPosition is IVariableLoanPosition {
     }
 
     function _runOpenSetup() internal {
-        (address target, bytes memory data) = adapter.openSetup(address(this));
+        (address target, bytes memory data) = adapter.openSetupCall(address(this));
         if (target == address(0) || data.length == 0) return;
 
         (bool ok, bytes memory ret) = target.call(data);
