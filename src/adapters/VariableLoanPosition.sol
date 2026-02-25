@@ -7,6 +7,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 import {IVariableLoanPosition} from "../interfaces/IVariableLoanPosition.sol";
 
+interface IEVCOperatorAuth {
+    function setAccountOperator(address account, address operator, bool authorized) external payable;
+}
+
+interface IMorphoOperatorAuth {
+    function isAuthorized(address authorizer, address authorized) external view returns (bool);
+    function setAuthorization(address authorized, bool newIsAuthorized) external;
+}
+
 contract VariableLoanPosition is IVariableLoanPosition {
     using SafeERC20 for IERC20;
 
@@ -49,6 +58,7 @@ contract VariableLoanPosition is IVariableLoanPosition {
         external
         onlyVault
     {
+        _ensureAdapterOperatorAuthorization();
         IERC20(collateralAsset).safeTransferFrom(collateralProvider, address(this), collateralAmount);
         IERC20(collateralAsset).safeIncreaseAllowance(address(adapter), collateralAmount);
         adapter.depositCollateral(collateralAsset, collateralAmount, address(this));
@@ -75,5 +85,28 @@ contract VariableLoanPosition is IVariableLoanPosition {
 
     function currentCollateral() external view returns (uint256) {
         return adapter.currentCollateral(collateralAsset, address(this));
+    }
+
+    function _ensureAdapterOperatorAuthorization() internal {
+        // Optional adapter-specific bootstrap for EVC-based adapters exposing `evc()(address)`.
+        (bool evcOk, bytes memory evcOut) = address(adapter).staticcall(abi.encodeWithSignature("evc()"));
+        if (evcOk && evcOut.length >= 32) {
+            address evcAddr = abi.decode(evcOut, (address));
+            if (evcAddr != address(0)) {
+                IEVCOperatorAuth(evcAddr).setAccountOperator(address(this), address(adapter), true);
+                return;
+            }
+        }
+
+        // Optional bootstrap for Morpho Blue adapters exposing `morpho()(address)`.
+        (bool morphoOk, bytes memory morphoOut) = address(adapter).staticcall(abi.encodeWithSignature("morpho()"));
+        if (!morphoOk || morphoOut.length < 32) return;
+        address morphoAddr = abi.decode(morphoOut, (address));
+        if (morphoAddr == address(0)) return;
+
+        IMorphoOperatorAuth morpho = IMorphoOperatorAuth(morphoAddr);
+        if (!morpho.isAuthorized(address(this), address(adapter))) {
+            morpho.setAuthorization(address(adapter), true);
+        }
     }
 }
