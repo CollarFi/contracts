@@ -52,6 +52,11 @@ contract MorphoBlueLendingAdapter is ILendingAdapter {
         marketId = _marketParams().id();
     }
 
+    function openSetup(address) external view returns (address target, bytes memory data) {
+        target = address(morpho);
+        data = abi.encodeWithSignature("setAuthorization(address,bool)", address(this), true);
+    }
+
     function depositCollateral(uint256 amount, address onBehalfOf) external {
         IERC20(collateralAsset).safeTransferFrom(msg.sender, address(this), amount);
         IERC20(collateralAsset).forceApprove(address(morpho), amount);

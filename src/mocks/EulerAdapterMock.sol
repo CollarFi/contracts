@@ -6,6 +6,11 @@ import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 /// @dev Minimal mock for local/fork dev. No real lending occurs.
 contract EulerAdapterMock is ILendingAdapter {
     event DepositCollateral(uint256 amount, address onBehalfOf);
+
+    function openSetup(address) external pure returns (address target, bytes memory data) {
+        target = address(0);
+        data = "";
+    }
     event WithdrawCollateral(uint256 amount, address onBehalfOf, address to);
     event Borrow(uint256 amount, address onBehalfOf, address to);
     event Repay(uint256 amount, address onBehalfOf);

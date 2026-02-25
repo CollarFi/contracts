@@ -9,6 +9,11 @@ import {ILendingAdapter} from "../../src/interfaces/ILendingAdapter.sol";
 contract MockEulerAdapter is ILendingAdapter {
     using SafeERC20 for IERC20;
 
+    function openSetup(address) external pure override returns (address target, bytes memory data) {
+        target = address(0);
+        data = "";
+    }
+
     mapping(address => uint256) public collateralBalances;
     mapping(address => uint256) public debts;
     uint256 public liquidity;

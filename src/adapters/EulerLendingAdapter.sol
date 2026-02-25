@@ -11,6 +11,7 @@ interface IEVCMinimal {
         external
         payable
         returns (bytes memory result);
+    function setAccountOperator(address account, address operator, bool authorized) external payable;
     function enableCollateral(address account, address vault) external payable;
     function enableController(address account, address vault) external payable;
     function isCollateralEnabled(address account, address vault) external view returns (bool);
@@ -59,6 +60,11 @@ contract EulerLendingAdapter is ILendingAdapter {
         collateralVault = collateralVault_;
         debtAsset = debtAsset_;
         debtVault = debtVault_;
+    }
+
+    function openSetup(address onBehalfOf) external view returns (address target, bytes memory data) {
+        target = address(evc);
+        data = abi.encodeCall(IEVCMinimal.setAccountOperator, (onBehalfOf, address(this), true));
     }
 
     function depositCollateral(uint256 amount, address onBehalfOf) external {
