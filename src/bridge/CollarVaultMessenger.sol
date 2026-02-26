@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     MessagingFee,
     MessagingReceipt,
@@ -337,6 +338,12 @@ contract CollarVaultMessenger is AccessControl, OApp {
 
         MessagingReceipt memory receipt =
             _lzSend(remoteEid, payload, defaultOptions, MessagingFee(fee.nativeFee, 0), refundTo);
+
+        uint256 refund = msg.value - fee.nativeFee;
+        if (refund > 0) {
+            Address.sendValue(payable(refundTo), refund);
+        }
+
         emit MessageSent(receipt.guid, message.action, message.loanId);
         return receipt.guid;
     }

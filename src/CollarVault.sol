@@ -1072,9 +1072,7 @@ contract CollarVault is
         );
         mandateLzGuid = abi.decode(ret, (bytes32));
 
-        // Refund any excess ETH (though AutoFee functions should use exact amounts)
-        // Note: AutoFee functions consume exactly what's needed, so refund logic would require
-        // the messenger to return unused ETH. For now, we assume proper ETH estimation off-chain.
+        // Any excess LZ fee budget in each send*AutoFee call is refunded by the messenger to `msg.sender`.
     }
 
     // (removed) _confirmLoanCreation/_openLoan: quote-based flow removed.
