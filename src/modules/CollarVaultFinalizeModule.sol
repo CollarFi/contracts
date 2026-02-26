@@ -56,14 +56,42 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         payable
         returns (bytes32 lzGuid)
     {
+        return _acceptMandate(loanId, rfq, rfqSig, deadline, msg.value, false);
+    }
+
+    /// @notice Accepts a mandate with explicit borrower address (for internal use via delegatecall).
+    /// @dev If rfq.loanId == 0, it is treated as a sentinel and replaced with the provided loanId.
+    function acceptMandateInternal(
+        uint256 loanId,
+        address borrower,
+        BaselineRfq calldata rfq,
+        bytes calldata rfqSig,
+        uint64 deadline,
+        uint256 ethForLz
+    ) external payable returns (bytes32 lzGuid) {
+        // Silence unused variable warning - borrower is msg.sender in delegatecall
+        borrower;
+        return _acceptMandate(loanId, rfq, rfqSig, deadline, ethForLz, true);
+    }
+
+    function _acceptMandate(
+        uint256 loanId,
+        BaselineRfq calldata rfq,
+        bytes calldata rfqSig,
+        uint64 deadline,
+        uint256 ethForLz,
+        bool /*isInternal*/
+    ) internal returns (bytes32 lzGuid) {
+        address borrower = msg.sender;
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         CollarVaultShared.PendingDeposit memory pending = $.pendingDeposits[loanId];
         if (pending.borrower == address(0)) {
             revert CV_NotFound();
         }
-        if (pending.borrower != msg.sender) {
+        if (pending.borrower != borrower) {
             revert CV_Unauthorized();
         }
+
         if (address($.lzMessenger) == address(0) || $.deriveSubaccountId == 0) {
             revert CV_InvalidConfig();
         }
@@ -80,10 +108,12 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             revert CV_InvalidState();
         }
 
-        if (rfq.loanId != loanId) {
+        // Allow loanId == 0 as sentinel value (for createDepositWithMandate flow)
+        if (rfq.loanId != 0 && rfq.loanId != loanId) {
             revert CV_InvalidMessage();
         }
-        if (rfq.borrower != address(0) && rfq.borrower != msg.sender) {
+        // Verify RFQ borrower matches the actual borrower (msg.sender in both direct and delegatecall)
+        if (rfq.borrower != address(0) && rfq.borrower != borrower) {
             revert CV_Unauthorized();
         }
         if (rfq.rfqExpiry < block.timestamp) {
@@ -144,7 +174,15 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         });
 
         lzGuid = _sendMandateCreated(
-            loanId, pending, minCallStrike, maxPutStrike, rfq.minNetInterest, fixedInterest, rfq.maxNegativeC, deadline
+            loanId,
+            pending,
+            minCallStrike,
+            maxPutStrike,
+            rfq.minNetInterest,
+            fixedInterest,
+            rfq.maxNegativeC,
+            deadline,
+            ethForLz
         );
 
         emit MandateAccepted(
@@ -266,7 +304,8 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
-        uint64 deadline
+        uint64 deadline,
+        uint256 ethForLz
     ) internal returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         bytes memory mandateData = abi.encode(
@@ -280,7 +319,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             deadline
         );
 
-        lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: msg.value}(
+        lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: ethForLz}(
             loanId,
             pending.collateralAsset,
             pending.borrowAmount,

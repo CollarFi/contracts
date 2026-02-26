@@ -59,39 +59,12 @@ contract CollarVaultMessenger is AccessControl, OApp {
         emit OptionsUpdated(options);
     }
 
-    function sendMessage(CollarLZMessages.Message calldata message)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (MessagingReceipt memory receipt)
-    {
-        return _send(message, defaultOptions);
-    }
-
-    function sendMessageWithOptions(CollarLZMessages.Message calldata message, bytes calldata options)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (MessagingReceipt memory receipt)
-    {
-        return _send(message, options);
-    }
-
     function quoteMessage(CollarLZMessages.Message calldata message, bytes calldata options)
         external
         view
         returns (MessagingFee memory fee)
     {
         return _quote(remoteEid, abi.encode(message), options, false);
-    }
-
-    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (bytes32 guid)
-    {
-        return _sendAutoFee(message, refundTo);
     }
 
     function sendDepositIntentAutoFee(
@@ -335,21 +308,6 @@ contract CollarVaultMessenger is AccessControl, OApp {
             abi.decode(lzMessage.data, (bytes32, address, uint256, uint256, uint256, uint64, int256));
 
         if (mandateHash != expectedMandateHash || borrower != expectedBorrower || expiry != expectedMaturity) {
-            revert CV_LZMessageMismatch();
-        }
-    }
-
-    function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
-        external
-        pure
-    {
-        if (feeAmount == 0) {
-            if (lzMessage.amount != 0) {
-                revert CV_LZMessageMismatch();
-            }
-            return;
-        }
-        if (lzMessage.asset != usdcAsset || lzMessage.amount != feeAmount || lzMessage.socketMessageId == bytes32(0)) {
             revert CV_LZMessageMismatch();
         }
     }
