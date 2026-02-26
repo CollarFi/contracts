@@ -913,7 +913,7 @@ contract CollarVaultTest is Test {
 
         vm.startPrank(borrower);
         vm.expectRevert(CollarVault.CV_InvalidInput.selector);
-        vault.createDepositWithPermit(params, permit, permitSig);
+        vault.createDepositWithMandatePermit(params, permit, permitSig);
         vm.stopPrank();
     }
 
@@ -1507,7 +1507,7 @@ contract CollarVaultTest is Test {
         bytes memory permitSig = permit2Signer.signPermitSingle(borrowerKey, permit);
 
         vm.startPrank(borrower);
-        (loanId,,) = vault.createDepositWithPermit(params, permit, permitSig);
+        (loanId,,) = vault.createDepositWithMandatePermit(params, permit, permitSig);
         vm.stopPrank();
     }
 }

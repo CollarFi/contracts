@@ -38,7 +38,7 @@ This specification documents the smart contracts, off-chain components and flows
 ### 3.1 Collateral deposit (L1 -> L2)
 
 When a borrower wants a loan, they can either:
-- submit `createDepositWithPermit` on L1 with a Permit2 signature, or
+- submit `createDepositWithMandatePermit` on L1 with a Permit2 signature, or
 - submit `createDepositWithMandate` on L1 (standard ERC20 `approve` + `transferFrom`) to create the pending deposit and accept a mandate atomically in one transaction.
 
 In both paths, the borrower provides desired loan parameters (collateral asset/amount, maturity, put strike, desired borrow amount). The vault pulls collateral (standard, non-rebasing ERC-20 only; use wrapped variants such as wstETH), sends it over the Socket SuperBridge to L2, and records a pending-deposit state. The keeper finalizes the loan later after L2 confirmations and quote acceptance.
@@ -106,7 +106,7 @@ Derive provides various strategy contracts (e.g., CCTSA for covered calls, PPTSA
 **RFQ (off-chain)**: The vault executor queries market makers to provide quotes for the call strike `K_c` such that the call premium minus the put premium equals or exceeds the target cost of capital (Euler rate + risk premium and, if needed, settlement drag). After the L2 deposit is confirmed, the borrower accepts a mandate on-chain by calling `acceptMandate` with a keeper-signed baseline RFQ (`rfq`, `rfqSig`) and a deadline. Strike tiers and valid Derive maturities are enforced by the executor; the vault does not maintain an on-chain tier list or expiry whitelist.
 
 **Collateral deposit (L1 -> L2)**: The borrower either:
-- calls `createDepositWithPermit` (Permit2 path), or
+- calls `createDepositWithMandatePermit` (Permit2 path), or
 - calls `createDepositWithMandate` (standard ERC20 approval path) to atomically create the pending deposit and accept a mandate in one transaction.
 
 In both cases, collateral is bridged to Derive L2 and the loan is placed in pending-deposit state until L2 confirmation and Derive subaccount deposit finalize. No RFQ trade is finalized at this step.
@@ -160,7 +160,7 @@ sequenceDiagram
   participant Liquidity as L1 CollarLiquidityVault
   participant Treasury as L1 Treasury
 
-  Borrower->>Vault: createDepositWithPermit(params, permit)
+  Borrower->>Vault: createDepositWithMandatePermit(params, permit)
   Vault->>Socket: _bridgeToL2(collateral)
   Vault->>LZ: sendMessage(DepositIntent)
   LZ-->>L2Recv: LZ DepositIntent
@@ -368,7 +368,8 @@ Maintains L1 loan records, collateral amounts, and maturity schedules. It relies
 
 Provides functions:
 
-- `createDepositWithPermit(params, permit, permitSig)` - permissionless; records the borrower's desired loan parameters, pulls collateral via Permit2, calls the bridge, and records a pending deposit awaiting L2 confirmation.
+- `createDepositWithMandatePermit(params, permit, permitSig)` - permissionless; records the borrower's desired loan parameters, pulls collateral via Permit2, calls the bridge, and records a pending deposit awaiting L2 confirmation.
+- `createDepositWithPermit(params, permit, permitSig)` - backward-compatible alias for the Permit2 path.
 - `createDepositWithMandate(params, rfq, rfqSig, deadline)` - permissionless; standard ERC20 approval path that atomically creates the pending deposit and accepts a mandate in one transaction.
 - `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline quote. The vault sets `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, commits principal, and sends a `MandateCreated` message to L2. Direct calls require exact `rfq.loanId == loanId`; only the atomic path allows `rfq.loanId == 0` sentinel.
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
