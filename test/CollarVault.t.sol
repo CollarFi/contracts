@@ -306,6 +306,149 @@ contract CollarVaultTest is Test {
         assertEq(loan.callStrike, 25_000e6);
     }
 
+    function testAcceptMandateRejectsSentinelLoanIdOnExternalPath() public {
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: 0,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            minNetInterest: 0,
+            maxNegativeC: 500e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 43
+        });
+
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        vm.prank(borrower);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+    }
+
+    function testExpiredMandateAllowsRefreshOrReturn() public {
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq1 = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 25_000e6,
+            borrowAmount: params.borrowAmount,
+            minNetInterest: 0,
+            maxNegativeC: 500e6,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: 44
+        });
+
+        bytes32 rfq1Hash = vault.hashBaselineRfq(rfq1);
+        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(rfqSignerKey, rfq1Hash);
+        bytes memory rfq1Sig = abi.encodePacked(r1, s1, v1);
+
+        uint64 firstDeadline = uint64(block.timestamp + 1 days);
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq1, rfq1Sig, firstDeadline);
+
+        vm.warp(firstDeadline + 1);
+        uint64 secondDeadline = firstDeadline + uint64(1 days) + 1;
+
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq2 = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: loanId,
+            collateralAsset: address(wbtc),
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: 26_000e6,
+            borrowAmount: params.borrowAmount,
+            minNetInterest: 0,
+            maxNegativeC: 300e6,
+            rfqExpiry: secondDeadline,
+            borrower: borrower,
+            nonce: 45
+        });
+
+        bytes32 rfq2Hash = vault.hashBaselineRfq(rfq2);
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(rfqSignerKey, rfq2Hash);
+        bytes memory rfq2Sig = abi.encodePacked(r2, s2, v2);
+
+        vm.prank(borrower);
+        vault.acceptMandate{value: 0}(loanId, rfq2, rfq2Sig, secondDeadline);
+
+        vm.prank(borrower);
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.requestCollateralReturn(loanId);
+
+        vm.warp(secondDeadline + 1);
+
+        vm.prank(borrower);
+        vault.requestCollateralReturn(loanId);
+        assertTrue(vault.returnRequested(loanId));
+    }
+
+    function testRecordTradeConfirmedMarksLoan() public {
+        CollarVault.DepositParams memory params = CollarVault.DepositParams({
+            collateralAsset: address(wbtc),
+            collateralAmount: 1e8,
+            maturity: block.timestamp + 30 days,
+            putStrike: 20_000e6,
+            borrowAmount: 20_000e6
+        });
+
+        uint256 loanId = _requestDeposit(params);
+        bytes32 tradeGuid = bytes32(uint256(7000 + loanId));
+        messenger.setMessage(
+            tradeGuid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.TradeConfirmed,
+                loanId: loanId,
+                asset: address(0),
+                amount: 0,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 1,
+                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(0))
+            })
+        );
+
+        vault.recordTradeConfirmed(tradeGuid);
+
+        assertTrue(vault.tradeConfirmed(loanId));
+        assertTrue(vault.collateralActivated(loanId));
+        assertFalse(vault.returnRequested(loanId));
+
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.recordTradeConfirmed(tradeGuid);
+    }
+
     function testAcceptMandateAllowsWhenFixedInterestIsSigned() public {
         vault.setOriginationFeeApr(0.2e18);
         CollarVault.DepositParams memory params = CollarVault.DepositParams({

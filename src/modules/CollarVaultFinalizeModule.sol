@@ -80,7 +80,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         bytes calldata rfqSig,
         uint64 deadline,
         uint256 ethForLz,
-        bool /*isInternal*/
+        bool isInternal
     ) internal returns (bytes32 lzGuid) {
         address borrower = msg.sender;
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
@@ -108,8 +108,13 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             revert CV_InvalidState();
         }
 
-        // Allow loanId == 0 as sentinel value (for createDepositWithMandate flow)
-        if (rfq.loanId != 0 && rfq.loanId != loanId) {
+        // For external acceptMandate, RFQ must bind exact loanId.
+        // For createDepositWithMandate (internal flow), rfq.loanId == 0 sentinel is allowed.
+        if (isInternal) {
+            if (rfq.loanId != 0 && rfq.loanId != loanId) {
+                revert CV_InvalidMessage();
+            }
+        } else if (rfq.loanId != loanId) {
             revert CV_InvalidMessage();
         }
         // Verify RFQ borrower matches the actual borrower (msg.sender in both direct and delegatecall)
