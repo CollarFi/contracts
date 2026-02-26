@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
-import {IEulerAdapter} from "../interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
 import {IBridgeAdapter} from "../interfaces/IBridgeAdapter.sol";
 import {ICollarVaultMessenger} from "../interfaces/ICollarVaultMessenger.sol";
 import {ILiquidityVault} from "../interfaces/ILiquidityVault.sol";
@@ -16,6 +16,8 @@ library CollarVaultShared {
     enum LoanState {
         NONE,
         ACTIVE_ZERO_COST,
+        READY_FOR_VARIABLE,
+        ACTIVE_VARIABLE,
         CLOSED
     }
 
@@ -98,7 +100,8 @@ library CollarVaultShared {
         IERC20 usdc;
         IAllowanceTransfer permit2;
         mapping(address => SocketBridgeConfig) socketBridgeConfigs;
-        IEulerAdapter eulerAdapter;
+        ILendingAdapter lendingAdapter;
+        address variableLoanPositionImplementation;
         address l2Recipient;
         address treasury;
         uint256 treasuryBps;
@@ -109,6 +112,7 @@ library CollarVaultShared {
         uint64 maxMandateDuration;
         uint256 nextLoanId;
         mapping(uint256 => Loan) loans;
+        mapping(uint256 => address) variableLoanPositions;
         mapping(uint256 => PendingDeposit) pendingDeposits;
         mapping(uint256 => Mandate) mandates;
         mapping(bytes32 => bool) usedBaselineRfqs;

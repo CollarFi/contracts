@@ -256,8 +256,9 @@ sequenceDiagram
 
 - Both options expire OTM. The collateral remains on Derive and is not encumbered.
 - The vault contract bridges the collateral back to L1 via the fast bridge. The L2 receiver sends a `CollateralReturned` message with the Socket `messageId` so L1 can finalize the conversion once the bridge completes.
-- On L1, the collateral is deposited into the Euler V2 market as standard collateral. The borrower may immediately borrow USDC up to a variable rate (subject to Euler's LTV). This variable-rate loan repays the original principal `D`, converting the zero-cost loan to a `VARIABLE` loan.
-- The borrower's position remains liquidatable by Euler if the collateral price drops.
+- On L1, the loan is marked `READY_FOR_VARIABLE` and collateral is parked in `CollarVault` until conversion liquidity is available.
+- Keeper later opens a variable position through a per-loan adapter position contract (1167 clone) controlled by `CollarVault` and repays principal/interest to CLV.
+- The resulting variable position remains market-liquidatable (adapter-specific, e.g., Euler or Morpho).
 
 ```mermaid
 sequenceDiagram
@@ -268,16 +269,19 @@ sequenceDiagram
   participant L2Recv as L2 CollarTSAReceiver
   participant LZ as L1 CollarVaultMessenger
   participant Vault as L1 CollarVault
-  participant Euler as L1 EulerAdapter
+  participant AdapterPos as L1 VariableLoanPosition(loan clone)
   participant Liquidity as L1 CollarLiquidityVault
 
   Keeper->>TSA: signActionData(WithdrawalModule collateral)
   Keeper->>Socket: bridge collateral to L1
   Keeper->>L2Recv: sendCollateralReturned(loanId, amount, socketMessageId)
   L2Recv-->>LZ: send CollateralReturned
-  Keeper->>Vault: settleLoan(loanId, Neutral, lzGuid)
-  Vault->>Euler: depositCollateral + borrow(USDC)
-  Vault->>Liquidity: repay(principal)
+  Keeper->>Vault: settleLoan(loanId, Neutral, lzGuid) // marks READY_FOR_VARIABLE
+  loop until adapter liquidity is available
+    Keeper->>Vault: tryConvertReadyLoan(loanId)
+  end
+  Vault->>AdapterPos: open(collateral, debt)
+  Vault->>Liquidity: repay(principal + fixedInterest)
 ```
 
 #### Outcome 3: Call ITM / Take profit (`S_t > K_c`)
@@ -324,12 +328,13 @@ sequenceDiagram
 Since the fast bridge is available for all fund movement, the protocol can remove the dAsset receipts previously proposed for slow bridging. Instead:
 
 - Collateral release: Upon neutral maturity, the collateral is unencumbered on Derive. The executor uses the Withdrawal Module to withdraw the collateral to L2 and bridges it back to L1.
-- Euler deposit: The collateral is deposited into a standard Euler V2 market on L1. The borrower borrows USDC up to the maximum LTV permitted by Euler. The borrowed USDC repays the zero-cost loan principal.
-- Accounting: On neutral expiry conversion, collateral is moved into borrower-owned Euler position and the Vault-side loan is closed; borrower manages the variable position directly in Euler thereafter.
+- Adapter position open: A per-loan `VariableLoanPosition` clone (EIP-1167) is used to interact with the configured lending adapter.
+- Liquidity gate: Keeper retries conversion only when adapter-reported debt-asset liquidity is sufficient.
+- Accounting: On successful open, the zero-cost loan is transitioned to `ACTIVE_VARIABLE`; debt is tracked on L1 and users interact via `CollarVault` facade calls (`repayVariableLoan`, `withdrawVariableCollateral`).
 
 ### 5.4 Rolling a variable loan into a new collar
 
-Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan, withdraw the collateral from Euler, and initiate a new collar loan via the standard origination flow.
+Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan via `CollarVault`, withdraw collateral via `CollarVault`, and initiate a new collar loan via the standard origination flow.
 
 ## 6. Smart Contracts and Interactions
 
@@ -348,8 +353,10 @@ Provides functions:
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
 - `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC. Must revert if a return was requested/processed for the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
-- `settleLoan(loanId)` - restricted to keeper roles; closes positions and initiates bridging of proceeds. Reverts on-chain if `block.timestamp < maturity`.
-- `convertToVariable(loanId)` - restricted to keeper roles; bridges collateral back and interacts with Euler. Reverts on-chain if `block.timestamp < maturity`.
+- `settleLoan(loanId, outcome, lzGuid)` - restricted to keeper roles; consumes L2 settlement/collateral messages and advances maturity handling. Reverts on-chain if `block.timestamp < maturity`.
+- `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
+- `repayVariableLoan(loanId, amount)` - borrower/keeper callable; repays variable debt via the vault facade.
+- `withdrawVariableCollateral(loanId, amount)` - borrower/keeper callable; withdraws variable-phase collateral via the vault facade.
 - `setMaxTotalPrincipal(max)` - parameter role; caps the total committed principal (pending + active zero-cost loans) to scale TVL gradually.
 
 Exposes events for state changes (`LoanCreated`, `LoanSettled`, etc.).
@@ -375,11 +382,13 @@ Exposes functions `borrow(uint256 amount)` and `repay(uint256 amount)` for the v
 
 May cap the total notional per maturity bucket to manage risk.
 
-### 6.4 Euler integration
+### 6.4 Lending adapter integration (Euler-first)
 
-On neutral maturity, the vault contract deposits collateral into Euler V2 as collateral. It then borrows USDC; interest accrues at the variable rate.
+On neutral maturity, collateral is returned to L1 and parked in `CollarVault`. The loan is marked `READY_FOR_VARIABLE`.
 
-When the borrower repays, the vault contract returns the collateral to the borrower and repays the Euler debt.
+Keeper then retries `tryConvertReadyLoan` opportunistically. Conversion succeeds only when the configured lending adapter reports enough debt-asset liquidity (`availableLiquidity(USDC) >= principal + fixedInterest`).
+
+When liquid, the adapter path deposits collateral on behalf of the borrower and borrows USDC to repay CLV principal + fixed interest. If not liquid, the loan remains in `READY_FOR_VARIABLE` until liquidity unlocks.
 
 ### 6.5 Bridging contracts
 
@@ -397,7 +406,12 @@ The RFQ module produces off-chain quotes that inform the keeper’s execution. T
 
 A keeper service must monitor block timestamps and call `settleLoan` once a loan's maturity is reached. It ensures the Derive position is closed and bridging initiated. Settlement uses Derive's official expiry settlement price at maturity (`S_t`).
 
-Monitors for situations such as the bridge being down or fast withdrawal limits reached; in such cases it may delay new originations or enforce variable-rate conversion.
+For neutral outcomes, keeper should:
+1. call `settleLoan(loanId, Neutral, lzGuid)` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
+2. periodically call `tryConvertReadyLoan` for queued loans,
+3. skip gracefully when adapter liquidity is insufficient.
+
+Monitors for situations such as bridge downtime, fast withdrawal limits, or lending-adapter liquidity shortages; in such cases loans remain queued in `READY_FOR_VARIABLE` until constraints clear.
 
 ## 7. Security and Risk Controls
 

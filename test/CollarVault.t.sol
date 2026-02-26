@@ -10,9 +10,10 @@ import {CollarVaultShared} from "../src/modules/CollarVaultShared.sol";
 import {CollarVaultFinalizeModule} from "../src/modules/CollarVaultFinalizeModule.sol";
 import {CollarVaultSettleModule} from "../src/modules/CollarVaultSettleModule.sol";
 import {CollarVaultRolloverModule} from "../src/modules/CollarVaultRolloverModule.sol";
+import {VariableLoanPosition} from "../src/adapters/VariableLoanPosition.sol";
 import {CollarLZMessages} from "../src/bridge/CollarLZMessages.sol";
 import {ICollarVaultMessenger} from "../src/interfaces/ICollarVaultMessenger.sol";
-import {IEulerAdapter} from "../src/interfaces/IEulerAdapter.sol";
+import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {ICollarVaultFinalizeModule} from "../src/interfaces/ICollarVaultFinalizeModule.sol";
 
@@ -45,6 +46,7 @@ contract CollarVaultTest is Test {
     CollarVaultFinalizeModule internal finalizeModule;
     CollarVaultSettleModule internal settleModule;
     CollarVaultRolloverModule internal rolloverModule;
+    VariableLoanPosition internal positionImpl;
 
     uint256 internal borrowerKey = 0xB0B0;
     address internal borrower;
@@ -60,11 +62,12 @@ contract CollarVaultTest is Test {
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         bridge = new MockBridge(wbtc);
         adapter = new MockBridgeAdapter();
-        eulerAdapter = new MockEulerAdapter();
+        eulerAdapter = new MockEulerAdapter(address(wbtc), address(usdc));
         messenger = new MockLZMessenger();
         finalizeModule = new CollarVaultFinalizeModule();
         settleModule = new CollarVaultSettleModule();
         rolloverModule = new CollarVaultRolloverModule();
+        positionImpl = new VariableLoanPosition();
         borrower = vm.addr(borrowerKey);
         rfqSigner = vm.addr(rfqSignerKey);
 
@@ -78,7 +81,7 @@ contract CollarVaultTest is Test {
             (
                 address(this),
                 ILiquidityVault(address(liquidityVault)),
-                IEulerAdapter(address(eulerAdapter)),
+                ILendingAdapter(address(eulerAdapter)),
                 permit2,
                 address(0x1001),
                 treasury
@@ -90,6 +93,7 @@ contract CollarVaultTest is Test {
         vault.setFinalizeModule(address(finalizeModule));
         vault.setSettleModule(address(settleModule));
         vault.setRolloverModule(address(rolloverModule));
+        vault.setVariableLoanPositionImplementation(address(positionImpl));
 
         // Unit-test setup uses same asset on both sides.
         vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));
@@ -996,6 +1000,134 @@ contract CollarVaultTest is Test {
 
         vm.expectRevert(bytes("bad action"));
         vault.finalizeDepositReturn(loanId, wrongGuid);
+    }
+
+    function testConvertToVariableMarksReadyWhenLiquidityMissing() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9700 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        CollarVaultShared.Loan memory marked = vault.getLoan(loanId);
+        assertEq(uint256(marked.state), uint256(CollarVaultShared.LoanState.READY_FOR_VARIABLE));
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, false);
+
+        CollarVaultShared.Loan memory stillMarked = vault.getLoan(loanId);
+        assertEq(uint256(stillMarked.state), uint256(CollarVaultShared.LoanState.READY_FOR_VARIABLE));
+    }
+
+    function testTryConvertReadyLoanSucceedsWhenLiquidityAvailable() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9800 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(address(eulerAdapter), totalDue);
+        eulerAdapter.setLiquidity(totalDue);
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, true);
+
+        CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
+        assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.ACTIVE_VARIABLE));
+        assertEq(afterLoan.variableDebt, totalDue);
+    }
+
+    function testBorrowerRepaysAndWithdrawsVariableCollateralViaVault() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 20_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9850 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(address(eulerAdapter), totalDue);
+        eulerAdapter.setLiquidity(totalDue);
+
+        vm.prank(keeper);
+        bool converted = vault.tryConvertReadyLoan(loanId);
+        assertEq(converted, true);
+
+        uint256 partialRepay = totalDue / 2;
+        usdc.mint(borrower, totalDue);
+        vm.startPrank(borrower);
+        usdc.approve(address(vault), totalDue);
+        vault.repayVariableLoan(loanId, partialRepay);
+
+        uint256 partialWithdraw = loanBefore.collateralAmount / 2;
+        vault.withdrawVariableCollateral(loanId, partialWithdraw);
+
+        vault.repayVariableLoan(loanId, totalDue - partialRepay);
+        vault.withdrawVariableCollateral(loanId, loanBefore.collateralAmount - partialWithdraw);
+        vm.stopPrank();
+
+        CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
+        assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.CLOSED));
+        assertEq(wbtc.balanceOf(borrower), 1e8);
     }
 
     function testSettleConsumesAndReleasesReserve() public {
