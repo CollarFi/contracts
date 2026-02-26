@@ -22,12 +22,11 @@ interface ICollarVaultFinalizeModule {
         payable
         returns (bytes32 lzGuid);
 
-    /// @notice Accepts a mandate with explicit borrower address (for internal use via delegatecall).
+    /// @notice Accepts a mandate for the current msg.sender (for internal use via delegatecall).
     /// @dev Called by CollarVault to atomically accept mandate after deposit creation.
     /// If rfq.loanId == 0, it is treated as a sentinel and replaced with the provided loanId.
     function acceptMandateInternal(
         uint256 loanId,
-        address borrower,
         BaselineRfq calldata rfq,
         bytes calldata rfqSig,
         uint64 deadline,

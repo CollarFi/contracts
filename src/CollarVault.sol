@@ -1067,8 +1067,7 @@ contract CollarVault is
         bytes memory ret = _delegateTo(
             module,
             abi.encodeCall(
-                ICollarVaultFinalizeModule.acceptMandateInternal,
-                (loanId, msg.sender, rfq, rfqSig, deadline, ethForMandateLz)
+                ICollarVaultFinalizeModule.acceptMandateInternal, (loanId, rfq, rfqSig, deadline, ethForMandateLz)
             )
         );
         mandateLzGuid = abi.decode(ret, (bytes32));

@@ -59,18 +59,15 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         return _acceptMandate(loanId, rfq, rfqSig, deadline, msg.value, false);
     }
 
-    /// @notice Accepts a mandate with explicit borrower address (for internal use via delegatecall).
+    /// @notice Accepts a mandate for msg.sender (for internal use via delegatecall).
     /// @dev If rfq.loanId == 0, it is treated as a sentinel and replaced with the provided loanId.
     function acceptMandateInternal(
         uint256 loanId,
-        address borrower,
         BaselineRfq calldata rfq,
         bytes calldata rfqSig,
         uint64 deadline,
         uint256 ethForLz
     ) external payable returns (bytes32 lzGuid) {
-        // Silence unused variable warning - borrower is msg.sender in delegatecall
-        borrower;
         return _acceptMandate(loanId, rfq, rfqSig, deadline, ethForLz, true);
     }
 
