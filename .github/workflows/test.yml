@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -17,7 +19,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Foundry
+      - name: Install Foundry (attempt 1)
+        id: foundry_install_check_1
+        continue-on-error: true
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Foundry (attempt 2)
+        if: steps.foundry_install_check_1.outcome == 'failure'
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Show Forge version
@@ -49,3 +57,81 @@ jobs:
         run: |
           forge test -vvv --skip script
         id: test
+
+  e2e:
+    name: E2E fork flows
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 60
+    env:
+      # Allow repo/org-level override; keep sensible public defaults.
+      L1_RPC_URL: ${{ vars.L1_RPC_URL || secrets.L1_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+      L2_RPC_URL: ${{ vars.L2_RPC_URL || secrets.L2_RPC_URL || 'https://testnet-rpc.derive.xyz/' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry (attempt 1)
+        id: foundry_install_e2e_1
+        continue-on-error: true
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Foundry (attempt 2)
+        if: steps.foundry_install_e2e_1.outcome == 'failure'
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prune duplicate lyra-utils + normalize imports
+        run: |
+          rm -rf lib/v2-matching/lib/lyra-utils
+          find lib/v2-matching/lib/v2-core/lib/lyra-utils -name '*.sol' -print0 \
+            | xargs -0 sed -i 's/\("\)src\//\1lyra-utils\//g'
+
+      - name: Create fork env files for e2e
+        run: |
+          cat > .env.l1.testnet <<EOF
+          RPC_URL=${L1_RPC_URL}
+          ACCOUNT=CDPDeployer
+          TREASURY=0x693e444389F3cB953F8baD0EaC2CE2885df68De7
+          USDC_ASSET=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+          WETH_ASSET=0xE67ABDA0D43f7AC8f37876bBF00D1DFadbB93aaa
+          WETH_SOCKET_VAULT=0xd9cb39b5ad36c6d2ec4e8d5337b62a1c1b71bacc
+          WETH_SOCKET_CONNECTOR=0x2d7F2B4CEe097F08ed8d30D928A40eB1379071Fe
+          FAUCET=0x406C77947D91f965F09B458c07a66A033c3efea4
+          LZ_ENDPOINT=0x6EDCE65403992e310A62460808c4b910D972f10f
+          EOF
+
+          cat > .env.l2.testnet <<EOF
+          RPC_URL=${L2_RPC_URL}
+          ACCOUNT=CDPDeployer
+          LZ_ENDPOINT=0x6C7Ab2202C98C4227C5c46f1417D81144DA716Ff
+          SOCKET_TRACKER=0xFDC28fA368c33DEC7853d63B65FC5Cfe01B212fc
+          DERIVE_MARKET=ETH
+          EOF
+
+      - name: Run deployment e2e
+        run: |
+          uv run python test/e2e/deployment_e2e.py \
+            --l1-env .env.l1.testnet \
+            --l2-env .env.l2.testnet \
+            --keep-anvil
+
+      - name: Run fresh loan flow e2e
+        run: |
+          uv run python test/e2e/fresh_loan_flow.py
+
+      - name: Run rollover-to-variable e2e (Euler)
+        run: |
+          uv run python test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
+
+      - name: Run rollover-to-variable e2e (Morpho)
+        run: |
+          uv run python test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
