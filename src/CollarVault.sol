@@ -674,7 +674,8 @@ contract CollarVault is
         if (module == address(0)) {
             revert CV_InvalidConfig();
         }
-        bytes memory ret = _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.settleReadyLoanByRepay, (loanId)));
+        bytes memory ret =
+            _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.settleReadyLoanByRepay, (loanId)));
         (repaid, callerCollateral, borrowerCollateral) = abi.decode(ret, (uint256, uint256, uint256));
     }
 

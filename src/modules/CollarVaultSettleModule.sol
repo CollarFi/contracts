@@ -150,8 +150,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             if (strikeScale == 0 || loan.putStrike == 0) {
                 revert CV_InvalidConfig();
             }
-            uint256 baseCollateral =
-                Math.mulDiv(repaid, strikeScale, loan.putStrike, Math.Rounding.Ceil);
+            uint256 baseCollateral = Math.mulDiv(repaid, strikeScale, loan.putStrike, Math.Rounding.Ceil);
             callerCollateral = Math.mulDiv(
                 baseCollateral,
                 CollarVaultShared.MAX_BPS + $.readyLoanKeeperPenaltyBps,
