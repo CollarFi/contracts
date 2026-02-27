@@ -5,6 +5,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {CollarLZMessages} from "../bridge/CollarLZMessages.sol";
 import {ICollarVaultFinalizeModule} from "../interfaces/ICollarVaultFinalizeModule.sol";
@@ -159,6 +160,14 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         uint256 maxPutStrike = rfq.putStrike;
         uint256 fixedInterest =
             _quoteInterest(pending.borrowAmount, $.originationFeeApr, block.timestamp, pending.maturity);
+        uint256 maxRollLtv = $.maxRollLtv;
+        _enforceRollSafetyLtv(
+            pending.collateralAsset,
+            pending.collateralAmount,
+            maxPutStrike,
+            pending.borrowAmount + fixedInterest,
+            maxRollLtv
+        );
 
         $.mandates[loanId] = CollarVaultShared.Mandate({
             borrower: pending.borrower,
@@ -172,6 +181,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             minNetInterest: rfq.minNetInterest,
             fixedInterest: fixedInterest,
             maxNegativeC: rfq.maxNegativeC,
+            maxRollLtv: maxRollLtv,
             sentToL2: true
         });
 
@@ -183,6 +193,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             rfq.minNetInterest,
             fixedInterest,
             rfq.maxNegativeC,
+            maxRollLtv,
             deadline,
             ethForLz
         );
@@ -252,6 +263,14 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             revert CV_InsufficientValue();
         }
 
+        _enforceRollSafetyLtv(
+            pending.collateralAsset,
+            pending.collateralAmount,
+            putStrike,
+            pending.borrowAmount + mandate.fixedInterest,
+            mandate.maxRollLtv
+        );
+
         uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
         if (realizedDeficit > mandate.maxNegativeC) {
             revert CV_InsufficientValue();
@@ -306,10 +325,15 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
+        uint256 maxRollLtv,
         uint64 deadline,
         uint256 ethForLz
     ) internal returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        uint256 strikeScale = $.strikeScale[pending.collateralAsset];
+        if (strikeScale == 0) {
+            revert CV_InvalidConfig();
+        }
         bytes memory mandateData = abi.encode(
             pending.borrower,
             minCallStrike,
@@ -317,6 +341,8 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             minNetInterest,
             fixedInterest,
             maxNegativeC,
+            maxRollLtv,
+            strikeScale,
             uint64(pending.maturity),
             deadline
         );
@@ -354,6 +380,29 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             revert CV_InvalidState();
         }
         $.totalCommittedPrincipal += amount;
+    }
+
+    function _enforceRollSafetyLtv(
+        address collateralAsset,
+        uint256 collateralAmount,
+        uint256 putStrike,
+        uint256 debtAmount,
+        uint256 maxRollLtv
+    ) internal view {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        if (maxRollLtv == 0 || maxRollLtv > 1e18) {
+            revert CV_InvalidConfig();
+        }
+        uint256 scale = $.strikeScale[collateralAsset];
+        if (scale == 0 || putStrike == 0) {
+            revert CV_InvalidConfig();
+        }
+
+        uint256 putFloorValue = Math.mulDiv(collateralAmount, putStrike, scale);
+        uint256 maxDebt = Math.mulDiv(putFloorValue, maxRollLtv, 1e18);
+        if (debtAmount > maxDebt) {
+            revert CV_InsufficientValue();
+        }
     }
 
     function _loadLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {

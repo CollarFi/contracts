@@ -281,6 +281,8 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             minNetInterest,
             20e18,
             500e6,
+            1e18,
+            1e18,
             newExpiry,
             uint64(block.timestamp + 1 days)
         );

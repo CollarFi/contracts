@@ -41,6 +41,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
+        uint256 maxRollLtv,
+        uint256 strikeScale,
         uint64 maturity,
         uint64 deadline
     ) external onlyRole(WRITER_ROLE) {
@@ -81,6 +83,12 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maxNegativeC != 0 && loan.maxNegativeC != maxNegativeC) {
             revert CLS_Mismatch();
         }
+        if (loan.maxRollLtv != 0 && loan.maxRollLtv != maxRollLtv) {
+            revert CLS_Mismatch();
+        }
+        if (loan.strikeScale != 0 && loan.strikeScale != strikeScale) {
+            revert CLS_Mismatch();
+        }
 
         // Collateral asset can be set either by deposit or mandate. Require consistency.
         if (loan.collateralAsset != address(0) && loan.collateralAsset != collateralAsset) {
@@ -94,6 +102,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.minNetInterest = minNetInterest;
         loan.fixedInterest = fixedInterest;
         loan.maxNegativeC = maxNegativeC;
+        loan.maxRollLtv = maxRollLtv;
+        loan.strikeScale = strikeScale;
         loan.maturity = maturity;
         loan.deadline = deadline;
         if (loan.collateralAsset == address(0)) {
@@ -138,6 +148,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 minNetInterest,
         uint256 fixedInterest,
         uint256 maxNegativeC,
+        uint256 maxRollLtv,
+        uint256 strikeScale,
         uint64 maturity,
         uint64 deadline
     ) external onlyRole(WRITER_ROLE) {
@@ -160,6 +172,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMinNetInterest = minNetInterest;
         loan.rolloverFixedInterest = fixedInterest;
         loan.rolloverMaxNegativeC = maxNegativeC;
+        loan.rolloverMaxRollLtv = maxRollLtv;
+        loan.rolloverStrikeScale = strikeScale;
         loan.rolloverMaturity = maturity;
         loan.rolloverDeadline = deadline;
 
@@ -179,6 +193,8 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMinNetInterest = 0;
         loan.rolloverFixedInterest = 0;
         loan.rolloverMaxNegativeC = 0;
+        loan.rolloverMaxRollLtv = 0;
+        loan.rolloverStrikeScale = 0;
         loan.rolloverMaturity = 0;
         loan.rolloverDeadline = 0;
 
