@@ -249,14 +249,18 @@ def main(
     apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
     year = 365 * 24 * 3600
     fixed_interest = ((int(p_borrow) * apr) // 10**18) * (int(p_maturity) - now_ts) // year
+    max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
+    strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
     mandate_data = _abi_encode(
-        "f(address,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
+        "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
         borrower,
         str(call_strike),
         p_put,
         "0",
         str(fixed_interest),
         str(max_negative_c),
+        str(max_roll_ltv),
+        str(strike_scale),
         p_maturity,
         str(mandate_deadline),
     )
@@ -274,7 +278,6 @@ def main(
             default_opts,
         ),
     ).group(0))
-
     cast_send_pk(
         l1_rpc,
         vault,
