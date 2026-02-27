@@ -17,7 +17,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Foundry
+      - name: Install Foundry (attempt 1)
+        id: foundry_install_check_1
+        continue-on-error: true
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Foundry (attempt 2)
+        if: steps.foundry_install_check_1.outcome == 'failure'
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Show Forge version
@@ -64,7 +70,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Foundry (forge/cast/anvil)
+      - name: Install Foundry (attempt 1)
+        id: foundry_install_e2e_1
+        continue-on-error: true
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Foundry (attempt 2)
+        if: steps.foundry_install_e2e_1.outcome == 'failure'
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Install uv
