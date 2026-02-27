@@ -261,7 +261,7 @@ def abi_encode(sig: str, *args: str) -> str:
 
 
 def force_set_erc20_balance_on_anvil(rpc: str, token: str, who: str, target_amount: int) -> bool:
-    for slot in range(0, 16):
+    for slot in range(0, 128):
         key = keccak_hex(abi_encode("f(address,uint256)", who, str(slot)))
         run([
             "cast", "rpc", "anvil_setStorageAt", token, key, run(["cast", "to-bytes32", str(target_amount)]), "--rpc-url", rpc,
@@ -274,7 +274,7 @@ def force_set_erc20_balance_on_anvil(rpc: str, token: str, who: str, target_amou
 
 def force_set_erc20_allowance_on_anvil(rpc: str, token: str, owner: str, spender: str, target_amount: int) -> bool:
     target_b32 = "0x" + int(target_amount).to_bytes(32, "big", signed=False).hex()
-    for slot in range(0, 24):
+    for slot in range(0, 256):
         owner_slot = keccak_hex(abi_encode("f(address,uint256)", owner, str(slot)))
         key = keccak_hex(abi_encode("f(address,bytes32)", spender, owner_slot))
         run(["cast", "rpc", "anvil_setStorageAt", token, key, target_b32, "--rpc-url", rpc])
@@ -301,9 +301,16 @@ def seed_usdc_liquidity(rpc: str, usdc: str, debt_vault: str, amount: int) -> No
 
     cash_after = int(cast_call(rpc, debt_vault, "cash()(uint256)").split()[0])
     if cash_after < target_cash:
-        # Fallback: direct transfer can still raise cash on some fork/token combinations.
+        # Fallback: force-fund, transfer underlying, then `skim` to realize vault cash.
         ensure_token_balance(rpc, usdc, ANVIL_ADDR0, amount)
         cast_send_pk(rpc, usdc, "transfer(address,uint256)", debt_vault, str(amount), private_key=ANVIL_PK0)
+        try:
+            deficit = max(0, target_cash - cash_after)
+            if deficit > 0:
+                cast_send_pk(rpc, debt_vault, "skim(uint256,address)", str(deficit), ANVIL_ADDR0, private_key=ANVIL_PK0)
+        except Exception:
+            # Some vault/token combinations may not require or permit skim in this path.
+            pass
         cash_after = int(cast_call(rpc, debt_vault, "cash()(uint256)").split()[0])
 
     if cash_after < target_cash:
