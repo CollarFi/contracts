@@ -909,11 +909,7 @@ contract CollarVault is
 
     // (removed) _validateQuote / _validateBorrowAmount(Quote): quote-based flow removed.
 
-    function _validateBorrowRequest(
-        address collateralAsset,
-        uint256 putStrike,
-        uint256 borrowAmount
-    ) internal view {
+    function _validateBorrowRequest(address collateralAsset, uint256 putStrike, uint256 borrowAmount) internal view {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if ($.strikeScale[collateralAsset] == 0) {
             revert CV_InvalidConfig();
