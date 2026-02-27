@@ -38,12 +38,12 @@ This specification documents the smart contracts, off-chain components and flows
 ### 3.1 Collateral deposit (L1 -> L2)
 
 When a borrower wants a loan, they can either:
-- submit `createDepositWithMandatePermit` on L1 with a Permit2 signature, or
+- submit `createDepositWithMandatePermit` on L1 with a Permit2 signature (deposit request only), or
 - submit `createDepositWithMandate` on L1 (standard ERC20 `approve` + `transferFrom`) to create the pending deposit and accept a mandate atomically in one transaction.
 
-In both paths, the borrower provides desired loan parameters (collateral asset/amount, maturity, put strike, desired borrow amount). The vault pulls collateral (standard, non-rebasing ERC-20 only; use wrapped variants such as wstETH), sends it over the Socket SuperBridge to L2, and records a pending-deposit state. The keeper finalizes the loan later after L2 confirmations and quote acceptance.
+In both paths, the borrower provides desired loan parameters (collateral asset/amount, maturity, put strike, desired borrow amount). The off-chain API / keeper flow estimates and signs baseline RFQ parameters that the borrower can use when accepting a mandate. The vault pulls collateral (standard, non-rebasing ERC-20 only; use wrapped variants such as wstETH), sends it over the Socket SuperBridge to L2, and records a pending-deposit state. The keeper finalizes the loan later after L2 confirmations and trade confirmation.
 
-Because RFQ execution on Derive requires collateral in the subaccount, the loan lifecycle is asynchronous: collateral must be confirmed on L2 before RFQs are requested/accepted, before the RFQ trade is executed, and before the loan is disbursed on L1.
+Because RFQ execution on Derive requires collateral in the subaccount, the loan lifecycle is asynchronous: collateral must be confirmed on L2 before the RFQ trade can be executed and before the loan is disbursed on L1. Mandate acceptance can happen either atomically with deposit creation (`createDepositWithMandate`) or later via `acceptMandate`.
 
 To minimize trust assumptions, the vault sends a LayerZero message alongside the Socket bridge transfer containing the Socket `messageId` and deposit metadata (loanId, asset, amount, subaccountId). A dedicated L2 receiver stores the message and only signs a Deposit Module action once the Socket transfer is confirmed. The L2 receiver then sends a LayerZero `DepositConfirmed` acknowledgment (including the vault recipient, asset and amount) back to L1 so the keeper can finalize state without relying on an off-chain relayer.
 
@@ -103,7 +103,7 @@ Derive provides various strategy contracts (e.g., CCTSA for covered calls, PPTSA
 
 **User input**: Borrower selects collateral asset `Q`, amount and maturity `t` (must match a Derive-defined expiry). They choose a put strike `K_p` (from a tier) and request to borrow USDC amount `D`.
 
-**RFQ (off-chain)**: The vault executor queries market makers to provide quotes for the call strike `K_c` such that the call premium minus the put premium equals or exceeds the target cost of capital (Euler rate + risk premium and, if needed, settlement drag). After the L2 deposit is confirmed, the borrower accepts a mandate on-chain by calling `acceptMandate` with a keeper-signed baseline RFQ (`rfq`, `rfqSig`) and a deadline. Strike tiers and valid Derive maturities are enforced by the executor; the vault does not maintain an on-chain tier list or expiry whitelist.
+**RFQ estimation + baseline signing (off-chain)**: The off-chain API / vault executor queries market makers and strategy logic to estimate executable collar terms and signs a baseline RFQ for the borrower. The baseline RFQ constrains the on-chain mandate (`callStrike`, `putStrike`, `borrowAmount`, `minNetInterest`, `maxNegativeC`, expiry/deadline metadata). Strike tiers and valid Derive maturities are enforced by the executor; the vault does not maintain an on-chain tier list or expiry whitelist.
 
 **Collateral deposit (L1 -> L2)**: The borrower either:
 - calls `createDepositWithMandatePermit` (Permit2 path), or
@@ -113,13 +113,23 @@ In both cases, collateral is bridged to Derive L2 and the loan is placed in pend
 
 **Subaccount deposit**: After the collateral arrives on L2, the executor calls the Deposit Module with action data (asset: `Q`, amount: `Q`, `managerForNewAccount: true` if new subaccount). This deposits the collateral into the vault subaccount.
 
-**Mandate acceptance (L1)**: After the L2 deposit is confirmed, the borrower can call `acceptMandate(loanId, rfq, rfqSig, deadline)` on L1. Here `rfq` is a keeper-signed baseline quote (EIP-712) that binds the deposit terms and provides baseline `(callStrike, putStrike)` bounds; the vault derives `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, commits principal, and sends a `MandateCreated` LayerZero message to L2.
+**Mandate acceptance (L1)**: The borrower accepts mandate constraints on L1 either:
+- atomically in `createDepositWithMandate(...)`, or
+- later via `acceptMandate(loanId, rfq, rfqSig, deadline)`.
+
+Here `rfq` is a keeper-signed baseline RFQ (EIP-712) that binds the deposit terms and provides baseline `(callStrike, putStrike)` bounds. The vault derives `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, computes and stores fixed interest from `originationFeeApr`, reserves principal / `maxNegativeC` liquidity, and sends a `MandateCreated` LayerZero message to L2.
 
 LoanId binding rules:
 - direct `acceptMandate` requires `rfq.loanId == loanId` (exact binding),
 - atomic `createDepositWithMandate` allows `rfq.loanId == 0` as a sentinel because the loanId is assigned in-transaction, while all other RFQ fields and borrower binding are still enforced.
 
 Once a mandate is accepted, the borrower **cannot** request a return until that mandate `deadline` has passed.
+
+Additional mandate checks enforced on-chain:
+- `rfq.rfqExpiry` must be valid at acceptance time,
+- baseline RFQ hash is one-time use (`usedBaselineRfqs` replay protection),
+- an active (non-expired) mandate cannot be replaced,
+- after expiry, borrower may refresh mandate or request return.
 
 **Griefing vector (cap lockup) and mitigation**: Without an oracle-backed strike sanity check, a borrower could attempt to set an absurdly high `putStrike` (and thus an absurdly high `borrowAmount`, since `borrowAmount = collateralAmount * putStrike / scale`) and then accept a mandate to commit principal and lock the pool cap. This is mitigated by requiring a keeper-signed baseline RFQ at mandate acceptance time:
 
@@ -139,12 +149,15 @@ After the RFQ taker action is executed from the vault subaccount, the L2 receive
 The `TradeConfirmed` message contains:
 - `quoteHash` (optional / informational)
 - `takerNonce` (the RFQ taker nonce used on Derive)
-- `amount` + `socketMessageId` for the USDC origination fee bridged to L1 (if any)
-- `data = abi.encode(callStrike, putStrike, expiry)` to allow L1 to verify the executed strikes and expiry against the accepted mandate.
+- `amount` + `socketMessageId` (metadata; if `amount > 0`, L2 enforces the Socket message finalization check)
+- `data = abi.encode(callStrike, putStrike, expiry, realizedC)` to allow L1 to verify executed strikes/expiry and realized net premium economics against the accepted mandate.
 
-**Loan disbursement**: On L1, `finalizeLoan` (keeper) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry)` and verifies they satisfy the accepted mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`).
+**Loan disbursement**: On L1, `finalizeLoan` (keeper) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry, realizedC)` and verifies mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`) plus economics:
 
-The vault computes the expected origination fee from `originationFeeApr` and loan duration and requires it to match the bridged amount (if any). The fee is split between the liquidity vault and treasury using `treasuryBps` and paid at loan creation. After fee distribution, the vault withdraws USDC from the liquidity vault equal to `D` and transfers it to the borrower. It records loan state `ACTIVE_ZERO_COST`, storing `loanId`, `Q`, `K_p`, `K_c`, `t`, principal `D` and the vault subaccount ID.
+- `fixedInterest + realizedC >= minNetInterest`
+- `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(fixedInterest + realizedC))`
+
+If valid, the vault opens the loan, borrows reserved principal from the liquidity vault, and transfers USDC principal `D` to the borrower. It records state `ACTIVE_ZERO_COST`, storing `loanId`, `Q`, `K_p`, `K_c`, `t`, principal `D` and subaccount ID.
 
 ```mermaid
 sequenceDiagram
@@ -158,26 +171,26 @@ sequenceDiagram
   participant Deposit as Derive DepositModule
   participant Match as Derive Matching/RfqModule
   participant Liquidity as L1 CollarLiquidityVault
-  participant Treasury as L1 Treasury
 
-  Borrower->>Vault: createDepositWithMandatePermit(params, permit)
+  Borrower->>Vault: createDepositWithMandate(...) OR createDepositWithMandatePermit(...)
   Vault->>Socket: _bridgeToL2(collateral)
   Vault->>LZ: sendMessage(DepositIntent)
+  opt permit path
+    Borrower->>Vault: acceptMandate(loanId, rfq, rfqSig, deadline)
+    Vault->>LZ: sendMessage(MandateCreated)
+  end
   LZ-->>L2Recv: LZ DepositIntent
+  LZ-->>L2Recv: LZ MandateCreated
   Keeper->>L2Recv: handleMessage(guid)
   L2Recv->>TSA: signActionData(DepositModule)
   TSA->>Deposit: executeAction(vault subaccount)
   L2Recv-->>LZ: send DepositConfirmed
-  Borrower->>Vault: acceptMandate(loanId, rfq, rfqSig, deadline)
   Keeper->>TSA: signActionData(RFQ taker)
   Keeper->>Match: verifyAndMatch(...)
-  Note over Keeper,Socket: Withdraw origination fee (WithdrawalModule + Socket)
-  Keeper->>L2Recv: sendTradeConfirmed(TradeConfirmedParams{loanId, fee, socketMessageId, callStrike, putStrike, expiry, takerNonce, quoteHash})
+  Keeper->>L2Recv: sendTradeConfirmed(..., callStrike, putStrike, expiry, realizedC)
   L2Recv-->>LZ: send TradeConfirmed
   Keeper->>Vault: finalizeLoan(loanId, depositGuid, tradeGuid)
-  Vault->>Treasury: transfer fee cut
-  Vault->>Liquidity: transfer fee cut
-  Vault->>Liquidity: borrow(D)
+  Vault->>Liquidity: borrowReserved(D)
   Vault->>Borrower: transfer USDC principal
 ```
 
@@ -368,11 +381,11 @@ Maintains L1 loan records, collateral amounts, and maturity schedules. It relies
 
 Provides functions:
 
-- `createDepositWithMandatePermit(params, permit, permitSig)` - permissionless; records the borrower's desired loan parameters, pulls collateral via Permit2, calls the bridge, and records a pending deposit awaiting L2 confirmation.
+- `createDepositWithMandatePermit(params, permit, permitSig)` - permissionless Permit2 path; records desired loan parameters, pulls collateral, and creates a pending deposit awaiting L2 confirmation. Mandate can be accepted later via `acceptMandate`.
 - `createDepositWithMandate(params, rfq, rfqSig, deadline)` - permissionless; standard ERC20 approval path that atomically creates the pending deposit and accepts a mandate in one transaction.
-- `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline quote. The vault sets `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, commits principal, and sends a `MandateCreated` message to L2. Direct calls require exact `rfq.loanId == loanId`; only the atomic path allows `rfq.loanId == 0` sentinel.
+- `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline RFQ. The vault sets strike bounds, computes fixed interest, reserves principal / `maxNegativeC`, and sends `MandateCreated` to L2. Direct calls require exact `rfq.loanId == loanId`; only the atomic path allows `rfq.loanId == 0` sentinel.
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
-- `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed` messages to open the loan and disburse USDC.
+- `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed`, validates `(callStrike, putStrike, expiry, realizedC)` against mandate bounds/economics, and then opens/disburses the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
 - `settleLoan(loanId, outcome, lzGuid)` - restricted to keeper roles; consumes L2 settlement/collateral messages and advances maturity handling. Reverts on-chain if `block.timestamp < maturity`.
 - `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
@@ -419,9 +432,9 @@ Events on the bridge are monitored by the deposit/withdraw handlers to trigger m
 
 ### 6.6 Pricing and RFQ service
 
-A separate off-chain module handles quoting. It queries MMs for call strike quotes given the borrower's requested principal and put strike. It ensures the call premium minus put premium meets the target cost of capital (Euler rate + risk premium). Settlement drag is negligible due to fast bridging.
+A separate off-chain API / quoting module estimates executable collar parameters and produces a keeper-signed baseline RFQ for mandate acceptance. Inputs include borrower request (asset, amount, maturity, put strike, borrow amount) and MM pricing.
 
-The RFQ module produces off-chain quotes that inform the keeper’s execution. The borrower’s on-chain `acceptMandate` constrains execution (strike bounds + deadline), and L1 verifies the realized strikes/expiry from `TradeConfirmed.data`.
+The baseline RFQ is consumed on-chain by `acceptMandate` (or atomically via `createDepositWithMandate`) and constrains trade execution (strike bounds, economics floor, reserve cap, expiry/deadline). L1 finalization verifies realized terms from `TradeConfirmed.data` (`callStrike`, `putStrike`, `expiry`, `realizedC`).
 
 ### 6.7 Keeper and monitoring
 
@@ -446,7 +459,7 @@ Monitors for situations such as bridge downtime, fast withdrawal limits, or lend
 - Oracle reliability: Use multiple price feeds or Derive's TWAP to determine settlement prices. Validate oracle data in the off-chain executor.
 - Settlement amount trust: The executor is trusted to compute and report the final settlement amount (including collateral sale proceeds) in `SettlementReport`.
 - Derive cash balance risk: Call ITM settlement may result in a negative USDC balance on Derive; ensure the collateral sale fully nets the negative balance before bridging, and account for potential L1 backstop usage if net proceeds are below principal.
-- Socket message ID trust: `TradeConfirmed` includes a Socket `messageId` provided by the L2 executor; the system trusts the executor to supply the correct bridge message ID and amount for the origination fee withdrawal.
+- Trade confirmation data trust boundary: `TradeConfirmed` carries executed strikes/expiry and `realizedC`; L1 relies on authenticated LayerZero delivery plus configured recipient/subaccount checks when validating this payload.
 - Aggregate coverage withdrawals: Withdrawals from the shared vault subaccount must only be signed when `baseBalance - amount >= shortCalls` and cash stays above `maxNegCash`. This is an aggregate (not per-loan) invariant and relies on correct executor operation.
 - Return/trade mutual exclusion: A `ReturnRequest` is best-effort and does not cancel the loan on its own. The L2 receiver must emit **at most one** of `TradeConfirmed` or `CollateralReturned` for a loan. L1 must reject `finalizeDepositReturn` if `TradeConfirmed` was handled, and must reject `finalizeLoan` if `CollateralReturned` was handled.
 - Mandate deficit reserve invariant: every accepted mandate stores `maxNegativeC`; LP liquidity of this amount is reserved before trade execution, `realizedDeficit` at finalize must not exceed the reserve, settlement consumes only actual deficit, and leftover reserve is released when the loan closes/returns.
@@ -473,7 +486,7 @@ The following items are not yet specified and require clarification before imple
 - Shared subaccount accounting: per-loan balance checks are not possible with current Derive action formats. Review whether aggregated withdrawals introduce an attack vector and whether a protocol-level withdrawal pause or stricter withdrawal gating is required (including cancellation/return flows).
 - On-chain bounds: strikes and maturities are enforced off-chain by the executor; no on-chain strike/maturity whitelist is required.
 - Maturity enforcement: whether Derive-defined maturities are enforced on-chain or only by the executor.
-- Origination fee timing: fee is annualized, funded from net option premium, and paid at loan creation after the fee withdrawal is bridged to L1.
+- Fixed-interest timing: fixed borrower interest is computed and stored at mandate acceptance time (`acceptMandate`) and enforced at `finalizeLoan` via `fixedInterest + realizedC` economic checks.
 
 ## 10. Conclusion
 
