@@ -411,44 +411,6 @@ contract CollarVaultTest is Test {
         assertTrue(vault.returnRequested(loanId));
     }
 
-    function testRecordTradeConfirmedMarksLoan() public {
-        CollarVault.DepositParams memory params = CollarVault.DepositParams({
-            collateralAsset: address(wbtc),
-            collateralAmount: 1e8,
-            maturity: block.timestamp + 30 days,
-            putStrike: 20_000e6,
-            borrowAmount: 20_000e6
-        });
-
-        uint256 loanId = _requestDeposit(params);
-        bytes32 tradeGuid = bytes32(uint256(7000 + loanId));
-        messenger.setMessage(
-            tradeGuid,
-            CollarLZMessages.Message({
-                action: CollarLZMessages.Action.TradeConfirmed,
-                loanId: loanId,
-                asset: address(0),
-                amount: 0,
-                recipient: address(vault),
-                subaccountId: 1,
-                socketMessageId: bytes32(0),
-                secondaryAmount: 0,
-                quoteHash: bytes32(0),
-                takerNonce: 1,
-                data: abi.encode(uint256(25_000e6), uint256(20_000e6), uint64(params.maturity), int256(0))
-            })
-        );
-
-        vault.recordTradeConfirmed(tradeGuid);
-
-        assertTrue(vault.tradeConfirmed(loanId));
-        assertTrue(vault.collateralActivated(loanId));
-        assertFalse(vault.returnRequested(loanId));
-
-        vm.expectRevert(CollarVault.CV_InvalidState.selector);
-        vault.recordTradeConfirmed(tradeGuid);
-    }
-
     function testAcceptMandateAllowsWhenFixedInterestIsSigned() public {
         vault.setOriginationFeeApr(0.2e18);
         CollarVault.DepositParams memory params = CollarVault.DepositParams({

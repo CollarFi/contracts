@@ -120,7 +120,6 @@ contract CollarVault is
     event CollateralDepositReturned(
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
-    event TradeConfirmedRecorded(uint256 indexed loanId, bytes32 guid);
     // LoanRolledOver is emitted by CollarVaultRolloverModule.
 
     constructor() {
@@ -1113,25 +1112,6 @@ contract CollarVault is
         if (message.loanId == 0) {
             revert CV_InvalidMessage();
         }
-    }
-
-    function _peekLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
-        message = _loadLZMessage(guid);
-    }
-
-    /// @notice Record that an RFQ trade was confirmed on L2 and mark collateral activated.
-    /// @dev This marker is optional; finalizeLoan also validates TradeConfirmed directly.
-    function recordTradeConfirmed(bytes32 tradeGuid) external whenNotPaused {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        CollarLZMessages.Message memory lzMessage = _peekLZMessage(tradeGuid);
-        uint256 loanId = $.lzMessenger.validateTradeConfirmedMarker(lzMessage, address(this), $.deriveSubaccountId);
-        if ($.tradeConfirmed[loanId]) {
-            revert CV_InvalidState();
-        }
-        $.tradeConfirmed[loanId] = true;
-        $.collateralActivated[loanId] = true;
-        $.returnRequested[loanId] = false;
-        emit TradeConfirmedRecorded(loanId, tradeGuid);
     }
 
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {
