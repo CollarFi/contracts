@@ -120,7 +120,6 @@ contract CollarVault is
     event CollateralDepositReturned(
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
-    event TradeConfirmedRecorded(uint256 indexed loanId, bytes32 guid);
     // LoanRolledOver is emitted by CollarVaultRolloverModule.
 
     constructor() {
@@ -390,11 +389,20 @@ contract CollarVault is
     }
 
     /// @notice Request a collateral deposit via Permit2 and send a deposit intent to L2.
-    function createDepositWithPermit(
+    /// @dev Named to mirror createDepositWithMandate while using Permit2 instead of prior ERC20 approval.
+    function createDepositWithMandatePermit(
         DepositParams calldata params,
         IAllowanceTransfer.PermitSingle calldata permit,
         bytes calldata permitSig
     ) external payable nonReentrant whenNotPaused returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
+        (loanId, socketMessageId, lzGuid) = _createDepositWithPermit(params, permit, permitSig);
+    }
+
+    function _createDepositWithPermit(
+        DepositParams calldata params,
+        IAllowanceTransfer.PermitSingle calldata permit,
+        bytes calldata permitSig
+    ) internal returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (!$.collateralAllowed[params.collateralAsset]) {
             revert CV_InvalidConfig();
@@ -926,7 +934,19 @@ contract CollarVault is
         $.totalCommittedPrincipal -= amount;
     }
 
+    /// @notice Backward-compatible wrapper that uses full msg.value for deposit LZ message.
     function _requestCollateralDeposit(address borrower, DepositParams calldata params)
+        internal
+        returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
+    {
+        return _requestCollateralDepositWithBudget(borrower, params, msg.value);
+    }
+
+    /// @notice Requests collateral deposit with explicit ETH budget for LZ message.
+    /// @param borrower The address of the borrower
+    /// @param params The deposit parameters
+    /// @param ethForLz The amount of ETH to use for the LZ message fee (msg.value - bridgeFee)
+    function _requestCollateralDepositWithBudget(address borrower, DepositParams calldata params, uint256 ethForLz)
         internal
         returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
     {
@@ -964,7 +984,7 @@ contract CollarVault is
         socketMessageId = config.adapter.messageId();
 
         uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
-        if (msg.value < bridgeFee) {
+        if (ethForLz < bridgeFee) {
             revert CV_InsufficientValue();
         }
 
@@ -974,7 +994,7 @@ contract CollarVault is
         }
 
         _bridgeToL2(params.collateralAsset, params.collateralAmount, $.l2Recipient);
-        lzGuid = $.lzMessenger.sendDepositIntentAutoFee{value: msg.value - bridgeFee}(
+        lzGuid = $.lzMessenger.sendDepositIntentAutoFee{value: ethForLz - bridgeFee}(
             loanId,
             l2MessageAsset_,
             params.collateralAmount,
@@ -987,6 +1007,80 @@ contract CollarVault is
         emit CollateralDepositRequested(
             loanId, borrower, params.collateralAsset, params.collateralAmount, params.maturity, socketMessageId, lzGuid
         );
+    }
+
+    /// @notice Creates a deposit AND accepts a mandate in a single transaction using standard ERC20 transferFrom.
+    /// @dev Borrower must have approved this contract for collateral transfer beforehand.
+    /// Keeper pre-signs RFQ with loanId=0 (sentinel), which the vault substitutes with actual loanId.
+    /// @param params The deposit parameters
+    /// @param rfq The keeper-signed baseline RFQ (with loanId=0 sentinel)
+    /// @param rfqSig The RFQ signature
+    /// @param deadline The mandate deadline after which borrower can request return
+    /// @return loanId The assigned loan ID
+    /// @return socketMessageId The Socket bridge message ID
+    /// @return depositLzGuid The LayerZero GUID for the DepositIntent message
+    /// @return mandateLzGuid The LayerZero GUID for the MandateCreated message
+    function createDepositWithMandate(
+        DepositParams calldata params,
+        ICollarVaultFinalizeModule.BaselineRfq calldata rfq,
+        bytes calldata rfqSig,
+        uint64 deadline
+    )
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint256 loanId, bytes32 socketMessageId, bytes32 depositLzGuid, bytes32 mandateLzGuid)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+
+        // Validate inputs
+        if (!$.collateralAllowed[params.collateralAsset]) {
+            revert CV_InvalidConfig();
+        }
+        if (params.collateralAmount == 0) {
+            revert CV_InvalidInput();
+        }
+        if (params.maturity <= block.timestamp) {
+            revert CV_InvalidInput();
+        }
+        _validateBorrowAmount(params.collateralAsset, params.collateralAmount, params.putStrike, params.borrowAmount);
+
+        // Ensure finalize module is configured
+        address module = $.finalizeModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+
+        // Pull collateral via standard ERC20 transferFrom (requires prior approval)
+        IERC20(params.collateralAsset).safeTransferFrom(msg.sender, address(this), params.collateralAmount);
+
+        // Calculate ETH split: bridge fee + deposit LZ fee + mandate LZ fee.
+        // We keep a simple split heuristic between both LZ messages.
+        uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
+        if (msg.value < bridgeFee) {
+            revert CV_InsufficientValue();
+        }
+        uint256 remainingEth = msg.value - bridgeFee;
+        uint256 ethForDepositLz = remainingEth / 2;
+        uint256 ethForMandateLz = remainingEth - ethForDepositLz;
+
+        // Step 1: Create the pending deposit and send DepositIntent to L2
+        (loanId, socketMessageId, depositLzGuid) =
+            _requestCollateralDepositWithBudget(msg.sender, params, ethForDepositLz + bridgeFee);
+
+        // Step 2: Accept mandate via delegatecall to finalize module
+        // Note: RFQ is passed as-is (with loanId=0 sentinel if used)
+        // The finalize module handles sentinel loanId and verifies signature against original hash
+        bytes memory ret = _delegateTo(
+            module,
+            abi.encodeCall(
+                ICollarVaultFinalizeModule.acceptMandateInternal, (loanId, rfq, rfqSig, deadline, ethForMandateLz)
+            )
+        );
+        mandateLzGuid = abi.decode(ret, (bytes32));
+
+        // Any excess LZ fee budget in each send*AutoFee call is refunded by the messenger to `msg.sender`.
     }
 
     // (removed) _confirmLoanCreation/_openLoan: quote-based flow removed.
@@ -1018,32 +1112,6 @@ contract CollarVault is
         if (message.loanId == 0) {
             revert CV_InvalidMessage();
         }
-    }
-
-    function _peekLZMessage(bytes32 guid) internal view returns (CollarLZMessages.Message memory message) {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if (address($.lzMessenger) == address(0)) {
-            revert CV_InvalidConfig();
-        }
-
-        message = $.lzMessenger.receivedMessage(guid);
-        if (message.loanId == 0) {
-            revert CV_InvalidMessage();
-        }
-    }
-
-    /// @notice Record that a trade was confirmed on L2 and mark collateral activated.
-    function recordTradeConfirmed(bytes32 tradeGuid) external whenNotPaused {
-        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        CollarLZMessages.Message memory lzMessage = _peekLZMessage(tradeGuid);
-        uint256 loanId = $.lzMessenger.validateTradeConfirmedMarker(lzMessage, address(this), $.deriveSubaccountId);
-        if ($.tradeConfirmed[loanId]) {
-            revert CV_InvalidState();
-        }
-        $.tradeConfirmed[loanId] = true;
-        $.collateralActivated[loanId] = true;
-        $.returnRequested[loanId] = false;
-        emit TradeConfirmedRecorded(loanId, tradeGuid);
     }
 
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {

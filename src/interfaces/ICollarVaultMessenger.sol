@@ -15,17 +15,6 @@ interface ICollarVaultMessenger {
         view
         returns (MessagingFee memory fee);
 
-    function sendMessage(CollarLZMessages.Message calldata message)
-        external
-        payable
-        returns (MessagingReceipt memory receipt);
-
-    /// @notice Quote then send a message, refunding any excess native fee to `refundTo`.
-    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
-        external
-        payable
-        returns (bytes32 guid);
-
     function sendDepositIntentAutoFee(
         uint256 loanId,
         address asset,
@@ -116,10 +105,6 @@ interface ICollarVaultMessenger {
         address expectedBorrower,
         uint64 expectedMaturity
     ) external pure returns (uint256 callStrike, uint256 putStrike, uint256 interestApr, int256 realizedC);
-
-    function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
-        external
-        pure;
 
     function receivedMessage(bytes32 guid) external view returns (CollarLZMessages.Message memory message);
 }

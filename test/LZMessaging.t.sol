@@ -199,16 +199,25 @@ contract LZMessagingTest is Test {
     }
 
     function testL1ToL2MessageStored() public {
-        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, bytes32(0));
+        bytes32 socketMessageId = bytes32(uint256(1));
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, socketMessageId);
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
+        bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            socketMessageId,
+            address(this)
+        );
 
         assertEq(endpointL1.lastDstEid(), L2_EID);
         assertEq(endpointL1.lastReceiver(), _addressToBytes32(address(receiver)));
 
-        _deliverToReceiver(receipt.guid, message);
+        _deliverToReceiver(guid, message);
 
-        (CollarLZMessages.Action action, uint256 loanId,,,,,,,,,) = receiver.pendingMessages(receipt.guid);
+        (CollarLZMessages.Action action, uint256 loanId,,,,,,,,,) = receiver.pendingMessages(guid);
         assertEq(loanId, message.loanId);
         assertEq(uint8(action), uint8(message.action));
     }
@@ -220,12 +229,20 @@ contract LZMessagingTest is Test {
         socket.setExecuted(socketMessageId, true);
         token.mint(address(receiver), message.amount);
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
+        bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            message.socketMessageId,
+            address(this)
+        );
+        _deliverToReceiver(guid, message);
 
-        receiver.handleMessage(receipt.guid);
+        receiver.handleMessage(guid);
 
-        assertTrue(receiver.handledMessages(receipt.guid));
+        assertTrue(receiver.handledMessages(guid));
 
         IActionVerifier.Action memory action = tsa.getLastAction();
         assertEq(address(action.module), tsa.depositModule());
@@ -256,36 +273,54 @@ contract LZMessagingTest is Test {
 
         socket.setExecuted(socketMessageId, true);
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
+        bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            message.socketMessageId,
+            address(this)
+        );
+        _deliverToReceiver(guid, message);
 
         vm.expectRevert(CollarTSAReceiver.CTR_InvalidAsset.selector);
-        receiver.handleMessage(receipt.guid);
+        receiver.handleMessage(guid);
     }
 
     function testHandleMessageRevertsIfSocketPending() public {
         bytes32 socketMessageId = bytes32(uint256(200));
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, socketMessageId);
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
+        bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            message.socketMessageId,
+            address(this)
+        );
+        _deliverToReceiver(guid, message);
 
         vm.expectRevert(CollarTSAReceiver.CTR_SocketNotFinalized.selector);
-        receiver.handleMessage(receipt.guid);
+        receiver.handleMessage(guid);
     }
 
     function testHandleReturnRequestSignsWithdrawalWithGuidNonce() public {
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
 
-        receiver.handleMessage(receipt.guid);
+        receiver.handleMessage(guid);
 
         IActionVerifier.Action memory action = tsa.getLastAction();
         assertEq(address(action.module), tsa.withdrawalModule());
         assertEq(action.subaccountId, message.subaccountId);
-        assertEq(action.nonce, uint256(receipt.guid));
+        assertEq(action.nonce, uint256(guid));
     }
 
     function testHandleReturnRequestRevertsAfterTradeConfirmed() public {
@@ -308,24 +343,30 @@ contract LZMessagingTest is Test {
         );
 
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
 
         vm.expectRevert(CollarTSAReceiver.CTR_ReturnRequestAfterTrade.selector);
-        receiver.handleMessage(receipt.guid);
+        receiver.handleMessage(guid);
     }
 
     function testHandleReturnRequestRevertsIfDuplicate() public {
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
 
-        MessagingReceipt memory first = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(first.guid, message);
-        receiver.handleMessage(first.guid);
+        bytes32 first = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(first, message);
+        receiver.handleMessage(first);
 
-        MessagingReceipt memory second = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(second.guid, message);
+        bytes32 second = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(second, message);
         vm.expectRevert(CollarTSAReceiver.CTR_ReturnAlreadyRequested.selector);
-        receiver.handleMessage(second.guid);
+        receiver.handleMessage(second);
     }
 
     function testSendTradeConfirmedRequiresUsedNonce() public {
@@ -352,9 +393,11 @@ contract LZMessagingTest is Test {
 
     function testSendTradeConfirmedAfterReturnRequestSucceeds() public {
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
-        receiver.handleMessage(receipt.guid);
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
 
         bytes32 quoteHash = keccak256("quote");
         uint256 takerNonce = 9;
@@ -442,9 +485,17 @@ contract LZMessagingTest is Test {
             data: data
         });
 
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
-        receiver.handleMessage(receipt.guid);
+        bytes32 guid = messenger.sendRolloverIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            message.data,
+            address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
 
         ICollarLoanStore.Loan memory loan = loanStore.getLoan(1);
         assertTrue(loan.rolloverPending);
@@ -504,9 +555,11 @@ contract LZMessagingTest is Test {
         bytes32 socketMessageId = bytes32(uint256(300));
 
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
-        receiver.handleMessage(receipt.guid);
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
 
         receiver.sendCollateralReturned{value: 1}(1, address(token), 2e18, socketMessageId);
 
@@ -530,9 +583,11 @@ contract LZMessagingTest is Test {
 
     function testSendCollateralReturnedRevertsAfterTradeConfirmed() public {
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
-        MessagingReceipt memory receipt = messenger.sendMessageWithOptions{value: 1}(message, "");
-        _deliverToReceiver(receipt.guid, message);
-        receiver.handleMessage(receipt.guid);
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
 
         bytes32 quoteHash = keccak256("quote");
         uint256 takerNonce = 11;

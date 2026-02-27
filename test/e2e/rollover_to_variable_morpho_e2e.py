@@ -106,6 +106,7 @@ def _deploy_morpho_market(rpc: str, usdc: str, collateral: str, seed_amount: int
         # Path B fallback: impersonate known USDC holder if market still not funded.
         if _read_total_supply_assets() < seed_amount:
             _set_eth_balance(rpc, SEED_USDC_HOLDER)
+            _ensure_token_balance(rpc, usdc, SEED_USDC_HOLDER, seed_amount)
             cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", morpho, str(seed_amount))
             cast_send_from(
                 rpc,

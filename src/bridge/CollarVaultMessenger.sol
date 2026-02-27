@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     MessagingFee,
     MessagingReceipt,
@@ -59,39 +60,12 @@ contract CollarVaultMessenger is AccessControl, OApp {
         emit OptionsUpdated(options);
     }
 
-    function sendMessage(CollarLZMessages.Message calldata message)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (MessagingReceipt memory receipt)
-    {
-        return _send(message, defaultOptions);
-    }
-
-    function sendMessageWithOptions(CollarLZMessages.Message calldata message, bytes calldata options)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (MessagingReceipt memory receipt)
-    {
-        return _send(message, options);
-    }
-
     function quoteMessage(CollarLZMessages.Message calldata message, bytes calldata options)
         external
         view
         returns (MessagingFee memory fee)
     {
         return _quote(remoteEid, abi.encode(message), options, false);
-    }
-
-    function sendMessageAutoFee(CollarLZMessages.Message calldata message, address refundTo)
-        external
-        payable
-        onlyRole(VAULT_ROLE)
-        returns (bytes32 guid)
-    {
-        return _sendAutoFee(message, refundTo);
     }
 
     function sendDepositIntentAutoFee(
@@ -339,21 +313,6 @@ contract CollarVaultMessenger is AccessControl, OApp {
         }
     }
 
-    function validateOriginationFee(CollarLZMessages.Message calldata lzMessage, uint256 feeAmount, address usdcAsset)
-        external
-        pure
-    {
-        if (feeAmount == 0) {
-            if (lzMessage.amount != 0) {
-                revert CV_LZMessageMismatch();
-            }
-            return;
-        }
-        if (lzMessage.asset != usdcAsset || lzMessage.amount != feeAmount || lzMessage.socketMessageId == bytes32(0)) {
-            revert CV_LZMessageMismatch();
-        }
-    }
-
     function _lzReceive(Origin calldata, bytes32 guid, bytes calldata message, address, bytes calldata)
         internal
         override
@@ -379,6 +338,12 @@ contract CollarVaultMessenger is AccessControl, OApp {
 
         MessagingReceipt memory receipt =
             _lzSend(remoteEid, payload, defaultOptions, MessagingFee(fee.nativeFee, 0), refundTo);
+
+        uint256 refund = msg.value - fee.nativeFee;
+        if (refund > 0) {
+            Address.sendValue(payable(refundTo), refund);
+        }
+
         emit MessageSent(receipt.guid, message.action, message.loanId);
         return receipt.guid;
     }

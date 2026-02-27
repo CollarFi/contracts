@@ -411,7 +411,7 @@ def main(
         quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
         lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", quote_msg, default_opts)).group(0))
 
-        create_sig = "createDepositWithPermit((address,uint256,uint256,uint256,uint256),((address,uint160,uint48,uint48),address,uint256),bytes)"
+        create_sig = "createDepositWithMandatePermit((address,uint256,uint256,uint256,uint256),((address,uint160,uint48,uint48),address,uint256),bytes)"
         fallback_bridge = None
         try:
             tx = cast_send(
