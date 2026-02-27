@@ -49,3 +49,69 @@ jobs:
         run: |
           forge test -vvv --skip script
         id: test
+
+  e2e:
+    name: E2E fork flows
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 60
+    env:
+      # Allow repo/org-level override; keep sensible public defaults.
+      L1_RPC_URL: ${{ vars.L1_RPC_URL || secrets.L1_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+      L2_RPC_URL: ${{ vars.L2_RPC_URL || secrets.L2_RPC_URL || 'https://testnet-rpc.derive.xyz/' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry (forge/cast/anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prune duplicate lyra-utils + normalize imports
+        run: |
+          rm -rf lib/v2-matching/lib/lyra-utils
+          find lib/v2-matching/lib/v2-core/lib/lyra-utils -name '*.sol' -print0 \
+            | xargs -0 sed -i 's/\("\)src\//\1lyra-utils\//g'
+
+      - name: Create fork env files for e2e
+        run: |
+          cat > .env.l1.testnet <<EOF
+          RPC_URL=${L1_RPC_URL}
+          ACCOUNT=CDPDeployer
+          TREASURY=0x693e444389F3cB953F8baD0EaC2CE2885df68De7
+          LZ_ENDPOINT=0x6EDCE65403992e310A62460808c4b910D972f10f
+          EOF
+
+          cat > .env.l2.testnet <<EOF
+          RPC_URL=${L2_RPC_URL}
+          ACCOUNT=CDPDeployer
+          LZ_ENDPOINT=0x6C7Ab2202C98C4227C5c46f1417D81144DA716Ff
+          SOCKET_TRACKER=0xFDC28fA368c33DEC7853d63B65FC5Cfe01B212fc
+          DERIVE_MARKET=ETH
+          EOF
+
+      - name: Run deployment e2e
+        run: |
+          uv run python test/e2e/deployment_e2e.py \
+            --l1-env .env.l1.testnet \
+            --l2-env .env.l2.testnet
+
+      - name: Run fresh loan flow e2e
+        run: |
+          uv run python test/e2e/fresh_loan_flow.py
+
+      - name: Run rollover-to-variable e2e (Euler)
+        run: |
+          uv run python test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
+
+      - name: Run rollover-to-variable e2e (Morpho)
+        run: |
+          uv run python test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
