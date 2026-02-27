@@ -399,15 +399,6 @@ contract CollarVault is
         (loanId, socketMessageId, lzGuid) = _createDepositWithPermit(params, permit, permitSig);
     }
 
-    /// @notice Backward-compatible alias for Permit2 deposit path.
-    function createDepositWithPermit(
-        DepositParams calldata params,
-        IAllowanceTransfer.PermitSingle calldata permit,
-        bytes calldata permitSig
-    ) external payable nonReentrant whenNotPaused returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
-        (loanId, socketMessageId, lzGuid) = _createDepositWithPermit(params, permit, permitSig);
-    }
-
     function _createDepositWithPermit(
         DepositParams calldata params,
         IAllowanceTransfer.PermitSingle calldata permit,
