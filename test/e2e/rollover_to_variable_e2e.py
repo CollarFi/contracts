@@ -65,7 +65,19 @@ from common import (
 
 def _load_euler_core_addresses(chain_id: int = 11155111) -> dict:
     p = ROOT / "lib/euler-interfaces/addresses/test" / str(chain_id) / "CoreAddresses.json"
-    return _load_json(p)
+    if p.exists():
+        return _load_json(p)
+
+    # Fallback for environments where euler-interfaces address book is not checked out.
+    if chain_id == 11155111:
+        return {
+            "evc": "0x28b0C8B389c3e39A4AFe089A6810A2e7Bc3C551A",
+            "eVaultFactory": "0xEB07789D76392302dc9181Aca1e07836F9257B5a",
+            "eVaultImplementation": "0x3da1BBD2fC6BC1c7893d553D687603F3B8723085",
+            "protocolConfig": "0x98d70B9e97C918ecBbF7EC1751CF7EBF9728a5b6",
+        }
+
+    raise RuntimeError(f"missing Euler core address book: {p}")
 
 def _create_evault(rpc: str, factory: str, implementation: str, asset: str, oracle: str, unit_of_account: str) -> str:
     trailing = "0x" + asset[2:] + oracle[2:] + unit_of_account[2:]
