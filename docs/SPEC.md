@@ -7,7 +7,7 @@ Version 1.0 - Draft dated 6 Jan 2026
 CollarFi is a DeFi lending protocol that issues zero-cost, fixed-maturity USDC loans against crypto collateral (major assets supported by Derive, e.g., WBTC, cbBTC, WETH, wstETH). Each loan is hedged by opening a collar on the Derive exchange: the protocol buys a put option to protect the loan principal and sells a call option to collect enough premium to cover the cost of capital, platform fees and (if necessary) the settlement drag. Upon maturity, three outcomes are possible:
 
 1. Put ITM (underwater): the collateral's value is insufficient to repay the principal. The protocol sells the collateral, collects the put payoff and repays lenders.
-2. Neutral corridor: both options expire OTM; the borrower's collateral is still worth at least the principal. The loan converts to a variable-rate loan backed by the same collateral in a money-market vault.
+2. Neutral corridor: both options expire OTM; the borrower's collateral is still worth at least the principal. The loan converts to a variable-rate loan backed by the same collateral in a money-market vault, or is closed on L1 via deterministic repay-and-close fallback if conversion cannot be completed in time.
 3. Call ITM (profit): the collateral appreciates above the call strike. The protocol sells the collateral, pays the call payoff to the option buyer (the market maker) and repays the principal; the borrower receives the upside beyond the call strike.
 
 CollarFi uses Derive's vault architecture and fast bridge to manage the collateral and options on Derive L2 while keeping liquidity and accounting on Ethereum L1 (see Derive official docs: https://docs.derive.xyz/). Liquidity providers deposit USDC into a lending vault; idle funds are deployed into an external ERC-4626 yield vault for variable yield. Borrowers receive USDC loans; market makers quote call strikes; and an off-chain executor places orders on Derive.
@@ -396,6 +396,25 @@ Since the fast bridge is available for all fund movement, the protocol can remov
 - LTV safety at conversion: Because origination/rollover enforced §5.1.2 at `K_p`, and neutral outcome satisfies `S_t >= K_p`, realized conversion LTV is guaranteed to be no worse than the configured put-floor bound.
 - Accounting: On successful open, the zero-cost loan is transitioned to `ACTIVE_VARIABLE`; debt is tracked on L1 and users interact via `CollarVault` facade calls (`repayVariableLoan`, `withdrawVariableCollateral`).
 
+### 5.3.1 READY_FOR_VARIABLE fallback close (no-oracle)
+
+If a neutral-settled loan remains `READY_FOR_VARIABLE` and cannot be converted immediately (e.g., insufficient adapter liquidity), the protocol supports a deterministic repay-and-close path on L1.
+
+- Let `totalDue = principal + fixedInterest`.
+- Borrower self-close window: for `readyLoanCloseGracePeriod` after entering `READY_FOR_VARIABLE`, only the borrower may call `settleReadyLoanByRepay(loanId)`.
+  - Caller transfers `totalDue` USDC to the vault.
+  - Vault repays LP principal and credits fixed interest.
+  - Borrower receives all collateral; loan is closed.
+- Keeper forced-close window: after the borrower window expires, only `KEEPER_ROLE` may call `settleReadyLoanByRepay(loanId)`.
+  - Keeper transfers `totalDue` USDC to the vault.
+  - Keeper receives a deterministic collateral slice computed from put-floor units (no oracle):
+    - `baseSeize = ceil(totalDue * strikeScale / putStrike)`
+    - `keeperSeize = min(collateralAmount, ceil(baseSeize * (MAX_BPS + readyLoanKeeperPenaltyBps) / MAX_BPS))`
+  - Borrower receives `collateralAmount - keeperSeize`.
+  - Vault repays LP principal and credits fixed interest; loan is closed.
+
+This fallback avoids adding an on-chain liquidation/oracle subsystem while preserving deterministic closure.
+
 ### 5.4 Rolling a variable loan into a new collar
 
 Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan via `CollarVault`, withdraw collateral via `CollarVault`, and initiate a new collar loan via the standard origination flow.
@@ -420,6 +439,7 @@ Provides functions:
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
 - `settleLoan(loanId, outcome, lzGuid)` - restricted to keeper roles; consumes L2 settlement/collateral messages and advances maturity handling. Reverts on-chain if `block.timestamp < maturity`.
 - `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
+- `settleReadyLoanByRepay(loanId)` - closes a `READY_FOR_VARIABLE` loan by repaying `principal + fixedInterest` in USDC and releasing collateral deterministically. Borrower-only during `readyLoanCloseGracePeriod`; keeper-only after expiry with strike-based penalty seize.
 - `repayVariableLoan(loanId, amount)` - borrower/keeper callable; repays variable debt via the vault facade.
 - `withdrawVariableCollateral(loanId, amount)` - borrower/keeper callable; withdraws variable-phase collateral via the vault facade.
 - `setMaxTotalPrincipal(max)` - parameter role; caps the total committed principal (pending + active zero-cost loans) to scale TVL gradually.
@@ -479,7 +499,9 @@ A keeper service must monitor block timestamps and call `settleLoan` once a loan
 For neutral outcomes, keeper should:
 1. call `settleLoan(loanId, Neutral, lzGuid)` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
 2. periodically call `tryConvertReadyLoan` for queued loans,
-3. skip gracefully when adapter liquidity is insufficient.
+3. if conversion remains unavailable until `readyLoanCloseGracePeriod` expires, call `settleReadyLoanByRepay` with keeper capital.
+
+Borrower can always self-close via `settleReadyLoanByRepay` during the borrower window.
 
 Monitors for situations such as bridge downtime, fast withdrawal limits, or lending-adapter liquidity shortages; in such cases loans remain queued in `READY_FOR_VARIABLE` until constraints clear.
 
@@ -502,6 +524,7 @@ Monitors for situations such as bridge downtime, fast withdrawal limits, or lend
 - Roll-safe borrow bound (mandatory): Origination and rollover MUST enforce `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` where `maxRollLtv < 1e18`.
 - Governance-configured LTV buffer: `maxRollLtv` MUST be derived from the selected variable-rate market route and configured below market hard limits (e.g., `maxRollLtv = marketMaxLtv - rollLtvBuffer`, with conservative rounding down).
 - Neutral-conversion guarantee: Because neutral outcome satisfies `S_t >= K_p`, validating the bound at `K_p` guarantees conversion LTV will not exceed the configured roll-safe threshold for any neutral settlement price.
+- READY fallback close is deterministic and oracle-free: collateral seize for post-deadline keeper close is computed from `(totalDue, putStrike, strikeScale, readyLoanKeeperPenaltyBps)` and capped by available collateral.
 - Role-based parameter changes: Strike bounds, slippage tolerances, market allowlists and other risk parameters are adjustable by a role controlled by a multisig; governance modules may replace this role later.
 - Emergency controls: The protocol supports emergency controls to pause new loans and settlement.
 

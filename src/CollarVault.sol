@@ -155,6 +155,8 @@ contract CollarVault is
         $.treasury = treasury_;
         $.maxMandateDuration = 30 minutes;
         $.maxRollLtv = 1e18;
+        $.readyLoanCloseGracePeriod = 3 days;
+        $.readyLoanKeeperPenaltyBps = 500;
         $.nextLoanId = 1;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -660,6 +662,22 @@ contract CollarVault is
         converted = abi.decode(ret, (bool));
     }
 
+    /// @notice Close a READY_FOR_VARIABLE loan by repaying debt and receiving collateral.
+    function settleReadyLoanByRepay(uint256 loanId)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 repaid, uint256 callerCollateral, uint256 borrowerCollateral)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        address module = $.settleModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret = _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.settleReadyLoanByRepay, (loanId)));
+        (repaid, callerCollateral, borrowerCollateral) = abi.decode(ret, (uint256, uint256, uint256));
+    }
+
     /// @notice Repay an active variable loan via the vault.
     function repayVariableLoan(uint256 loanId, uint256 amount)
         external
@@ -845,6 +863,14 @@ contract CollarVault is
         if (duration == 0) revert CV_InvalidConfig();
         $.maxMandateDuration = duration;
         emit MaxMandateDurationUpdated(duration);
+    }
+
+    /// @notice Update READY fallback-close configuration.
+    function setReadyLoanConfig(uint64 gracePeriod, uint256 keeperPenaltyBps) external onlyRole(PARAMETER_ROLE) {
+        if (gracePeriod == 0) revert CV_InvalidConfig();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        $.readyLoanCloseGracePeriod = gracePeriod;
+        $.readyLoanKeeperPenaltyBps = keeperPenaltyBps;
     }
 
     /// @notice Allow or revoke an RFQ signer.

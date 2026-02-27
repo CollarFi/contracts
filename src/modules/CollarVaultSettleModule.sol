@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 import {CollarLZMessages} from "../bridge/CollarLZMessages.sol";
 import {ICollarVaultSettleModule} from "../interfaces/ICollarVaultSettleModule.sol";
@@ -14,13 +15,24 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 contract CollarVaultSettleModule is ICollarVaultSettleModule {
     using SafeERC20 for IERC20;
     using Clones for address;
+    bytes32 internal constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
+
     error CV_InvalidState();
     error CV_InvalidInput();
+    error CV_InvalidConfig();
+    error CV_Unauthorized();
 
     event LoanSettled(uint256 indexed loanId, CollarVaultShared.SettlementOutcome outcome, uint256 settlementAmount);
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
     event LoanReadyForVariable(uint256 indexed loanId, uint256 requiredDebt);
     event LoanConverted(uint256 indexed loanId, uint256 variableDebt);
+    event ReadyLoanSettledByRepay(
+        uint256 indexed loanId,
+        address indexed payer,
+        uint256 repaid,
+        uint256 payerCollateralAmount,
+        uint256 borrowerCollateralAmount
+    );
     event VariableCollateralWithdrawn(uint256 indexed loanId, uint256 amount);
     event LoanClosed(uint256 indexed loanId);
 
@@ -90,6 +102,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
 
         _releaseCommittedPrincipal(loan.principal);
         _releaseReserve(loanId);
+        delete $.readyLoanSince[loanId];
         loan.state = CollarVaultShared.LoanState.CLOSED;
         emit LoanSettled(loanId, outcome, settlementAmount);
         emit LoanClosed(loanId);
@@ -102,6 +115,75 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             revert CV_InvalidState();
         }
         converted = _convertToVariableIfLiquid(loanId);
+    }
+
+    function settleReadyLoanByRepay(uint256 loanId)
+        external
+        returns (uint256 repaid, uint256 callerCollateral, uint256 borrowerCollateral)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        CollarVaultShared.Loan storage loan = $.loans[loanId];
+        if (loan.state != CollarVaultShared.LoanState.READY_FOR_VARIABLE) {
+            revert CV_InvalidState();
+        }
+
+        uint256 readySince = $.readyLoanSince[loanId];
+        if (readySince == 0 || $.readyLoanCloseGracePeriod == 0) {
+            revert CV_InvalidConfig();
+        }
+        uint256 deadline = readySince + $.readyLoanCloseGracePeriod;
+
+        repaid = loan.principal + loan.interestOwed;
+        $.usdc.safeTransferFrom(msg.sender, address(this), repaid);
+
+        if (msg.sender == loan.borrower) {
+            if (block.timestamp > deadline) {
+                revert CV_Unauthorized();
+            }
+            callerCollateral = loan.collateralAmount;
+            borrowerCollateral = 0;
+        } else {
+            if (block.timestamp <= deadline || !IAccessControl(address(this)).hasRole(KEEPER_ROLE, msg.sender)) {
+                revert CV_Unauthorized();
+            }
+            uint256 strikeScale = $.strikeScale[loan.collateralAsset];
+            if (strikeScale == 0 || loan.putStrike == 0) {
+                revert CV_InvalidConfig();
+            }
+            uint256 baseCollateral =
+                Math.mulDiv(repaid, strikeScale, loan.putStrike, Math.Rounding.Ceil);
+            callerCollateral = Math.mulDiv(
+                baseCollateral,
+                CollarVaultShared.MAX_BPS + $.readyLoanKeeperPenaltyBps,
+                CollarVaultShared.MAX_BPS,
+                Math.Rounding.Ceil
+            );
+            if (callerCollateral > loan.collateralAmount) {
+                callerCollateral = loan.collateralAmount;
+            }
+            borrowerCollateral = loan.collateralAmount - callerCollateral;
+        }
+
+        _releaseCommittedPrincipal(loan.principal);
+        _releaseReserve(loanId);
+        delete $.readyLoanSince[loanId];
+        delete $.variableLoanPositions[loanId];
+
+        $.usdc.safeIncreaseAllowance(address($.liquidityVault), loan.principal);
+        $.liquidityVault.repay(loan.principal);
+        if (loan.interestOwed > 0) {
+            $.usdc.safeTransfer(address($.liquidityVault), loan.interestOwed);
+        }
+        if (callerCollateral > 0) {
+            IERC20(loan.collateralAsset).safeTransfer(msg.sender, callerCollateral);
+        }
+        if (borrowerCollateral > 0) {
+            IERC20(loan.collateralAsset).safeTransfer(loan.borrower, borrowerCollateral);
+        }
+
+        loan.state = CollarVaultShared.LoanState.CLOSED;
+        emit ReadyLoanSettledByRepay(loanId, msg.sender, repaid, callerCollateral, borrowerCollateral);
+        emit LoanClosed(loanId);
     }
 
     function _consumeNeutralCollateralReturned(uint256 loanId, CollarLZMessages.Message memory lzMessage) internal {
@@ -121,6 +203,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             revert CV_InvalidInput();
         }
         loan.state = CollarVaultShared.LoanState.READY_FOR_VARIABLE;
+        $.readyLoanSince[loanId] = block.timestamp;
         emit LoanReadyForVariable(loanId, loan.principal + loan.interestOwed);
     }
 
@@ -162,6 +245,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         loan.state = CollarVaultShared.LoanState.ACTIVE_VARIABLE;
         loan.variableDebt = liveDebt;
         loan.collateralAmount = liveCollateral;
+        delete $.readyLoanSince[loanId];
         emit LoanConverted(loanId, liveDebt);
         return true;
     }

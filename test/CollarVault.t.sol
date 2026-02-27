@@ -115,6 +115,11 @@ contract CollarVaultTest is Test {
         wbtc.approve(address(permit2), type(uint256).max);
     }
 
+    function testSetReadyLoanConfigRevertsOnInvalidInput() public {
+        vm.expectRevert(CollarVault.CV_InvalidConfig.selector);
+        vault.setReadyLoanConfig(0, 1);
+    }
+
     function testCreateDepositWithMandateCombinesDepositAndMandate() public {
         CollarVault.DepositParams memory params = CollarVault.DepositParams({
             collateralAsset: address(wbtc),
@@ -1327,6 +1332,167 @@ contract CollarVaultTest is Test {
         CollarVaultShared.Loan memory afterLoan = vault.getLoan(loanId);
         assertEq(uint256(afterLoan.state), uint256(CollarVaultShared.LoanState.ACTIVE_VARIABLE));
         assertEq(afterLoan.variableDebt, totalDue);
+    }
+
+    function testBorrowerCanSettleReadyLoanByRepayBeforeDeadline() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 21_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9860 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(borrower, totalDue);
+        vm.startPrank(borrower);
+        usdc.approve(address(vault), totalDue);
+        (uint256 repaid, uint256 callerCollateral, uint256 borrowerCollateral) = vault.settleReadyLoanByRepay(loanId);
+        vm.stopPrank();
+
+        assertEq(repaid, totalDue);
+        assertEq(callerCollateral, loanBefore.collateralAmount);
+        assertEq(borrowerCollateral, 0);
+        CollarVaultShared.Loan memory loanAfter = vault.getLoan(loanId);
+        assertEq(uint256(loanAfter.state), uint256(CollarVaultShared.LoanState.CLOSED));
+        assertEq(wbtc.balanceOf(borrower), 1e8);
+    }
+
+    function testKeeperCannotSettleReadyLoanByRepayBeforeDeadline() public {
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 21_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9870 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(keeper, totalDue);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), totalDue);
+        vm.expectRevert(CollarVault.CV_Unauthorized.selector);
+        vault.settleReadyLoanByRepay(loanId);
+        vm.stopPrank();
+    }
+
+    function testKeeperCanSettleReadyLoanByRepayAfterDeadlineWithPenaltySeize() public {
+        vault.setReadyLoanConfig(uint64(1 days), 500);
+
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 30_000e6, 25_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9880 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        vm.warp(loanBefore.maturity + 1 days + 2);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(keeper, totalDue);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), totalDue);
+        (uint256 repaid, uint256 callerCollateral, uint256 borrowerCollateral) = vault.settleReadyLoanByRepay(loanId);
+        vm.stopPrank();
+
+        assertEq(repaid, totalDue);
+        assertEq(callerCollateral, 84_000_000);
+        assertEq(borrowerCollateral, 16_000_000);
+        assertEq(wbtc.balanceOf(keeper), 84_000_000);
+        assertEq(wbtc.balanceOf(borrower), 16_000_000);
+        CollarVaultShared.Loan memory loanAfter = vault.getLoan(loanId);
+        assertEq(uint256(loanAfter.state), uint256(CollarVaultShared.LoanState.CLOSED));
+    }
+
+    function testBorrowerCannotSettleReadyLoanByRepayAfterDeadline() public {
+        vault.setReadyLoanConfig(uint64(1 days), 500);
+
+        uint256 loanId = _createAndFinalizeLoan(block.timestamp + 30 days, 25_000e6, 21_000e6, 0);
+        CollarVaultShared.Loan memory loanBefore = vault.getLoan(loanId);
+
+        vm.warp(loanBefore.maturity + 1);
+        bytes32 guid = bytes32(uint256(9890 + loanId));
+        messenger.setMessage(
+            guid,
+            CollarLZMessages.Message({
+                action: CollarLZMessages.Action.CollateralReturned,
+                loanId: loanId,
+                asset: address(wbtc),
+                amount: loanBefore.collateralAmount,
+                recipient: address(vault),
+                subaccountId: 1,
+                socketMessageId: bytes32(0),
+                secondaryAmount: 0,
+                quoteHash: bytes32(0),
+                takerNonce: 0,
+                data: bytes("")
+            })
+        );
+
+        vm.prank(keeper);
+        vault.settleLoan(loanId, CollarVaultShared.SettlementOutcome.Neutral, guid);
+
+        vm.warp(loanBefore.maturity + 1 days + 2);
+
+        uint256 totalDue = loanBefore.principal + loanBefore.interestOwed;
+        usdc.mint(borrower, totalDue);
+        vm.startPrank(borrower);
+        usdc.approve(address(vault), totalDue);
+        vm.expectRevert(CollarVault.CV_Unauthorized.selector);
+        vault.settleReadyLoanByRepay(loanId);
+        vm.stopPrank();
     }
 
     function testBorrowerRepaysAndWithdrawsVariableCollateralViaVault() public {
