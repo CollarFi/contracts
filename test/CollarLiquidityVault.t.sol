@@ -14,7 +14,6 @@ contract CollarLiquidityVaultTest is Test {
 
     address internal lender = address(0x1111);
     address internal borrower = address(0x2222);
-    uint256 internal constant SLOT_COUNT = 6;
 
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -97,39 +96,6 @@ contract CollarLiquidityVaultTest is Test {
         _assertReserveInvariant();
     }
 
-    function testReserveBlocksWithdrawableLiquidity() public {
-        vault.supplyToYieldVault(900_000e6);
-        vault.reserve(1, 300_000e6);
-        assertEq(usdc.balanceOf(address(vault)), 300_000e6);
-        assertEq(usdc.balanceOf(address(yieldVault)), 700_000e6);
-        assertEq(vault.availableLiquidity(), 700_000e6);
-        _assertReserveInvariant();
-
-        vm.startPrank(lender);
-        assertEq(vault.maxWithdraw(lender), 700_000e6);
-        vm.stopPrank();
-    }
-
-    function testConsumeAndReleaseReserve() public {
-        vault.supplyToYieldVault(800_000e6);
-        vault.reserve(1, 200_000e6);
-        assertEq(usdc.balanceOf(address(vault)), 200_000e6);
-        assertEq(usdc.balanceOf(address(yieldVault)), 800_000e6);
-
-        vault.consume(1, 120_000e6);
-        assertEq(usdc.balanceOf(address(this)), 120_000e6);
-        assertEq(vault.reservedByLoan(1), 80_000e6);
-        assertEq(usdc.balanceOf(address(vault)), 80_000e6);
-        _assertReserveInvariant();
-
-        vault.release(1);
-        assertEq(vault.reservedByLoan(1), 0);
-        assertEq(vault.reservedLiquidity(), 0);
-        assertEq(usdc.balanceOf(address(vault)), 0);
-        assertEq(usdc.balanceOf(address(yieldVault)), 880_000e6);
-        _assertReserveInvariant();
-    }
-
     function testReservePrincipalPullsFromYieldVaultAndReleaseRedeposits() public {
         vault.supplyToYieldVault(900_000e6);
         vault.reservePrincipal(7, 250_000e6);
@@ -145,97 +111,8 @@ contract CollarLiquidityVaultTest is Test {
         _assertReserveInvariant();
     }
 
-    function testCannotSupplyReservedLiquidityToYieldVault() public {
-        vault.supplyToYieldVault(900_000e6);
-        vault.reserve(1, 250_000e6);
-
-        vm.expectRevert(CollarLiquidityVault.LV_ReservedLiquidityLocked.selector);
-        vault.supplyToYieldVault(120_000e6);
-        _assertReserveInvariant();
-    }
-
-    function testReserveRevertsWhenYieldVaultFundsCannotBeWithdrawn() public {
-        vault.supplyToYieldVault(900_000e6);
-
-        uint256 yieldVaultBalance = usdc.balanceOf(address(yieldVault));
-        vm.prank(address(yieldVault));
-        usdc.transfer(address(0xBEEF), yieldVaultBalance);
-
-        vm.expectRevert();
-        vault.reserve(1, 200_000e6);
-        _assertReserveInvariant();
-    }
-
-    function testFuzzReservationInvariantMultipleReserveRelease(uint256 seed, uint8 steps) public {
-        uint256[SLOT_COUNT] memory reservedLiquidityBySlot;
-        uint256[SLOT_COUNT] memory reservedPrincipalBySlot;
-        uint256 stepsCount = bound(uint256(steps), 20, 120);
-
-        for (uint256 i = 0; i < stepsCount; i++) {
-            uint256 roll = uint256(keccak256(abi.encode(seed, i)));
-            uint256 slot = (roll % SLOT_COUNT) + 1;
-            uint256 op = roll % 6;
-
-            if (op == 0) {
-                uint256 freeOnHand = _freeOnHand();
-                if (freeOnHand > 0) {
-                    uint256 amount = bound((roll >> 32) % (freeOnHand + 1), 1, freeOnHand);
-                    vault.supplyToYieldVault(amount);
-                }
-            } else if (op == 1) {
-                uint256 yieldVaultBal = usdc.balanceOf(address(yieldVault));
-                if (yieldVaultBal > 0) {
-                    uint256 amount = bound((roll >> 32) % (yieldVaultBal + 1), 1, yieldVaultBal);
-                    vault.withdrawFromYieldVault(amount);
-                }
-            } else if (op == 2) {
-                if (reservedLiquidityBySlot[slot - 1] == 0) {
-                    uint256 available = vault.availableLiquidity();
-                    if (available > 0) {
-                        uint256 amount = bound((roll >> 32) % (available + 1), 1, available);
-                        vault.reserve(slot, amount);
-                        reservedLiquidityBySlot[slot - 1] = amount;
-                    }
-                }
-            } else if (op == 3) {
-                uint256 existingReserve = reservedLiquidityBySlot[slot - 1];
-                if (existingReserve > 0) {
-                    vault.release(slot);
-                    reservedLiquidityBySlot[slot - 1] = 0;
-                }
-            } else if (op == 4) {
-                if (reservedPrincipalBySlot[slot - 1] == 0) {
-                    uint256 available = vault.availableLiquidity();
-                    if (available > 0) {
-                        uint256 amount = bound((roll >> 32) % (available + 1), 1, available);
-                        vault.reservePrincipal(slot + SLOT_COUNT, amount);
-                        reservedPrincipalBySlot[slot - 1] = amount;
-                    }
-                }
-            } else {
-                uint256 existingPrincipalReserve = reservedPrincipalBySlot[slot - 1];
-                if (existingPrincipalReserve > 0) {
-                    vault.releasePrincipal(slot + SLOT_COUNT);
-                    reservedPrincipalBySlot[slot - 1] = 0;
-                }
-            }
-
-            _assertReserveInvariant();
-        }
-    }
-
     function _assertReserveInvariant() internal view {
         uint256 onHand = usdc.balanceOf(address(vault));
-        uint256 totalReserved = vault.reservedLiquidity() + vault.reservedPrincipal();
-        assertGe(onHand, totalReserved);
-    }
-
-    function _freeOnHand() internal view returns (uint256) {
-        uint256 onHand = usdc.balanceOf(address(vault));
-        uint256 totalReserved = vault.reservedLiquidity() + vault.reservedPrincipal();
-        if (onHand <= totalReserved) {
-            return 0;
-        }
-        return onHand - totalReserved;
+        assertGe(onHand, vault.reservedPrincipal());
     }
 }

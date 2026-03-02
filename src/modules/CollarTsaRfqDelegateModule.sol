@@ -238,7 +238,6 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
 
         uint256 fixedInterest = loan.rolloverPending ? loan.rolloverFixedInterest : loan.fixedInterest;
         uint256 minNetInterest = loan.rolloverPending ? loan.rolloverMinNetInterest : loan.minNetInterest;
-        uint256 maxNegativeC = loan.rolloverPending ? loan.rolloverMaxNegativeC : loan.maxNegativeC;
         uint256 maxRollLtv = loan.rolloverPending ? loan.rolloverMaxRollLtv : loan.maxRollLtv;
         uint256 strikeScale = loan.rolloverPending ? loan.rolloverStrikeScale : loan.strikeScale;
         uint256 putStrike = loan.rolloverPending ? openedPutStrike : parsed.putStrike;
@@ -248,11 +247,7 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         );
 
         int256 expectedTotal = int256(fixedInterest) + expectedC;
-        if (expectedTotal < int256(minNetInterest)) {
-            revert CTSA_InsufficientCash();
-        }
-        uint256 expectedDeficit = expectedTotal < 0 ? uint256(-expectedTotal) : 0;
-        if (expectedDeficit > maxNegativeC) {
+        if (expectedC < 0 || expectedTotal < int256(minNetInterest)) {
             revert CTSA_InsufficientCash();
         }
 

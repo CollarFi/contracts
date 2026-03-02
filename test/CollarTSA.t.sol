@@ -34,8 +34,8 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
-            subId: OptionEncoding.toSubId(expiry, 1800e18, false),
-            price: 1e18,
+            subId: OptionEncoding.toSubId(expiry, 2000e18, false),
+            price: 100e18,
             amount: -1e18
         });
 
@@ -116,7 +116,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
-            subId: OptionEncoding.toSubId(expiry, 1800e18, false),
+            subId: OptionEncoding.toSubId(expiry, 2000e18, false),
             price: 1e18,
             amount: -1e18
         });
@@ -277,10 +277,9 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             address(0xB0B0),
             keccak256("rollover"),
             2100e18,
-            1900e18,
+            2100e18,
             minNetInterest,
             20e18,
-            500e6,
             1e18,
             1e18,
             newExpiry,
@@ -302,19 +301,19 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(0), // overwritten by caller
-            subId: OptionEncoding.toSubId(oldExpiry, 1800e18, false),
+            subId: OptionEncoding.toSubId(oldExpiry, 2000e18, false),
             price: 1e18,
             amount: 1e18
         });
         trades[2] = IRfqModule.TradeData({
             asset: address(0), // overwritten by caller
             subId: OptionEncoding.toSubId(newExpiry, 2200e18, true),
-            price: 150e18,
+            price: 140e18,
             amount: 1e18
         });
         trades[3] = IRfqModule.TradeData({
             asset: address(0), // overwritten by caller
-            subId: OptionEncoding.toSubId(newExpiry, 1800e18, false),
+            subId: OptionEncoding.toSubId(newExpiry, 2000e18, false),
             price: 50e18,
             amount: -1e18
         });
@@ -472,8 +471,8 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         });
         trades[1] = IRfqModule.TradeData({
             asset: address(markets[MARKET].option),
-            subId: OptionEncoding.toSubId(expiry, 1800e18, false),
-            price: 1e18,
+            subId: OptionEncoding.toSubId(expiry, 2000e18, false),
+            price: 100e18,
             amount: -amount
         });
 

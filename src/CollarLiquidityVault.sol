@@ -17,9 +17,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
 
     IERC4626 public yieldVault;
     uint256 public activeLoans;
-    uint256 public reservedLiquidity;
     uint256 public reservedPrincipal;
-    mapping(uint256 => uint256) public reservedByLoan;
     mapping(uint256 => uint256) public reservedPrincipalByLoan;
 
     error LV_InsufficientLiquidity();
@@ -35,9 +33,6 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     error LV_YieldVaultHasFunds();
 
     event LossRecorded(uint256 amount);
-    event LiquidityReserved(uint256 indexed loanId, uint256 amount);
-    event LiquidityReleased(uint256 indexed loanId, uint256 amount);
-    event LiquidityConsumed(uint256 indexed loanId, uint256 amount);
     event PrincipalReserved(uint256 indexed loanId, uint256 amount);
     event PrincipalReleased(uint256 indexed loanId, uint256 amount);
 
@@ -75,8 +70,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
             revert LV_YieldVaultNotSet();
         }
         uint256 balance = IERC20(asset()).balanceOf(address(this));
-        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
-        if (balance <= totalReserved || assets > balance - totalReserved) {
+        if (balance <= reservedPrincipal || assets > balance - reservedPrincipal) {
             revert LV_ReservedLiquidityLocked();
         }
         IERC20(asset()).safeIncreaseAllowance(address(yieldVault), assets);
@@ -167,65 +161,13 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
         _assertReserveCoverage();
     }
 
-    /// @notice Reserve liquidity for a loan-level negative option premium budget.
-    function reserve(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
-        if (loanId == 0 || amount == 0) {
-            revert LV_InvalidAmount();
-        }
-        if (reservedByLoan[loanId] != 0) {
-            revert LV_ReserveExists();
-        }
-        if (amount > availableLiquidity()) {
-            revert LV_InsufficientLiquidity();
-        }
-        _pullFromYieldVaultIfNeeded(amount);
-        reservedByLoan[loanId] = amount;
-        reservedLiquidity += amount;
-        emit LiquidityReserved(loanId, amount);
-        _assertReserveCoverage();
-    }
-
-    /// @notice Consume reserved liquidity and transfer it to the caller.
-    function consume(uint256 loanId, uint256 amount) external onlyRole(VAULT_ROLE) nonReentrant {
-        if (amount == 0) {
-            revert LV_InvalidAmount();
-        }
-        uint256 reserved = reservedByLoan[loanId];
-        if (reserved == 0) {
-            revert LV_ReserveMissing();
-        }
-        if (amount > reserved) {
-            revert LV_ReserveExceeds();
-        }
-        reservedByLoan[loanId] = reserved - amount;
-        reservedLiquidity -= amount;
-        _pullFromYieldVaultIfNeeded(amount);
-        IERC20(asset()).safeTransfer(msg.sender, amount);
-        emit LiquidityConsumed(loanId, amount);
-        _assertReserveCoverage();
-    }
-
-    /// @notice Release any unused reserve for a loan.
-    function release(uint256 loanId) external onlyRole(VAULT_ROLE) nonReentrant {
-        uint256 reserved = reservedByLoan[loanId];
-        if (reserved == 0) {
-            revert LV_ReserveMissing();
-        }
-        delete reservedByLoan[loanId];
-        reservedLiquidity -= reserved;
-        _supplyToYieldVaultIfSet(reserved);
-        emit LiquidityReleased(loanId, reserved);
-        _assertReserveCoverage();
-    }
-
     /// @notice Return assets immediately available for withdrawal or borrowing.
     function availableLiquidity() public view returns (uint256) {
         uint256 gross = IERC20(asset()).balanceOf(address(this)) + _yieldVaultAssets();
-        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
-        if (gross <= totalReserved) {
+        if (gross <= reservedPrincipal) {
             return 0;
         }
-        return gross - totalReserved;
+        return gross - reservedPrincipal;
     }
 
     /// @notice Return total assets including outstanding loans and yield vault balance.
@@ -264,7 +206,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
 
     function _pullFromYieldVaultForOutflow(uint256 outflowAssets) internal {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
-        uint256 required = outflowAssets + reservedLiquidity + reservedPrincipal;
+        uint256 required = outflowAssets + reservedPrincipal;
         if (required <= balance) {
             return;
         }
@@ -300,8 +242,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
     }
 
     function _assertReserveCoverage() internal view {
-        uint256 totalReserved = reservedLiquidity + reservedPrincipal;
-        if (IERC20(asset()).balanceOf(address(this)) < totalReserved) {
+        if (IERC20(asset()).balanceOf(address(this)) < reservedPrincipal) {
             revert LV_ReserveInvariantBroken();
         }
     }

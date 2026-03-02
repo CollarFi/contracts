@@ -159,13 +159,12 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 maxPutStrike,
                 uint256 minNetInterest,
                 uint256 fixedInterest,
-                uint256 maxNegativeC,
                 uint256 maxRollLtv,
                 uint256 strikeScale,
                 uint64 maturity,
                 uint64 deadline
             ) = abi.decode(
-                message.data, (address, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint64, uint64)
+                message.data, (address, uint256, uint256, uint256, uint256, uint256, uint256, uint64, uint64)
             );
 
             loanStore.recordMandate(
@@ -177,7 +176,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 maxPutStrike,
                 minNetInterest,
                 fixedInterest,
-                maxNegativeC,
                 maxRollLtv,
                 strikeScale,
                 maturity,
@@ -198,27 +196,13 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 maxPutStrike,
                 uint256 minNetInterest,
                 uint256 fixedInterest,
-                uint256 maxNegativeC,
                 uint256 maxRollLtv,
                 uint256 strikeScale,
                 uint64 deadline,
                 uint256 nonce
             ) = abi.decode(
                 message.data,
-                (
-                    bytes32,
-                    address,
-                    uint64,
-                    uint256,
-                    uint256,
-                    uint256,
-                    uint256,
-                    uint256,
-                    uint256,
-                    uint256,
-                    uint64,
-                    uint256
-                )
+                (bytes32, address, uint64, uint256, uint256, uint256, uint256, uint256, uint256, uint64, uint256)
             );
             nonce;
 
@@ -230,7 +214,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 maxPutStrike,
                 minNetInterest,
                 fixedInterest,
-                maxNegativeC,
                 maxRollLtv,
                 strikeScale,
                 newMaturity,

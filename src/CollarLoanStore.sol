@@ -40,7 +40,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 maxPutStrike,
         uint256 minNetInterest,
         uint256 fixedInterest,
-        uint256 maxNegativeC,
         uint256 maxRollLtv,
         uint256 strikeScale,
         uint64 maturity,
@@ -80,9 +79,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.fixedInterest != 0 && loan.fixedInterest != fixedInterest) {
             revert CLS_Mismatch();
         }
-        if (loan.maxNegativeC != 0 && loan.maxNegativeC != maxNegativeC) {
-            revert CLS_Mismatch();
-        }
         if (loan.maxRollLtv != 0 && loan.maxRollLtv != maxRollLtv) {
             revert CLS_Mismatch();
         }
@@ -101,7 +97,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.maxPutStrike = maxPutStrike;
         loan.minNetInterest = minNetInterest;
         loan.fixedInterest = fixedInterest;
-        loan.maxNegativeC = maxNegativeC;
         loan.maxRollLtv = maxRollLtv;
         loan.strikeScale = strikeScale;
         loan.maturity = maturity;
@@ -147,7 +142,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         uint256 maxPutStrike,
         uint256 minNetInterest,
         uint256 fixedInterest,
-        uint256 maxNegativeC,
         uint256 maxRollLtv,
         uint256 strikeScale,
         uint64 maturity,
@@ -171,7 +165,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMaxPutStrike = maxPutStrike;
         loan.rolloverMinNetInterest = minNetInterest;
         loan.rolloverFixedInterest = fixedInterest;
-        loan.rolloverMaxNegativeC = maxNegativeC;
         loan.rolloverMaxRollLtv = maxRollLtv;
         loan.rolloverStrikeScale = strikeScale;
         loan.rolloverMaturity = maturity;
@@ -192,7 +185,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         loan.rolloverMaxPutStrike = 0;
         loan.rolloverMinNetInterest = 0;
         loan.rolloverFixedInterest = 0;
-        loan.rolloverMaxNegativeC = 0;
         loan.rolloverMaxRollLtv = 0;
         loan.rolloverStrikeScale = 0;
         loan.rolloverMaturity = 0;
