@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import signal
 import subprocess
 import tempfile
 import time
@@ -160,28 +162,35 @@ def _run_cmd(label: str, cmd: list[str], timeout_s: int = 600) -> str:
     typer.echo(f"[e2e] ▶ {label}")
     typer.echo(f"[e2e]    cmd: {' '.join(shlex.quote(c) for c in cmd)}")
     start = time.time()
+
+    proc = subprocess.Popen(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
     try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout_s,
-        )
+        out, _ = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.time() - start
-        tail = (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else ""
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, _ = proc.communicate()
+        combined = (out or "") + ((exc.stdout or "") if isinstance(exc.stdout, str) else "")
+        tail = "\n".join(combined.strip().splitlines()[-120:])
         raise RuntimeError(f"{label} timed out after {elapsed:.1f}s\n{tail}") from exc
 
     elapsed = time.time() - start
     if proc.returncode != 0:
-        out = (proc.stdout or "").strip()
-        tail = "\n".join(out.splitlines()[-120:])
+        tail = "\n".join((out or "").strip().splitlines()[-120:])
         raise RuntimeError(f"{label} failed ({proc.returncode}) after {elapsed:.1f}s\n{tail}")
 
     typer.echo(f"[e2e] ✓ {label} ({elapsed:.1f}s)")
-    return (proc.stdout or "").strip()
+    return (out or "").strip()
 
 
 def _run_cmd_with_retry(label: str, cmd: list[str], attempts: int = 2, timeout_s: int = 600, sleep_s: int = 5) -> str:
@@ -193,7 +202,10 @@ def _run_cmd_with_retry(label: str, cmd: list[str], attempts: int = 2, timeout_s
             last_err = exc
             if attempt == attempts:
                 break
-            typer.echo(f"[e2e] ⚠ {label} failed on attempt {attempt}/{attempts}; retrying in {sleep_s}s")
+            err_tail = "\n".join(str(exc).splitlines()[-6:])
+            typer.echo(
+                f"[e2e] ⚠ {label} failed on attempt {attempt}/{attempts}; retrying in {sleep_s}s\n{err_tail}"
+            )
             time.sleep(sleep_s)
     assert last_err is not None
     raise last_err
