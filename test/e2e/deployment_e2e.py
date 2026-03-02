@@ -156,7 +156,7 @@ def _wait_for_chain_id(rpc_url: str, expected_chain_id: int, timeout_s: int, pol
     raise RuntimeError(f"rpc not ready at {rpc_url} within {timeout_s}s ({last_err})")
 
 
-def _run_cmd(label: str, cmd: list[str], timeout_s: int = 900) -> str:
+def _run_cmd(label: str, cmd: list[str], timeout_s: int = 600) -> str:
     typer.echo(f"[e2e] ▶ {label}")
     typer.echo(f"[e2e]    cmd: {' '.join(shlex.quote(c) for c in cmd)}")
     start = time.time()
@@ -182,6 +182,21 @@ def _run_cmd(label: str, cmd: list[str], timeout_s: int = 900) -> str:
 
     typer.echo(f"[e2e] ✓ {label} ({elapsed:.1f}s)")
     return (proc.stdout or "").strip()
+
+
+def _run_cmd_with_retry(label: str, cmd: list[str], attempts: int = 2, timeout_s: int = 600, sleep_s: int = 5) -> str:
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _run_cmd(f"{label} (attempt {attempt}/{attempts})", cmd, timeout_s=timeout_s)
+        except Exception as exc:
+            last_err = exc
+            if attempt == attempts:
+                break
+            typer.echo(f"[e2e] ⚠ {label} failed on attempt {attempt}/{attempts}; retrying in {sleep_s}s")
+            time.sleep(sleep_s)
+    assert last_err is not None
+    raise last_err
 
 
 @app.command()
@@ -304,7 +319,7 @@ def main(
             l1_updates["WETH_SOCKET_CONNECTOR"] = weth_socket_connector
 
     _write_env(l1e, l1_fork_env, l1_rpc, l1_updates)
-    _run_cmd(
+    _run_cmd_with_retry(
         "deploy_l1",
         [
             sys.executable,
@@ -317,6 +332,9 @@ def main(
             ANVIL_PK0,
             "--json",
         ],
+        attempts=2,
+        timeout_s=480,
+        sleep_s=3,
     )
 
     l1a = _read_addrs(l1_out)
