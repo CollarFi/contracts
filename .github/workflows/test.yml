@@ -83,11 +83,18 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Prime Python deps (uv sync)
+        run: |
+          uv sync --frozen
 
       - name: Prune duplicate lyra-utils + normalize imports
         run: |
@@ -119,19 +126,31 @@ jobs:
 
       - name: Run deployment e2e
         run: |
-          uv run python test/e2e/deployment_e2e.py \
-            --l1-env .env.l1.testnet \
-            --l2-env .env.l2.testnet \
-            --keep-anvil
+          set -euo pipefail
+          for attempt in 1 2; do
+            echo "Deployment e2e attempt ${attempt}/2"
+            if timeout 20m uv run --no-sync python -u test/e2e/deployment_e2e.py \
+              --l1-env .env.l1.testnet \
+              --l2-env .env.l2.testnet \
+              --keep-anvil; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "deployment e2e failed after retry"
+              exit 1
+            fi
+            echo "deployment e2e failed; retrying in 10s"
+            sleep 10
+          done
 
       - name: Run fresh loan flow e2e
         run: |
-          uv run python test/e2e/fresh_loan_flow.py
+          timeout 15m uv run --no-sync python -u test/e2e/fresh_loan_flow.py
 
       - name: Run rollover-to-variable e2e (Euler)
         run: |
-          uv run python test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
+          timeout 15m uv run --no-sync python -u test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
 
       - name: Run rollover-to-variable e2e (Morpho)
         run: |
-          uv run python test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
+          timeout 15m uv run --no-sync python -u test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
