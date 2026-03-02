@@ -573,88 +573,58 @@ Safety invariants:
 - While rollover is pending, a second rollover request for the same loan MUST revert.
 - Rollover roll-safety: confirmed rollover terms MUST preserve `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` for the selected conversion route.
 
-## 11. Draft change set: collateral-only opening (no L1->L2 USDC support)
-
-> Discussion draft (breaking changes). This section is intended to replace the parts of this SPEC that rely on temporary negative Derive cash and `maxNegativeC` reserve mechanics.
+## 11. Collateral-only cash-safe opening model
 
 ### 11.1 Design objective
 
-Keep the protocol cash-simple during origination and rollover:
+Keep origination and rollover cash-simple and protocol-safe:
 
-- Opening a collar MUST be collateral-funded only.
-- The protocol MUST NOT rely on sending USDC from L1 to L2 to make a loan executable.
-- The protocol MUST NOT rely on temporary negative USDC cash on Derive for correctness.
+- Opening a collar is collateral-funded only.
+- The protocol does not require L1->L2 USDC top-ups for protocol-critical paths.
+- The protocol does not rely on temporary negative Derive cash for correctness.
 
-### 11.2 Economic rule changes (normative)
+### 11.2 Economic rules (normative)
 
-Replace §5.1.1 with a cash-safe rule set:
-
-- `I` (fixed interest) is still fixed at mandate acceptance.
+- `I` (fixed interest) is fixed at mandate acceptance.
 - Let `C = callPremium - putPremium` from executed RFQ terms.
-- Mandate + finalize must enforce:
+- Mandate/finalize/rollover flows enforce:
+  - `C >= 0`
   - `I + C >= minNetInterest`
-  - `C >= 0` (or stricter governance-configured floor `C >= minPremium`, default `0`).
-- Remove `maxNegativeC` from active economics.
-- Remove LP deficit reserve lifecycle (`reserve(maxNegativeC)`, consumption, release).
 
-Implication: executor/keeper must only execute RFQs that are cash-safe by construction.
+Implication: executor/keeper executes only cash-safe RFQs.
 
-### 11.3 Struct/API simplification
+### 11.3 Data model and API shape
 
-Update data models accordingly:
+- `BaselineRfq`, `Mandate`, and `RolloverMandate` exclude deficit-budget fields.
+- EIP-712 hashes/signatures and L1<->L2 payloads follow the simplified cash-safe structs.
+- `TradeConfirmed` retains `realizedC` for economics/auditability checks.
 
-- `BaselineRfq`:
-  - remove field: `maxNegativeC`
-- `Mandate`:
-  - remove field: `maxNegativeC`
-- `RolloverMandate`:
-  - remove field: `maxNegativeC`
-- `TradeConfirmed` verification:
-  - keep `realizedC` for auditability (optional), but remove deficit-bound checks against `maxNegativeC`.
+### 11.4 Cross-chain flow constraints
 
-Update external/internal APIs that currently carry `maxNegativeC` so signatures and payloads match the simplified structs.
+- Origination protocol path is collateral-forward only from L1 to L2.
+- Settlement proceeds and collateral returns remain L2->L1 flows.
+- No protocol-critical branch depends on out-of-band deficit funding.
 
-### 11.4 L1/L2 flow constraints
+### 11.5 Settlement behavior
 
-Update §3/§5 flow text with explicit constraints:
+- Put ITM / Call ITM flows remain collateral sale -> net USDC bridge -> L1 accounting.
+- L1 settlement is conservative and only accounts received bridged funds.
+- Keeper must execute only cash-safe paths that satisfy vault settlement constraints.
 
-- L1->L2 bridge direction during origination: collateral only.
-- No L1->L2 USDC top-up path is part of the protocol-critical flow.
-- L2 withdrawal to L1 remains allowed for settlement proceeds and collateral return.
+### 11.6 Rollover behavior
 
-### 11.5 Settlement behavior changes
-
-Adjust §5.2 outcome text:
-
-- Put ITM / Call ITM handling remains collateral sale -> net USDC bridge -> L1 accounting.
-- If a settlement would require external USDC injection to satisfy Derive cash constraints, keeper MUST not execute that path; position must be unwound using only collateral-funded paths.
-- L1 accounting remains conservative: no optimistic payouts before bridged funds arrive.
-
-### 11.6 Rollover simplification
-
-Update async rollover (§5.x):
-
-- Remove `maxNegativeC` from rollover mandate hash/signature and pending state.
-- TSA pre-trade validation enforces cash-safe economics (`C >= 0`/`minPremium`) in addition to roll-safety LTV bound.
+- Rollover mandate hashes/payloads follow the cash-safe struct set.
+- TSA pre-trade validation enforces cash-safe economics (`C >= 0`) plus roll-safety LTV bound.
+- Finalization remains non-bricking for post-open drift; anomalies are emitted for monitoring.
 
 ### 11.7 Risk/ops impact
 
-Expected simplifications from this change:
+Benefits:
 
-- Smaller on-chain state and fewer invariants (no deficit reserve accounting).
-- Fewer cross-chain failure branches around deficit funding.
-- Cleaner keeper runbook and lower chance of L1/L2 cash mismatch incidents.
+- Smaller state surface and fewer economic invariants.
+- Fewer cross-chain failure branches around deficit handling.
+- Cleaner keeper runbook and lower L1/L2 cash mismatch risk.
 
 Trade-off:
 
-- Lower quote acceptance/fill in stressed markets where only negative-`C` structures are available.
-
-### 11.8 Required implementation follow-ups
-
-If this profile is accepted, open follow-up implementation PRs to:
-
-1. Remove `maxNegativeC` from contracts/events/interfaces/docs/tests.
-2. Update EIP-712 type hashes and signing payloads.
-3. Tighten TSA RFQ checks for cash-safe execution.
-4. Regenerate e2e vectors to cover strict cash-safe acceptance/rejection.
-5. Add migration note for previously signed mandates/rollover payload incompatibility.
+- Lower quote acceptance in stressed markets where only negative-`C` structures are available.
