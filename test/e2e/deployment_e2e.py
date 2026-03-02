@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import tempfile
 import time
@@ -155,6 +156,34 @@ def _wait_for_chain_id(rpc_url: str, expected_chain_id: int, timeout_s: int, pol
     raise RuntimeError(f"rpc not ready at {rpc_url} within {timeout_s}s ({last_err})")
 
 
+def _run_cmd(label: str, cmd: list[str], timeout_s: int = 900) -> str:
+    typer.echo(f"[e2e] ▶ {label}")
+    typer.echo(f"[e2e]    cmd: {' '.join(shlex.quote(c) for c in cmd)}")
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - start
+        tail = (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else ""
+        raise RuntimeError(f"{label} timed out after {elapsed:.1f}s\n{tail}") from exc
+
+    elapsed = time.time() - start
+    if proc.returncode != 0:
+        out = (proc.stdout or "").strip()
+        tail = "\n".join(out.splitlines()[-120:])
+        raise RuntimeError(f"{label} failed ({proc.returncode}) after {elapsed:.1f}s\n{tail}")
+
+    typer.echo(f"[e2e] ✓ {label} ({elapsed:.1f}s)")
+    return (proc.stdout or "").strip()
+
+
 @app.command()
 def main(
     l1_env: Path = typer.Option(ROOT_DIR / ".env.l1.testnet"),
@@ -177,14 +206,22 @@ def main(
     l1e = load_env(l1_env)
     l2e = load_env(l2_env)
 
+    typer.echo("[e2e] ▶ spawn_anvil_l1")
     p1 = _spawn_anvil(l1e["RPC_URL"], l1_port, l1_chain_id)
+    typer.echo("[e2e] ✓ spawn_anvil_l1")
+    typer.echo("[e2e] ▶ spawn_anvil_l2")
     p2 = _spawn_anvil(l2e["RPC_URL"], l2_port, l2_chain_id)
+    typer.echo("[e2e] ✓ spawn_anvil_l2")
 
     l1_rpc = f"http://127.0.0.1:{l1_port}"
     l2_rpc = f"http://127.0.0.1:{l2_port}"
 
+    typer.echo("[e2e] ▶ wait_l1_rpc_ready")
     _wait_for_chain_id(l1_rpc, l1_chain_id, anvil_ready_timeout_s, anvil_ready_poll_s)
+    typer.echo("[e2e] ✓ wait_l1_rpc_ready")
+    typer.echo("[e2e] ▶ wait_l2_rpc_ready")
     _wait_for_chain_id(l2_rpc, l2_chain_id, anvil_ready_timeout_s, anvil_ready_poll_s)
+    typer.echo("[e2e] ✓ wait_l2_rpc_ready")
 
     tmpdir = Path(tempfile.mkdtemp(prefix="collar-e2e-"))
     l1_fork_env = tmpdir / "l1.fork.env"
@@ -228,7 +265,8 @@ def main(
             "L1_EID": l1_eid,
         },
     )
-    run(
+    _run_cmd(
+        "deploy_l2",
         [
             sys.executable,
             str(ROOT_DIR / "ops/deploy_l2.py"),
@@ -239,7 +277,7 @@ def main(
             "--derive-registry-profile",
             derive_registry_profile,
             "--json",
-        ]
+        ],
     )
 
     # Deploy fresh L1 wired to the new L2.
@@ -266,7 +304,8 @@ def main(
             l1_updates["WETH_SOCKET_CONNECTOR"] = weth_socket_connector
 
     _write_env(l1e, l1_fork_env, l1_rpc, l1_updates)
-    run(
+    _run_cmd(
+        "deploy_l1",
         [
             sys.executable,
             str(ROOT_DIR / "ops/deploy_l1.py"),
@@ -277,7 +316,7 @@ def main(
             "--private-key",
             ANVIL_PK0,
             "--json",
-        ]
+        ],
     )
 
     l1a = _read_addrs(l1_out)
@@ -348,38 +387,50 @@ def main(
     except Exception as exc:
         typer.echo(f"[warn] skipped L2 role setup: {exc}")
 
-    k2 = run([
-        sys.executable,
-        str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
-        str(l2_fork_env),
-        "--once",
-        "--broadcast",
-        "--private-key",
-        ANVIL_PK0,
-        "--json",
-    ])
-    k1 = run([
-        sys.executable,
-        str(ROOT_DIR / "ops/management/l1_keeper_handle_messages.py"),
-        str(l1_fork_env),
-        "--once",
-        "--broadcast",
-        "--private-key",
-        ANVIL_PK0,
-        "--logs-rpc-url",
-        l1_rpc,
-        "--json",
-    ])
+    k2 = _run_cmd(
+        "l2_keeper_once",
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
+            str(l2_fork_env),
+            "--once",
+            "--broadcast",
+            "--private-key",
+            ANVIL_PK0,
+            "--json",
+        ],
+    )
+    k1 = _run_cmd(
+        "l1_keeper_once",
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/management/l1_keeper_handle_messages.py"),
+            str(l1_fork_env),
+            "--once",
+            "--broadcast",
+            "--private-key",
+            ANVIL_PK0,
+            "--logs-rpc-url",
+            l1_rpc,
+            "--json",
+        ],
+    )
 
-    m2 = run([sys.executable, str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"])
-    m1 = run([
-        sys.executable,
-        str(ROOT_DIR / "ops/management/l1_message_preflight.py"),
-        str(l1_fork_env),
-        "--json",
-        "--logs-rpc-url",
-        l1_rpc,
-    ])
+    m2 = _run_cmd(
+        "l2_message_preflight",
+        [sys.executable, str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"],
+    )
+    m1 = _run_cmd(
+        "l1_message_preflight",
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/management/l1_message_preflight.py"),
+            str(l1_fork_env),
+            "--json",
+            "--logs-rpc-url",
+            l1_rpc,
+        ],
+    )
 
     report = {
         "tmpDir": str(tmpdir),
