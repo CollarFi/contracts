@@ -20,6 +20,11 @@ remappings = [
   "lyra-utils/=lib/v2-matching/lib/v2-core/lib/lyra-utils/src/"
 ]
 
+[profile.ci]
+# Keep deterministic headroom under EIP-170 on hosted runners where
+# metadata/path variance can otherwise push CollarVault a few bytes over limit.
+bytecode_hash = "none"
+
 # Formatting
 [fmt]
 ignore = ["lib/**"]
