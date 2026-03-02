@@ -230,9 +230,7 @@ def main(
     )
     run(
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             str(ROOT_DIR / "ops/deploy_l2.py"),
             str(l2_fork_env),
             "--broadcast",
@@ -270,9 +268,7 @@ def main(
     _write_env(l1e, l1_fork_env, l1_rpc, l1_updates)
     run(
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             str(ROOT_DIR / "ops/deploy_l1.py"),
             str(l1_fork_env),
             "--l2-env-file",
@@ -353,9 +349,7 @@ def main(
         typer.echo(f"[warn] skipped L2 role setup: {exc}")
 
     k2 = run([
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
         str(l2_fork_env),
         "--once",
@@ -365,9 +359,7 @@ def main(
         "--json",
     ])
     k1 = run([
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         str(ROOT_DIR / "ops/management/l1_keeper_handle_messages.py"),
         str(l1_fork_env),
         "--once",
@@ -379,11 +371,9 @@ def main(
         "--json",
     ])
 
-    m2 = run(["uv", "run", "python", str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"])
+    m2 = run([sys.executable, str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"])
     m1 = run([
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         str(ROOT_DIR / "ops/management/l1_message_preflight.py"),
         str(l1_fork_env),
         "--json",
