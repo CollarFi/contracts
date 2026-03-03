@@ -158,7 +158,6 @@ The `TradeConfirmed` message contains:
 
 **Loan disbursement**: On L1, `finalizeLoan` (keeper) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry, realizedC)` and verifies mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`) plus economics:
 
-- `fixedInterest + realizedC >= minNetInterest`
 - `realizedC >= 0` and `fixedInterest + realizedC >= minNetInterest`
 
 If valid, the vault opens the loan, borrows reserved principal from the liquidity vault, and transfers USDC principal `D` to the borrower. It records state `ACTIVE_ZERO_COST`, storing `loanId`, `Q`, `K_p`, `K_c`, `t`, principal `D` and subaccount ID.
@@ -231,21 +230,19 @@ sequenceDiagram
 ```
 
 
-### 5.1.1 Mandate economics (fixed-interest + negative-C reserve)
+### 5.1.1 Mandate economics (fixed-interest cash-safe model)
 
 The agreed origination model is:
 
-- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so the borrower knows exact interest to repay.
+- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so borrower repayment terms are deterministic.
 - Option net premium is `C = callPremium - putPremium`.
-- Negative `C` (put premium larger than call premium) is allowed; Derive/TSA cash may go temporarily negative.
-- RFQ execution is cash-safe: the quoted collar must not rely on L1-provided deficit buffers; `C = callPremium - putPremium` is required to be non-negative (or above a governance-configured floor).
-- Keeper-signed baseline RFQ includes `minNetInterest` (minimum net value required for LP + protocol economics).
-- RFQ/trade confirmation must satisfy both:
+- Execution is cash-safe by construction. Keeper-signed baseline RFQs and finalized trades must satisfy:
+  - `C >= 0`
   - `I + C >= minNetInterest`
-  - `C >= 0` and `(I + C) >= minNetInterest`.
-- On settlement, actual deficit is covered by consuming reserved liquidity; any unused reserve is released.
+- Baseline RFQ/mandate/rollover structures carry strike + economics constraints but no deficit-budget field.
+- The protocol-critical origination path is collateral-forward only (no required L1->L2 USDC top-up branch).
 
-This makes borrower obligations deterministic (`I` fixed), while allowing option legs to execute under bounded temporary deficit.
+This keeps borrower obligations deterministic while avoiding deficit-reserve mechanics in the opening path.
 
 ### 5.1.2 Roll-safety LTV invariant for variable conversion
 
@@ -490,7 +487,7 @@ Events on the bridge are monitored by the deposit/withdraw handlers to trigger m
 
 A separate off-chain API / quoting module estimates executable collar parameters and produces a keeper-signed baseline RFQ for mandate acceptance. Inputs include borrower request (asset, amount, maturity, put strike, borrow amount) and MM pricing.
 
-The baseline RFQ is consumed on-chain by `acceptMandate` (or atomically via `createDepositWithMandate`) and constrains trade execution (strike bounds, economics floor, reserve cap, expiry/deadline). L1 finalization verifies realized terms from `TradeConfirmed.data` (`callStrike`, `putStrike`, `expiry`, `realizedC`).
+The baseline RFQ is consumed on-chain by `acceptMandate` (or atomically via `createDepositWithMandate`) and constrains trade execution (strike bounds, cash-safe economics floor, expiry/deadline). L1 finalization verifies realized terms from `TradeConfirmed.data` (`callStrike`, `putStrike`, `expiry`, `realizedC`).
 
 ### 6.7 Keeper and monitoring
 
@@ -516,7 +513,7 @@ Monitors for situations such as bridge downtime, fast withdrawal limits, or lend
 - Withdrawal race conditions: Because bridging is asynchronous, ensure that bridging calls are idempotent and that funds are not double-counted.
 - Oracle reliability: Use multiple price feeds or Derive's TWAP to determine settlement prices. Validate oracle data in the off-chain executor.
 - Settlement amount trust: The executor is trusted to compute and report the final settlement amount (including collateral sale proceeds) in `SettlementReport`.
-- Derive cash balance risk: Call ITM settlement may result in a negative USDC balance on Derive; ensure the collateral sale fully nets the negative balance before bridging, and account for potential L1 backstop usage if net proceeds are below principal.
+- Derive cash handling: keeper/executor must only execute cash-safe RFQs (`C >= 0`) and settlement paths that preserve solvency and allow conservative L2->L1 accounting.
 - Trade confirmation data trust boundary: `TradeConfirmed` carries executed strikes/expiry and `realizedC`; L1 relies on authenticated LayerZero delivery plus configured recipient/subaccount checks when validating this payload.
 - Aggregate coverage withdrawals: Withdrawals from the shared vault subaccount must only be signed when `baseBalance - amount >= shortCalls` and cash stays above `maxNegCash`. This is an aggregate (not per-loan) invariant and relies on correct executor operation.
 - Return/trade mutual exclusion: A `ReturnRequest` is best-effort and does not cancel the loan on its own. The L2 receiver must emit **at most one** of `TradeConfirmed` or `CollateralReturned` for a loan. L1 must reject `finalizeDepositReturn` if `TradeConfirmed` was handled, and must reject `finalizeLoan` if `CollateralReturned` was handled.
@@ -573,58 +570,3 @@ Safety invariants:
 - While rollover is pending, a second rollover request for the same loan MUST revert.
 - Rollover roll-safety: confirmed rollover terms MUST preserve `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` for the selected conversion route.
 
-## 11. Collateral-only cash-safe opening model
-
-### 11.1 Design objective
-
-Keep origination and rollover cash-simple and protocol-safe:
-
-- Opening a collar is collateral-funded only.
-- The protocol does not require L1->L2 USDC top-ups for protocol-critical paths.
-- The protocol does not rely on temporary negative Derive cash for correctness.
-
-### 11.2 Economic rules (normative)
-
-- `I` (fixed interest) is fixed at mandate acceptance.
-- Let `C = callPremium - putPremium` from executed RFQ terms.
-- Mandate/finalize/rollover flows enforce:
-  - `C >= 0`
-  - `I + C >= minNetInterest`
-
-Implication: executor/keeper executes only cash-safe RFQs.
-
-### 11.3 Data model and API shape
-
-- `BaselineRfq`, `Mandate`, and `RolloverMandate` exclude deficit-budget fields.
-- EIP-712 hashes/signatures and L1<->L2 payloads follow the simplified cash-safe structs.
-- `TradeConfirmed` retains `realizedC` for economics/auditability checks.
-
-### 11.4 Cross-chain flow constraints
-
-- Origination protocol path is collateral-forward only from L1 to L2.
-- Settlement proceeds and collateral returns remain L2->L1 flows.
-- No protocol-critical branch depends on out-of-band deficit funding.
-
-### 11.5 Settlement behavior
-
-- Put ITM / Call ITM flows remain collateral sale -> net USDC bridge -> L1 accounting.
-- L1 settlement is conservative and only accounts received bridged funds.
-- Keeper must execute only cash-safe paths that satisfy vault settlement constraints.
-
-### 11.6 Rollover behavior
-
-- Rollover mandate hashes/payloads follow the cash-safe struct set.
-- TSA pre-trade validation enforces cash-safe economics (`C >= 0`) plus roll-safety LTV bound.
-- Finalization remains non-bricking for post-open drift; anomalies are emitted for monitoring.
-
-### 11.7 Risk/ops impact
-
-Benefits:
-
-- Smaller state surface and fewer economic invariants.
-- Fewer cross-chain failure branches around deficit handling.
-- Cleaner keeper runbook and lower L1/L2 cash mismatch risk.
-
-Trade-off:
-
-- Lower quote acceptance in stressed markets where only negative-`C` structures are available.
