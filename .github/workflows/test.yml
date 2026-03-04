@@ -147,9 +147,17 @@ jobs:
         run: |
           timeout 12m uv run --no-sync python -u test/e2e/fresh_loan_flow.py
 
+      - name: Run non-permit atomic origination e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/non_permit_atomic_origination_e2e.py --no-auto-redeploy
+
       - name: Run return-before-trade e2e
         run: |
           timeout 12m uv run --no-sync python -u test/e2e/return_before_trade_e2e.py --no-auto-redeploy
+
+      - name: Run L2 keeper ReturnRequest handling e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/l2_keeper_return_request_e2e.py --no-auto-redeploy
 
       - name: Run settlement report outcomes e2e
         run: |
@@ -166,6 +174,10 @@ jobs:
       - name: Run ready-loan keeper settle e2e
         run: |
           timeout 12m uv run --no-sync python -u test/e2e/ready_loan_keeper_settle_e2e.py --no-auto-redeploy
+
+      - name: Run ready-loan borrower self-close e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/ready_loan_borrower_self_close_e2e.py --no-auto-redeploy
 
       - name: Run rollover-to-variable e2e (Euler)
         run: |

@@ -67,6 +67,24 @@ def parse_loan(vault_loan_raw: str) -> dict:
     }
 
 
+def parse_mandate(vault_mandate_raw: str) -> dict:
+    lines = [line.strip() for line in vault_mandate_raw.splitlines() if line.strip()]
+    if len(lines) < 10:
+        raise RuntimeError(f"unexpected mandate tuple output: {vault_mandate_raw}")
+    return {
+        "borrower": lines[0].split()[0],
+        "collateralAsset": lines[1].split()[0],
+        "collateralAmount": int(lines[2].split()[0]),
+        "maturity": int(lines[3].split()[0]),
+        "deadline": int(lines[4].split()[0]),
+        "borrowAmount": int(lines[5].split()[0]),
+        "minCallStrike": int(lines[6].split()[0]),
+        "maxPutStrike": int(lines[7].split()[0]),
+        "minNetInterest": int(lines[8].split()[0]),
+        "sentToL2": lines[9].split()[0].lower() == "true",
+    }
+
+
 def get_pending(vault: str, l1_rpc: str, loan_id: int) -> dict:
     raw = cast_call(
         l1_rpc,
@@ -85,6 +103,16 @@ def get_loan(vault: str, l1_rpc: str, loan_id: int) -> dict:
         str(loan_id),
     )
     return parse_loan(raw)
+
+
+def get_mandate(vault: str, l1_rpc: str, loan_id: int) -> dict:
+    raw = cast_call(
+        l1_rpc,
+        vault,
+        "mandates(uint256)(address,address,uint256,uint64,uint64,uint256,uint256,uint256,uint256,bool)",
+        str(loan_id),
+    )
+    return parse_mandate(raw)
 
 
 def accept_mandate_for_pending(
