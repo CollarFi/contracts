@@ -106,6 +106,13 @@ def _ensure_l2_keeper_role(l2_rpc: str, receiver: str) -> None:
     cast_send_pk(l2_rpc, receiver, "grantRole(bytes32,address)", keeper_role, ANVIL_ADDR0)
 
 
+def _ensure_tsa_signer(l2_rpc: str, tsa: str, receiver: str) -> None:
+    is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() == "true"
+    if is_signer:
+        return
+    cast_send_pk(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")
+
+
 def _inject_return_request(l2_rpc: str, receiver: str, guid: str, loan_id: int, asset: str, recipient: str, subaccount_id: int) -> str:
     endpoint = cast_call(l2_rpc, receiver, "endpoint()(address)").splitlines()[0].strip()
     _set_eth_balance(l2_rpc, endpoint)
@@ -172,6 +179,7 @@ def main(
     vault = l1["l1Vault"]
     tsa = l2["l2Tsa"]
     _ensure_l2_keeper_role(l2_rpc, receiver)
+    _ensure_tsa_signer(l2_rpc, tsa, receiver)
 
     subaccount_id = int(cast_call(l2_rpc, tsa, "subAccount()(uint256)").split()[0])
     block_now = int(run(["cast", "block-number", "--rpc-url", l2_rpc]).split()[0])
@@ -294,4 +302,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-
