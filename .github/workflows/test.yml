@@ -62,7 +62,7 @@ jobs:
     name: E2E fork flows
     runs-on: ubuntu-latest
     needs: check
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       # Allow repo/org-level override; keep sensible public defaults.
       L1_RPC_URL: ${{ vars.L1_RPC_URL || secrets.L1_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
@@ -145,12 +145,32 @@ jobs:
 
       - name: Run fresh loan flow e2e
         run: |
-          timeout 15m uv run --no-sync python -u test/e2e/fresh_loan_flow.py
+          timeout 12m uv run --no-sync python -u test/e2e/fresh_loan_flow.py
+
+      - name: Run return-before-trade e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/return_before_trade_e2e.py --no-auto-redeploy
+
+      - name: Run settlement report outcomes e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/settlement_report_outcomes_e2e.py --no-auto-redeploy
+
+      - name: Run async rollover e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/async_rollover_e2e.py --no-auto-redeploy
+
+      - name: Run keeper pairing/idempotency e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/keeper_pairing_idempotency_e2e.py --no-auto-redeploy
+
+      - name: Run ready-loan keeper settle e2e
+        run: |
+          timeout 12m uv run --no-sync python -u test/e2e/ready_loan_keeper_settle_e2e.py --no-auto-redeploy
 
       - name: Run rollover-to-variable e2e (Euler)
         run: |
-          timeout 15m uv run --no-sync python -u test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
+          timeout 12m uv run --no-sync python -u test/e2e/rollover_to_variable_e2e.py --no-auto-redeploy
 
       - name: Run rollover-to-variable e2e (Morpho)
         run: |
-          timeout 15m uv run --no-sync python -u test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
+          timeout 12m uv run --no-sync python -u test/e2e/rollover_to_variable_morpho_e2e.py --no-auto-redeploy
