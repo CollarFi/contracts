@@ -47,11 +47,11 @@ contract CollarVault is
     // Quote-based RFQ flow has been removed; loans are now created via keeper-signed RFQ baseline + mandate + L2 TradeConfirmed.
 
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
-        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 minNetInterest,uint256 maxNegativeC,uint64 rfqExpiry,address borrower,uint256 nonce)"
+        "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 minNetInterest,uint64 rfqExpiry,address borrower,uint256 nonce)"
     );
 
     bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
-        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 minNetInterest,uint256 maxNegativeC,uint64 deadline,uint256 nonce)"
+        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 minNetInterest,uint64 deadline,uint256 nonce)"
     );
 
     function _getCollarVaultStorage() private pure returns (CollarVaultShared.CollarVaultStorage storage $) {
@@ -447,7 +447,6 @@ contract CollarVault is
                 rfq.callStrike,
                 rfq.borrowAmount,
                 rfq.minNetInterest,
-                rfq.maxNegativeC,
                 rfq.rfqExpiry,
                 rfq.borrower,
                 rfq.nonce
@@ -466,7 +465,6 @@ contract CollarVault is
                 mandate.minCallStrike,
                 mandate.maxPutStrike,
                 mandate.minNetInterest,
-                mandate.maxNegativeC,
                 mandate.deadline,
                 mandate.nonce
             )
@@ -588,9 +586,6 @@ contract CollarVault is
         if (mandate.borrower != address(0)) {
             _releaseCommittedPrincipal(mandate.borrowAmount);
             $.liquidityVault.releasePrincipal(loanId);
-            if (mandate.maxNegativeC > 0) {
-                $.liquidityVault.release(loanId);
-            }
             delete $.mandates[loanId];
         }
 

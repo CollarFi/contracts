@@ -83,7 +83,6 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             minCallStrike: mandate.minCallStrike,
             maxPutStrike: mandate.maxPutStrike,
             minNetInterest: mandate.minNetInterest,
-            maxNegativeC: mandate.maxNegativeC,
             fixedInterest: fixedInterest,
             maxRollLtv: maxRollLtv,
             deadline: mandate.deadline,
@@ -103,7 +102,6 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             mandate.maxPutStrike,
             mandate.minNetInterest,
             fixedInterest,
-            mandate.maxNegativeC,
             maxRollLtv,
             strikeScale,
             mandate.deadline,
@@ -154,9 +152,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         if (interestApr < $.originationFeeApr) anomalyFlags |= 2;
 
         int256 totalEconomics = int256(newInterest) + realizedC;
-        if (totalEconomics < int256(pending.minNetInterest)) anomalyFlags |= 4;
-        uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
-        if (realizedDeficit > pending.maxNegativeC) anomalyFlags |= 8;
+        if (totalEconomics < int256(pending.minNetInterest) || realizedC < 0) anomalyFlags |= 4;
         if (_isRollSafetyLtvViolated(
                 loan.collateralAsset, loan.collateralAmount, putStrike, loan.principal + newInterest, pending.maxRollLtv
             )) {

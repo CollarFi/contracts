@@ -146,11 +146,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         if (!hadMandate) {
             _commitPrincipal(pending.borrowAmount);
             $.liquidityVault.reservePrincipal(loanId, pending.borrowAmount);
-        } else if (existing.maxNegativeC > 0) {
-            $.liquidityVault.release(loanId);
-        }
-        if (rfq.maxNegativeC > 0) {
-            $.liquidityVault.reserve(loanId, rfq.maxNegativeC);
         }
         if (pending.maturity > type(uint64).max) {
             revert CV_InvalidInput();
@@ -180,7 +175,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             maxPutStrike: maxPutStrike,
             minNetInterest: rfq.minNetInterest,
             fixedInterest: fixedInterest,
-            maxNegativeC: rfq.maxNegativeC,
             maxRollLtv: maxRollLtv,
             sentToL2: true
         });
@@ -192,7 +186,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             maxPutStrike,
             rfq.minNetInterest,
             fixedInterest,
-            rfq.maxNegativeC,
             maxRollLtv,
             deadline,
             ethForLz
@@ -259,7 +252,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             );
 
         int256 totalEconomics = int256(mandate.fixedInterest) + realizedC;
-        if (totalEconomics < int256(mandate.minNetInterest)) {
+        if (realizedC < 0 || totalEconomics < int256(mandate.minNetInterest)) {
             revert CV_InsufficientValue();
         }
 
@@ -270,11 +263,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             pending.borrowAmount + mandate.fixedInterest,
             mandate.maxRollLtv
         );
-
-        uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
-        if (realizedDeficit > mandate.maxNegativeC) {
-            revert CV_InsufficientValue();
-        }
 
         $.tradeConfirmed[finalizedLoanId] = true;
         $.collateralActivated[finalizedLoanId] = true;
@@ -324,7 +312,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         uint256 maxPutStrike,
         uint256 minNetInterest,
         uint256 fixedInterest,
-        uint256 maxNegativeC,
         uint256 maxRollLtv,
         uint64 deadline,
         uint256 ethForLz
@@ -340,7 +327,6 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
             maxPutStrike,
             minNetInterest,
             fixedInterest,
-            maxNegativeC,
             maxRollLtv,
             strikeScale,
             uint64(pending.maturity),

@@ -11,7 +11,6 @@ interface ICollarVaultFinalizeModule {
         uint256 callStrike;
         uint256 borrowAmount;
         uint256 minNetInterest;
-        uint256 maxNegativeC;
         uint64 rfqExpiry;
         address borrower;
         uint256 nonce;

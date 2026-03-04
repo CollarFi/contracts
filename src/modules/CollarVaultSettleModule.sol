@@ -21,6 +21,7 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
     error CV_InvalidInput();
     error CV_InvalidConfig();
     error CV_Unauthorized();
+    error CV_InsufficientValue();
 
     event LoanSettled(uint256 indexed loanId, CollarVaultShared.SettlementOutcome outcome, uint256 settlementAmount);
     event SettlementShortfall(uint256 indexed loanId, uint256 shortfall);
@@ -59,11 +60,8 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         settlementAmount = $.lzMessenger.validateSettlementReport(lzMessage, loanId, address($.usdc), address(this));
 
         uint256 totalDue = loan.principal + loan.interestOwed;
-        uint256 shortfall = settlementAmount < totalDue ? totalDue - settlementAmount : 0;
-        if (shortfall > 0) {
-            $.liquidityVault.consume(loanId, shortfall);
-            settlementAmount += shortfall;
-            emit SettlementShortfall(loanId, shortfall);
+        if (settlementAmount < totalDue) {
+            revert CV_InsufficientValue();
         }
 
         uint256 principalRepay = settlementAmount > loan.principal ? loan.principal : settlementAmount;
@@ -101,7 +99,6 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         }
 
         _releaseCommittedPrincipal(loan.principal);
-        _releaseReserve(loanId);
         delete $.readyLoanSince[loanId];
         loan.state = CollarVaultShared.LoanState.CLOSED;
         emit LoanSettled(loanId, outcome, settlementAmount);
@@ -164,7 +161,6 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         }
 
         _releaseCommittedPrincipal(loan.principal);
-        _releaseReserve(loanId);
         delete $.readyLoanSince[loanId];
         delete $.variableLoanPositions[loanId];
 
@@ -228,7 +224,6 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
         }
 
         _releaseCommittedPrincipal(loan.principal);
-        _releaseReserve(loanId);
 
         IERC20(loan.collateralAsset).safeIncreaseAllowance(position, loan.collateralAmount);
         IVariableLoanPosition(position).open(loan.collateralAmount, totalDue, address(this), address(this));
@@ -315,11 +310,6 @@ contract CollarVaultSettleModule is ICollarVaultSettleModule {
             return;
         }
         $.totalCommittedPrincipal -= amount;
-    }
-
-    function _releaseReserve(uint256 loanId) internal {
-        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
-        try $.liquidityVault.release(loanId) {} catch {}
     }
 
     function _consumeLZMessage(bytes32 guid) internal returns (CollarLZMessages.Message memory message) {

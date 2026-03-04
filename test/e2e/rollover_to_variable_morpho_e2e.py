@@ -230,15 +230,14 @@ def main(
     rfq_expiry = now_ts + 3600
     mandate_deadline = now_ts + 1800
     call_strike = int(p_put) + 1
-    max_negative_c = 500_000_000
     rfq_tuple = (
         f"({loan_id},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{call_strike},"
-        f"{p_borrow},0,{max_negative_c},{rfq_expiry},{borrower},0)"
+        f"{p_borrow},0,{rfq_expiry},{borrower},0)"
     )
     rfq_hash = cast_call(
         l1_rpc,
         vault,
-        "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
+        "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
         rfq_tuple,
     ).splitlines()[0].strip()
     rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
@@ -252,13 +251,12 @@ def main(
     max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
     strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
     mandate_data = _abi_encode(
-        "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
+        "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
         borrower,
         str(call_strike),
         p_put,
         "0",
         str(fixed_interest),
-        str(max_negative_c),
         str(max_roll_ltv),
         str(strike_scale),
         p_maturity,
@@ -281,7 +279,7 @@ def main(
     cast_send_pk(
         l1_rpc,
         vault,
-        "acceptMandate(uint256,(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64)",
+        "acceptMandate(uint256,(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64)",
         str(loan_id),
         rfq_tuple,
         rfq_sig,

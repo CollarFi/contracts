@@ -106,7 +106,7 @@ Derive provides various strategy contracts (e.g., CCTSA for covered calls, PPTSA
 Requested `D` is constrained by a roll-safety LTV invariant (see §5.1.2):
 `D <= collateralAmount * putStrike / strikeScale * maxRollLtv`.
 
-**RFQ estimation + baseline signing (off-chain)**: The off-chain API / vault executor queries market makers and strategy logic to estimate executable collar terms and signs a baseline RFQ for the borrower. The baseline RFQ constrains the on-chain mandate (`callStrike`, `putStrike`, `borrowAmount`, `minNetInterest`, `maxNegativeC`, expiry/deadline metadata). Strike tiers and valid Derive maturities are enforced by the executor; the vault does not maintain an on-chain tier list or expiry whitelist.
+**RFQ estimation + baseline signing (off-chain)**: The off-chain API / vault executor queries market makers and strategy logic to estimate executable collar terms and signs a baseline RFQ for the borrower. The baseline RFQ constrains the on-chain mandate (`callStrike`, `putStrike`, `borrowAmount`, `minNetInterest`, expiry/deadline metadata) and already enforces a cash-safe premium (`C = callPremium - putPremium >= 0`). Strike tiers and valid Derive maturities are enforced by the executor; the vault does not maintain an on-chain tier list or expiry whitelist.
 
 **Collateral deposit (L1 -> L2)**: The borrower either:
 - calls `createDepositWithMandatePermit` (Permit2 path), or
@@ -120,7 +120,7 @@ In both cases, collateral is bridged to Derive L2 and the loan is placed in pend
 - atomically in `createDepositWithMandate(...)`, or
 - later via `acceptMandate(loanId, rfq, rfqSig, deadline)`.
 
-Here `rfq` is a keeper-signed baseline RFQ (EIP-712) that binds the deposit terms and provides baseline `(callStrike, putStrike)` bounds. The vault derives `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, computes and stores fixed interest from `originationFeeApr`, reserves principal / `maxNegativeC` liquidity, enforces the roll-safety LTV bound from §5.1.2, and sends a `MandateCreated` LayerZero message to L2.
+Here `rfq` is a keeper-signed baseline RFQ (EIP-712) that binds the deposit terms and provides baseline `(callStrike, putStrike)` bounds. The vault derives `minCallStrike = rfq.callStrike` and `maxPutStrike = rfq.putStrike`, computes and stores fixed interest from `originationFeeApr`, reserves principal liquidity, enforces the roll-safety LTV bound from §5.1.2, and sends a `MandateCreated` LayerZero message to L2.
 
 LoanId binding rules:
 - direct `acceptMandate` requires `rfq.loanId == loanId` (exact binding),
@@ -158,8 +158,7 @@ The `TradeConfirmed` message contains:
 
 **Loan disbursement**: On L1, `finalizeLoan` (keeper) consumes the `DepositConfirmed` LayerZero message for the matching `loanId` (recipient must be the vault, asset/amount must match) and consumes a `TradeConfirmed` LayerZero message. The vault decodes `TradeConfirmed.data` into `(callStrike, putStrike, expiry, realizedC)` and verifies mandate bounds (`callStrike >= minCallStrike`, `putStrike <= maxPutStrike`, `expiry == maturity`) plus economics:
 
-- `fixedInterest + realizedC >= minNetInterest`
-- `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(fixedInterest + realizedC))`
+- `realizedC >= 0` and `fixedInterest + realizedC >= minNetInterest`
 
 If valid, the vault opens the loan, borrows reserved principal from the liquidity vault, and transfers USDC principal `D` to the borrower. It records state `ACTIVE_ZERO_COST`, storing `loanId`, `Q`, `K_p`, `K_c`, `t`, principal `D` and subaccount ID.
 
@@ -231,21 +230,19 @@ sequenceDiagram
 ```
 
 
-### 5.1.1 Mandate economics (fixed-interest + negative-C reserve)
+### 5.1.1 Mandate economics (fixed-interest cash-safe model)
 
 The agreed origination model is:
 
-- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so the borrower knows exact interest to repay.
+- Borrower interest `I` is **fixed at mandate-sign time** on L1 (`acceptMandate`), so borrower repayment terms are deterministic.
 - Option net premium is `C = callPremium - putPremium`.
-- Negative `C` (put premium larger than call premium) is allowed; Derive/TSA cash may go temporarily negative.
-- Before RFQ execution, L1 reserves `maxNegativeC` liquidity per loan in the LP vault (non-withdrawable).
-- Keeper-signed baseline RFQ includes `minNetInterest` (minimum net value required for LP + protocol economics).
-- RFQ/trade confirmation must satisfy both:
+- Execution is cash-safe by construction. Keeper-signed baseline RFQs and finalized trades must satisfy:
+  - `C >= 0`
   - `I + C >= minNetInterest`
-  - `realizedDeficit <= maxNegativeC`, where `realizedDeficit = max(0, -(I + C))`.
-- On settlement, actual deficit is covered by consuming reserved liquidity; any unused reserve is released.
+- Baseline RFQ/mandate/rollover structures carry strike + economics constraints but no deficit-budget field.
+- The protocol-critical origination path is collateral-forward only (no required L1->L2 USDC top-up branch).
 
-This makes borrower obligations deterministic (`I` fixed), while allowing option legs to execute under bounded temporary deficit.
+This keeps borrower obligations deterministic while avoiding deficit-reserve mechanics in the opening path.
 
 ### 5.1.2 Roll-safety LTV invariant for variable conversion
 
@@ -433,7 +430,7 @@ Provides functions:
 
 - `createDepositWithMandatePermit(params, permit, permitSig)` - permissionless Permit2 path; records desired loan parameters, pulls collateral, and creates a pending deposit awaiting L2 confirmation. Mandate can be accepted later via `acceptMandate`.
 - `createDepositWithMandate(params, rfq, rfqSig, deadline)` - permissionless; standard ERC20 approval path that atomically creates the pending deposit and accepts a mandate in one transaction.
-- `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline RFQ. The vault sets strike bounds, computes fixed interest, reserves principal / `maxNegativeC`, enforces roll-safety LTV (`borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv`), and sends `MandateCreated` to L2. Direct calls require exact `rfq.loanId == loanId`; only the atomic path allows `rfq.loanId == 0` sentinel.
+- `acceptMandate(loanId, rfq, rfqSig, deadline)` - borrower; records on-chain mandate constraints for this pending deposit, where `rfq` is a keeper-signed baseline RFQ. The vault sets strike bounds, computes fixed interest, reserves principal, enforces roll-safety LTV (`borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv`), and sends `MandateCreated` to L2. Direct calls require exact `rfq.loanId == loanId`; only the atomic path allows `rfq.loanId == 0` sentinel.
 - `requestCollateralReturn(loanId)` - borrower; sends a `ReturnRequest` message to L2 to initiate withdrawal from the vault subaccount (subject to shared-subaccount safety checks). The request is best-effort and does **not** cancel the loan until `CollateralReturned` is received. If a mandate was accepted, this call must revert until `deadline` has passed.
 - `finalizeLoan(loanId, depositGuid, tradeGuid)` - keeper; consumes `DepositConfirmed` and `TradeConfirmed`, validates `(callStrike, putStrike, expiry, realizedC)` against mandate bounds/economics and roll-safety LTV invariants, and then opens/disburses the loan.
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
@@ -490,7 +487,7 @@ Events on the bridge are monitored by the deposit/withdraw handlers to trigger m
 
 A separate off-chain API / quoting module estimates executable collar parameters and produces a keeper-signed baseline RFQ for mandate acceptance. Inputs include borrower request (asset, amount, maturity, put strike, borrow amount) and MM pricing.
 
-The baseline RFQ is consumed on-chain by `acceptMandate` (or atomically via `createDepositWithMandate`) and constrains trade execution (strike bounds, economics floor, reserve cap, expiry/deadline). L1 finalization verifies realized terms from `TradeConfirmed.data` (`callStrike`, `putStrike`, `expiry`, `realizedC`).
+The baseline RFQ is consumed on-chain by `acceptMandate` (or atomically via `createDepositWithMandate`) and constrains trade execution (strike bounds, cash-safe economics floor, expiry/deadline). L1 finalization verifies realized terms from `TradeConfirmed.data` (`callStrike`, `putStrike`, `expiry`, `realizedC`).
 
 ### 6.7 Keeper and monitoring
 
@@ -516,11 +513,10 @@ Monitors for situations such as bridge downtime, fast withdrawal limits, or lend
 - Withdrawal race conditions: Because bridging is asynchronous, ensure that bridging calls are idempotent and that funds are not double-counted.
 - Oracle reliability: Use multiple price feeds or Derive's TWAP to determine settlement prices. Validate oracle data in the off-chain executor.
 - Settlement amount trust: The executor is trusted to compute and report the final settlement amount (including collateral sale proceeds) in `SettlementReport`.
-- Derive cash balance risk: Call ITM settlement may result in a negative USDC balance on Derive; ensure the collateral sale fully nets the negative balance before bridging, and account for potential L1 backstop usage if net proceeds are below principal.
+- Derive cash handling: keeper/executor must only execute cash-safe RFQs (`C >= 0`) and settlement paths that preserve solvency and allow conservative L2->L1 accounting.
 - Trade confirmation data trust boundary: `TradeConfirmed` carries executed strikes/expiry and `realizedC`; L1 relies on authenticated LayerZero delivery plus configured recipient/subaccount checks when validating this payload.
 - Aggregate coverage withdrawals: Withdrawals from the shared vault subaccount must only be signed when `baseBalance - amount >= shortCalls` and cash stays above `maxNegCash`. This is an aggregate (not per-loan) invariant and relies on correct executor operation.
 - Return/trade mutual exclusion: A `ReturnRequest` is best-effort and does not cancel the loan on its own. The L2 receiver must emit **at most one** of `TradeConfirmed` or `CollateralReturned` for a loan. L1 must reject `finalizeDepositReturn` if `TradeConfirmed` was handled, and must reject `finalizeLoan` if `CollateralReturned` was handled.
-- Mandate deficit reserve invariant: every accepted mandate stores `maxNegativeC`; LP liquidity of this amount is reserved before trade execution, `realizedDeficit` at finalize must not exceed the reserve, settlement consumes only actual deficit, and leftover reserve is released when the loan closes/returns.
 - Roll-safe borrow bound (mandatory): Origination and rollover MUST enforce `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` where `maxRollLtv < 1e18`.
 - Governance-configured LTV buffer: `maxRollLtv` MUST be derived from the selected variable-rate market route and configured below market hard limits (e.g., `maxRollLtv = marketMaxLtv - rollLtvBuffer`, with conservative rounding down).
 - Neutral-conversion guarantee: Because neutral outcome satisfies `S_t >= K_p`, validating the bound at `K_p` guarantees conversion LTV will not exceed the configured roll-safe threshold for any neutral settlement price.
@@ -558,7 +554,7 @@ By leveraging Derive's vault architecture and fast bridge, CollarFi can implemen
 
 Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
 
-1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `maxNegativeC`, `deadline`, `nonce`.
+1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `deadline`, `nonce`.
 2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
 3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
 4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields, including the roll-safety LTV invariant from §5.1.2.
@@ -573,3 +569,4 @@ Safety invariants:
 - If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
 - While rollover is pending, a second rollover request for the same loan MUST revert.
 - Rollover roll-safety: confirmed rollover terms MUST preserve `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` for the selected conversion route.
+

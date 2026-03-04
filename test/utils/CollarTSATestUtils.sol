@@ -130,7 +130,6 @@ contract CollarTSATestUtils is TSATestUtils {
             0,
             0,
             100e18,
-            type(uint256).max,
             1e18,
             1e18,
             maturity,
