@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IntLib} from "lyra-utils/math/IntLib.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
 import {SafeCast} from "openzeppelin/utils/math/SafeCast.sol";
+import {Math} from "openzeppelin/utils/math/Math.sol";
 import {DecimalMath} from "lyra-utils/decimals/DecimalMath.sol";
 import {SignedDecimalMath} from "lyra-utils/decimals/SignedDecimalMath.sol";
 
@@ -107,6 +108,7 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
 
         int256 expectedC;
         int256 cashDelta;
+        uint256 openedPutStrike;
 
         (uint256 shortCalls, uint256 baseBalance, int256 cashBalance) = _getSubAccountStats(wrappedDepositAsset, cash);
 
@@ -215,6 +217,7 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
                             revert CTSA_InvalidTradeAmount();
                         }
                         _validatePutDetails(expiry, strike, trade.price);
+                        openedPutStrike = strike;
                         hasOpenPut = true;
                     }
                 } else {
@@ -236,6 +239,13 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         uint256 fixedInterest = loan.rolloverPending ? loan.rolloverFixedInterest : loan.fixedInterest;
         uint256 minNetInterest = loan.rolloverPending ? loan.rolloverMinNetInterest : loan.minNetInterest;
         uint256 maxNegativeC = loan.rolloverPending ? loan.rolloverMaxNegativeC : loan.maxNegativeC;
+        uint256 maxRollLtv = loan.rolloverPending ? loan.rolloverMaxRollLtv : loan.maxRollLtv;
+        uint256 strikeScale = loan.rolloverPending ? loan.rolloverStrikeScale : loan.strikeScale;
+        uint256 putStrike = loan.rolloverPending ? openedPutStrike : parsed.putStrike;
+
+        _validateRollSafetyLtv(
+            loan.collateralAmount, loan.borrowAmount + fixedInterest, putStrike, strikeScale, maxRollLtv
+        );
 
         int256 expectedTotal = int256(fixedInterest) + expectedC;
         if (expectedTotal < int256(minNetInterest)) {
@@ -421,6 +431,24 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
 
     function _getBasePrice() private view returns (uint256 spotPrice) {
         (spotPrice,) = _getCollarTSAStorage().baseFeed.getSpot();
+    }
+
+    function _validateRollSafetyLtv(
+        uint256 collateralAmount,
+        uint256 debtAmount,
+        uint256 putStrike,
+        uint256 strikeScale,
+        uint256 maxRollLtv
+    ) private pure {
+        if (collateralAmount == 0 || putStrike == 0 || strikeScale == 0 || maxRollLtv == 0 || maxRollLtv > 1e18) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
+
+        uint256 putFloorValue = Math.mulDiv(collateralAmount, putStrike, strikeScale);
+        uint256 maxDebt = Math.mulDiv(putFloorValue, maxRollLtv, 1e18);
+        if (debtAmount > maxDebt) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
     }
 
     error CTSA_InvalidAsset();

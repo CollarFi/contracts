@@ -24,116 +24,36 @@ from defaults import (
     L2_ARTIFACT_JSON,
 )
 
-MORPHO_LLTV = int(0.85 * 10**18)
-# Morpho oracle scale is 1e36. For 18-dec collateral vs 6-dec loan token,
-# 1 collateral worth 3000 loan-token units is represented as 3000 * 1e24.
-MORPHO_COLLATERAL_PRICE = 3000 * 10**24
-
 app = typer.Typer(add_completion=False)
 
 from common import (
     ANVIL_ADDR0,
     ANVIL_PK0,
     BORROWER_PK,
-    SEED_USDC_HOLDER,
     abi_encode as _abi_encode,
     borrower_address as _borrower_address,
     cast_call,
-    cast_send_from,
     cast_send_pk,
-    deploy_contract as _deploy_contract,
     ensure_keeper_role as _ensure_keeper_role,
     ensure_l1_sepolia_rpc as _ensure_l1_sepolia_rpc,
     ensure_l2_derive_rpc as _ensure_l2_derive_rpc,
     ensure_liquidity_vault_role as _ensure_liquidity_vault_role,
     ensure_live_deployments as _ensure_live_deployments,
     ensure_token_balance as _ensure_token_balance,
-    has_code as _has_code,
     inject_lz_message as _inject_lz_message,
-    keccak_hex as _keccak_hex,
     print_step as _print_step,
     require_code as _require_code,
     run,
     run_fresh_loan_flow as _run_fresh_loan_flow,
     seed_l1_liquidity_vault as _seed_l1_liquidity_vault,
-    set_eth_balance as _set_eth_balance,
     set_time as _set_time,
     sign_no_prefix as _sign_no_prefix,
 )
 
-def _morpho_market_tuple(loan_token: str, collateral_token: str, oracle: str, irm: str, lltv: int) -> str:
-    return f"({loan_token},{collateral_token},{oracle},{irm},{lltv})"
 
-def _morpho_market_id(loan_token: str, collateral_token: str, oracle: str, irm: str, lltv: int) -> str:
-    packed = _abi_encode("f(address,address,address,address,uint256)", loan_token, collateral_token, oracle, irm, str(lltv))
-    return _keccak_hex(packed)
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
 
-def _deploy_morpho_market(rpc: str, usdc: str, collateral: str, seed_amount: int) -> dict:
-    morpho = _deploy_contract(rpc, "lib/morpho-blue/src/Morpho.sol:Morpho", ANVIL_ADDR0)
-    oracle = _deploy_contract(rpc, "lib/morpho-blue/src/mocks/OracleMock.sol:OracleMock")
-    irm = _deploy_contract(rpc, "lib/morpho-blue/src/mocks/IrmMock.sol:IrmMock")
-
-    cast_send_pk(rpc, oracle, "setPrice(uint256)", str(MORPHO_COLLATERAL_PRICE))
-    cast_send_pk(rpc, morpho, "enableIrm(address)", irm)
-    cast_send_pk(rpc, morpho, "enableLltv(uint256)", str(MORPHO_LLTV))
-
-    market = _morpho_market_tuple(usdc, collateral, oracle, irm, MORPHO_LLTV)
-    cast_send_pk(rpc, morpho, "createMarket((address,address,address,address,uint256))", market)
-
-    market_id = _morpho_market_id(usdc, collateral, oracle, irm, MORPHO_LLTV)
-
-    def _read_total_supply_assets() -> int:
-        market_state = cast_call(rpc, morpho, "market(bytes32)((uint128,uint128,uint128,uint128,uint128,uint128))", market_id)
-        m_supply = re.search(r"\d+", market_state)
-        return int(m_supply.group(0)) if m_supply else 0
-
-    if seed_amount > 0:
-        # Path A: anvil storage-topup + supply from default funded key.
-        _ensure_token_balance(rpc, usdc, ANVIL_ADDR0, seed_amount)
-        cast_send_pk(rpc, usdc, "approve(address,uint256)", morpho, str(seed_amount), private_key=ANVIL_PK0)
-        cast_send_pk(
-            rpc,
-            morpho,
-            "supply((address,address,address,address,uint256),uint256,uint256,address,bytes)(uint256,uint256)",
-            market,
-            str(seed_amount),
-            "0",
-            ANVIL_ADDR0,
-            "0x",
-            private_key=ANVIL_PK0,
-        )
-
-        # Path B fallback: impersonate known USDC holder if market still not funded.
-        if _read_total_supply_assets() < seed_amount:
-            _set_eth_balance(rpc, SEED_USDC_HOLDER)
-            _ensure_token_balance(rpc, usdc, SEED_USDC_HOLDER, seed_amount)
-            cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", morpho, str(seed_amount))
-            cast_send_from(
-                rpc,
-                SEED_USDC_HOLDER,
-                morpho,
-                "supply((address,address,address,address,uint256),uint256,uint256,address,bytes)(uint256,uint256)",
-                market,
-                str(seed_amount),
-                "0",
-                ANVIL_ADDR0,
-                "0x",
-            )
-
-    total_supply_assets = _read_total_supply_assets()
-    if total_supply_assets < seed_amount:
-        raise RuntimeError(
-            f"failed to seed Morpho market liquidity: target={seed_amount}, actualSupply={total_supply_assets}"
-        )
-
-    return {
-        "morpho": morpho,
-        "oracle": oracle,
-        "irm": irm,
-        "lltv": MORPHO_LLTV,
-        "marketId": market_id,
-        "totalSupplyAssets": total_supply_assets,
-    }
 
 @app.command()
 def main(
@@ -143,10 +63,9 @@ def main(
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
     sepolia_usdc: str = typer.Option(L1_DEBT_ASSET),
     sepolia_weth: str = typer.Option(L1_COLLATERAL_ASSET),
-    usdc_seed: int = typer.Option(3_000_000_000),
     auto_redeploy: bool = typer.Option(True, "--auto-redeploy/--no-auto-redeploy"),
 ):
-    print("=== collar.fi rollover-to-variable e2e ===")
+    print("=== collar.fi keeper ready-loan settle e2e ===")
 
     _ensure_l1_sepolia_rpc(l1_rpc)
     _ensure_l2_derive_rpc(l2_rpc)
@@ -179,27 +98,7 @@ def main(
     _ensure_liquidity_vault_role(l1_rpc, vault)
     _ensure_keeper_role(l1_rpc, vault)
 
-    morpho_market = _deploy_morpho_market(l1_rpc, sepolia_usdc, sepolia_weth, usdc_seed)
-    _seed_l1_liquidity_vault(l1_rpc, sepolia_usdc, l1_liquidity_vault, usdc_seed)
-    _print_step(
-        True,
-        f"Bootstrapped Morpho market (morpho={morpho_market['morpho']}, marketId={morpho_market['marketId']})",
-    )
-
-    adapter = _deploy_contract(
-        l1_rpc,
-        "src/adapters/MorphoBlueLendingAdapter.sol:MorphoBlueLendingAdapter",
-        morpho_market["morpho"],
-        sepolia_weth,
-        sepolia_usdc,
-        morpho_market["oracle"],
-        morpho_market["irm"],
-        str(morpho_market["lltv"]),
-    )
-    position_impl = _deploy_contract(l1_rpc, "src/adapters/VariableLoanPosition.sol:VariableLoanPosition")
-    cast_send_pk(l1_rpc, vault, "setLendingAdapter(address)", adapter)
-    cast_send_pk(l1_rpc, vault, "setVariableLoanPositionImplementation(address)", position_impl)
-    _print_step(True, f"Wired Morpho adapter={adapter} and positionImpl={position_impl}")
+    _print_step(True, "Using ready-loan fallback defaults (grace=3 days, keeperPenalty=500bps)")
 
     flow = _run_fresh_loan_flow(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
     if not flow.get("ok"):
@@ -212,7 +111,12 @@ def main(
     _print_step(True, f"Created pending loan via fresh flow (loanId={loan_id})")
 
     borrower = _borrower_address()
-    pending_raw = cast_call(l1_rpc, vault, "pendingDeposits(uint256)((address,address,uint256,uint256,uint256,uint256))", str(loan_id))
+    pending_raw = cast_call(
+        l1_rpc,
+        vault,
+        "pendingDeposits(uint256)((address,address,uint256,uint256,uint256,uint256))",
+        str(loan_id),
+    )
     m = re.search(
         r"\((0x[a-fA-F0-9]{40}),\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(\d+)(?:\s*\[[^\]]+\])?\)",
         pending_raw,
@@ -223,6 +127,9 @@ def main(
     p_borrower, p_asset, p_collateral, p_maturity, p_put, p_borrow = m.groups()
     if p_borrower.lower() != borrower.lower() or p_asset.lower() != sepolia_weth.lower():
         raise RuntimeError("pending deposit does not match expected borrower/asset")
+    liquidity_seed = max(int(p_borrow) * 2, 10_000 * 10**6)
+    _seed_l1_liquidity_vault(l1_rpc, sepolia_usdc, l1_liquidity_vault, liquidity_seed)
+    _print_step(True, f"Seeded L1 liquidity vault (amount={liquidity_seed})")
 
     block_latest = json.loads(run(["cast", "block", "latest", "--rpc-url", l1_rpc, "--json"]))
     ts_raw = block_latest.get("timestamp")
@@ -251,6 +158,7 @@ def main(
     fixed_interest = ((int(p_borrow) * apr) // 10**18) * (int(p_maturity) - now_ts) // year
     max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
     strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
+
     mandate_data = _abi_encode(
         "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
         borrower,
@@ -268,16 +176,19 @@ def main(
         f"(6,{loan_id},{sepolia_weth},{p_borrow},{vault},{subaccount_id},"
         f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
     )
-    lz_fee = int(re.search(
-        r"\d+",
-        cast_call(
-            l1_rpc,
-            lz_messenger,
-            "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
-            quote_msg,
-            default_opts,
-        ),
-    ).group(0))
+    lz_fee = int(
+        re.search(
+            r"\d+",
+            cast_call(
+                l1_rpc,
+                lz_messenger,
+                "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+                quote_msg,
+                default_opts,
+            ),
+        ).group(0)
+    )
+
     cast_send_pk(
         l1_rpc,
         vault,
@@ -300,6 +211,7 @@ def main(
     trade_guid = "0x" + format(10_000_000 + loan_id, "064x")
     _inject_lz_message(l1_rpc, messenger, trade_guid, trade_msg)
 
+    # Fresh-flow ACK can carry L2 asset; normalize to L1 collateral asset for finalize checks.
     deposit_confirm_msg = _abi_encode(
         "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
         f"(3,{loan_id},{sepolia_weth},{p_collateral},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)",
@@ -319,8 +231,61 @@ def main(
     _inject_lz_message(l1_rpc, messenger, collat_guid, collat_msg)
 
     cast_send_pk(l1_rpc, vault, "settleLoan(uint256,uint8,bytes32)", str(loan_id), "1", collat_guid)
+    _print_step(True, "Settled neutral loan and moved to READY_FOR_VARIABLE")
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(p_collateral))
-    cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
+
+    block_after_ready = json.loads(run(["cast", "block", "latest", "--rpc-url", l1_rpc, "--json"]))
+    ready_ts_raw = block_after_ready.get("timestamp")
+    ready_ts = int(ready_ts_raw, 0) if isinstance(ready_ts_raw, str) else int(ready_ts_raw)
+    _set_time(l1_rpc, ready_ts + 3 * 24 * 3600 + 2)
+
+    total_due = int(p_borrow) + fixed_interest
+    penalty_bps = 500
+    strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
+    put_strike = int(p_put)
+    collateral_amount = int(p_collateral)
+    base_seize = _ceil_div(total_due * strike_scale, put_strike)
+    keeper_seize = _ceil_div(base_seize * (10_000 + penalty_bps), 10_000)
+    keeper_seize = min(keeper_seize, collateral_amount)
+    borrower_remainder = collateral_amount - keeper_seize
+
+    _ensure_token_balance(l1_rpc, sepolia_usdc, ANVIL_ADDR0, total_due)
+    cast_send_pk(l1_rpc, sepolia_usdc, "approve(address,uint256)", vault, str(total_due), private_key=ANVIL_PK0)
+
+    keeper_usdc_before = int(cast_call(l1_rpc, sepolia_usdc, "balanceOf(address)(uint256)", ANVIL_ADDR0).split()[0])
+    keeper_weth_before = int(cast_call(l1_rpc, sepolia_weth, "balanceOf(address)(uint256)", ANVIL_ADDR0).split()[0])
+    borrower_weth_before = int(cast_call(l1_rpc, sepolia_weth, "balanceOf(address)(uint256)", borrower).split()[0])
+    lv_usdc_before = int(cast_call(l1_rpc, sepolia_usdc, "balanceOf(address)(uint256)", l1_liquidity_vault).split()[0])
+
+    cast_send_pk(
+        l1_rpc,
+        vault,
+        "settleReadyLoanByRepay(uint256)(uint256,uint256,uint256)",
+        str(loan_id),
+        private_key=ANVIL_PK0,
+    )
+
+    keeper_usdc_after = int(cast_call(l1_rpc, sepolia_usdc, "balanceOf(address)(uint256)", ANVIL_ADDR0).split()[0])
+    keeper_weth_after = int(cast_call(l1_rpc, sepolia_weth, "balanceOf(address)(uint256)", ANVIL_ADDR0).split()[0])
+    borrower_weth_after = int(cast_call(l1_rpc, sepolia_weth, "balanceOf(address)(uint256)", borrower).split()[0])
+    lv_usdc_after = int(cast_call(l1_rpc, sepolia_usdc, "balanceOf(address)(uint256)", l1_liquidity_vault).split()[0])
+
+    if keeper_usdc_before - keeper_usdc_after != total_due:
+        raise RuntimeError(
+            f"keeper USDC spend mismatch: expected {total_due}, got {keeper_usdc_before - keeper_usdc_after}"
+        )
+    if lv_usdc_after - lv_usdc_before != total_due:
+        raise RuntimeError(
+            f"liquidity vault USDC receive mismatch: expected {total_due}, got {lv_usdc_after - lv_usdc_before}"
+        )
+    if keeper_weth_after - keeper_weth_before != keeper_seize:
+        raise RuntimeError(
+            f"keeper collateral seize mismatch: expected {keeper_seize}, got {keeper_weth_after - keeper_weth_before}"
+        )
+    if borrower_weth_after - borrower_weth_before != borrower_remainder:
+        raise RuntimeError(
+            f"borrower collateral remainder mismatch: expected {borrower_remainder}, got {borrower_weth_after - borrower_weth_before}"
+        )
 
     loan_raw = cast_call(
         l1_rpc,
@@ -330,29 +295,10 @@ def main(
     )
     loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
     loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
+    if loan_state != 4:
+        raise RuntimeError(f"loan not CLOSED after keeper settle (state={loan_state}): {loan_raw}")
 
-    if loan_state != 3:
-        cast_send_pk(l1_rpc, vault, "tryConvertReadyLoan(uint256)(bool)", str(loan_id), private_key=ANVIL_PK0)
-        loan_raw = cast_call(
-            l1_rpc,
-            vault,
-            "loans(uint256)(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256)",
-            str(loan_id),
-        )
-        loan_lines = [ln.strip() for ln in loan_raw.splitlines() if ln.strip()]
-        loan_state = int(loan_lines[8].split()[0]) if len(loan_lines) > 8 else -1
-
-    position_addr = cast_call(l1_rpc, vault, "variableLoanPosition(uint256)(address)", str(loan_id)).splitlines()[0].strip()
-
-    if loan_state != 3:
-        available_liquidity = -1
-        if position_addr != "0x0000000000000000000000000000000000000000" and _has_code(l1_rpc, position_addr):
-            available_liquidity = int(cast_call(l1_rpc, position_addr, "availableLiquidity()(uint256)").split()[0])
-        required_debt = int(p_borrow) + fixed_interest
-        raise RuntimeError(
-            f"loan not ACTIVE_VARIABLE (state={loan_state}, position={position_addr}, availableLiquidity={available_liquidity}, requiredDebt={required_debt}): {loan_raw}"
-        )
-    _print_step(True, "Converted to ACTIVE_VARIABLE")
+    _print_step(True, "Keeper settled READY_FOR_VARIABLE loan by repaying and seizing deterministic collateral")
 
     out = {
         "status": "success",
@@ -360,19 +306,16 @@ def main(
         "depositGuid": deposit_guid,
         "tradeGuid": trade_guid,
         "collateralGuid": collat_guid,
-        "adapter": adapter,
-        "positionImplementation": position_impl,
-        "positionAddress": position_addr,
-        "morpho": morpho_market["morpho"],
-        "morphoOracle": morpho_market["oracle"],
-        "morphoIrm": morpho_market["irm"],
-        "morphoMarketId": morpho_market["marketId"],
+        "totalDue": total_due,
+        "keeperSeize": keeper_seize,
+        "borrowerRemainder": borrower_remainder,
     }
-    p = Path(tempfile.mkdtemp(prefix="rollover-var-e2e-")) / "result.json"
+    p = Path(tempfile.mkdtemp(prefix="ready-loan-keeper-settle-")) / "result.json"
     p.write_text(json.dumps(out, indent=2))
     _print_step(True, f"Result artifact written: {p}")
 
     print("\nResult: SUCCESS")
+
 
 if __name__ == "__main__":
     app()

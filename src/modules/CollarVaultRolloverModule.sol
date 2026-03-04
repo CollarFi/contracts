@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {CollarVaultShared} from "./CollarVaultShared.sol";
 import {CollarLZMessages} from "../bridge/CollarLZMessages.sol";
@@ -15,6 +16,7 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
     error CV_InvalidState();
     error CV_InvalidInput();
     error CV_InvalidMessage();
+    error CV_InvalidConfig();
     error CV_Unauthorized();
     error CV_InsufficientValue();
 
@@ -64,6 +66,14 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
 
         uint256 fixedInterest =
             _quoteInterest(loan.principal, $.originationFeeApr, block.timestamp, mandate.newMaturity);
+        uint256 maxRollLtv = $.maxRollLtv;
+        _enforceRollSafetyLtv(
+            loan.collateralAsset,
+            loan.collateralAmount,
+            mandate.maxPutStrike,
+            loan.principal + fixedInterest,
+            maxRollLtv
+        );
 
         $.usedRolloverMandates[mandateHash] = true;
         $.pendingRollovers[loanId] = CollarVaultShared.PendingRollover({
@@ -74,9 +84,16 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             maxPutStrike: mandate.maxPutStrike,
             minNetInterest: mandate.minNetInterest,
             maxNegativeC: mandate.maxNegativeC,
+            fixedInterest: fixedInterest,
+            maxRollLtv: maxRollLtv,
             deadline: mandate.deadline,
             requestedAt: block.timestamp
         });
+
+        uint256 strikeScale = $.strikeScale[loan.collateralAsset];
+        if (strikeScale == 0) {
+            revert CV_InvalidConfig();
+        }
 
         bytes memory rolloverData = abi.encode(
             mandateHash,
@@ -87,6 +104,8 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
             mandate.minNetInterest,
             fixedInterest,
             mandate.maxNegativeC,
+            maxRollLtv,
+            strikeScale,
             mandate.deadline,
             mandate.nonce
         );
@@ -138,6 +157,11 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         if (totalEconomics < int256(pending.minNetInterest)) anomalyFlags |= 4;
         uint256 realizedDeficit = totalEconomics < 0 ? uint256(-totalEconomics) : 0;
         if (realizedDeficit > pending.maxNegativeC) anomalyFlags |= 8;
+        if (_isRollSafetyLtvViolated(
+                loan.collateralAsset, loan.collateralAmount, putStrike, loan.principal + newInterest, pending.maxRollLtv
+            )) {
+            anomalyFlags |= 16;
+        }
 
         uint256 oldMaturity = loan.maturity;
         uint256 oldCallStrike = loan.callStrike;
@@ -182,5 +206,38 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         return (annualFee * (end - start)) / CollarVaultShared.YEAR;
     }
 
+    function _enforceRollSafetyLtv(
+        address collateralAsset,
+        uint256 collateralAmount,
+        uint256 putStrike,
+        uint256 debtAmount,
+        uint256 maxRollLtv
+    ) internal view {
+        if (_isRollSafetyLtvViolated(collateralAsset, collateralAmount, putStrike, debtAmount, maxRollLtv)) {
+            revert CV_InsufficientValue();
+        }
+    }
+
+    function _isRollSafetyLtvViolated(
+        address collateralAsset,
+        uint256 collateralAmount,
+        uint256 putStrike,
+        uint256 debtAmount,
+        uint256 maxRollLtv
+    ) internal view returns (bool) {
+        CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
+        if (maxRollLtv == 0 || maxRollLtv > 1e18) {
+            return true;
+        }
+
+        uint256 scale = $.strikeScale[collateralAsset];
+        if (scale == 0 || putStrike == 0) {
+            return true;
+        }
+
+        uint256 putFloorValue = Math.mulDiv(collateralAmount, putStrike, scale);
+        uint256 maxDebt = Math.mulDiv(putFloorValue, maxRollLtv, 1e18);
+        return debtAmount > maxDebt;
+    }
     error CV_NotFound();
 }

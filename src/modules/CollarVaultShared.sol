@@ -68,6 +68,7 @@ library CollarVaultShared {
         uint256 minNetInterest;
         uint256 fixedInterest;
         uint256 maxNegativeC;
+        uint256 maxRollLtv;
         bool sentToL2;
     }
 
@@ -91,6 +92,8 @@ library CollarVaultShared {
         uint256 maxPutStrike;
         uint256 minNetInterest;
         uint256 maxNegativeC;
+        uint256 fixedInterest;
+        uint256 maxRollLtv;
         uint64 deadline;
         uint256 requestedAt;
     }
@@ -108,10 +111,14 @@ library CollarVaultShared {
         uint256 originationFeeApr;
         uint256 maxTotalPrincipal;
         uint256 totalCommittedPrincipal;
+        uint256 maxRollLtv;
+        uint256 readyLoanKeeperPenaltyBps;
         uint256 deriveSubaccountId;
         uint64 maxMandateDuration;
+        uint64 readyLoanCloseGracePeriod;
         uint256 nextLoanId;
         mapping(uint256 => Loan) loans;
+        mapping(uint256 => uint256) readyLoanSince;
         mapping(uint256 => address) variableLoanPositions;
         mapping(uint256 => PendingDeposit) pendingDeposits;
         mapping(uint256 => Mandate) mandates;

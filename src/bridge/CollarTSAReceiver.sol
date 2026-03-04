@@ -160,9 +160,13 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 minNetInterest,
                 uint256 fixedInterest,
                 uint256 maxNegativeC,
+                uint256 maxRollLtv,
+                uint256 strikeScale,
                 uint64 maturity,
                 uint64 deadline
-            ) = abi.decode(message.data, (address, uint256, uint256, uint256, uint256, uint256, uint64, uint64));
+            ) = abi.decode(
+                message.data, (address, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint64, uint64)
+            );
 
             loanStore.recordMandate(
                 message.loanId,
@@ -174,6 +178,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 minNetInterest,
                 fixedInterest,
                 maxNegativeC,
+                maxRollLtv,
+                strikeScale,
                 maturity,
                 deadline
             );
@@ -193,10 +199,26 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 uint256 minNetInterest,
                 uint256 fixedInterest,
                 uint256 maxNegativeC,
+                uint256 maxRollLtv,
+                uint256 strikeScale,
                 uint64 deadline,
                 uint256 nonce
             ) = abi.decode(
-                message.data, (bytes32, address, uint64, uint256, uint256, uint256, uint256, uint256, uint64, uint256)
+                message.data,
+                (
+                    bytes32,
+                    address,
+                    uint64,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint64,
+                    uint256
+                )
             );
             nonce;
 
@@ -209,6 +231,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
                 minNetInterest,
                 fixedInterest,
                 maxNegativeC,
+                maxRollLtv,
+                strikeScale,
                 newMaturity,
                 deadline
             );

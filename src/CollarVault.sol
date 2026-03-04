@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -87,6 +86,7 @@ contract CollarVault is
     event TreasuryUpdated(address indexed treasury, uint256 bps);
     event OriginationFeeAprUpdated(uint256 feeApr);
     event MaxTotalPrincipalUpdated(uint256 maxTotalPrincipal);
+    event MaxRollLtvUpdated(uint256 maxRollLtv);
     event MaxMandateDurationUpdated(uint64 maxMandateDuration);
     event CollateralConfigUpdated(
         address indexed asset, bool allowed, uint256 strikeScale, address indexed l2MessageAsset
@@ -154,6 +154,9 @@ contract CollarVault is
         $.l2Recipient = l2Recipient_;
         $.treasury = treasury_;
         $.maxMandateDuration = 30 minutes;
+        $.maxRollLtv = 1e18;
+        $.readyLoanCloseGracePeriod = 3 days;
+        $.readyLoanKeeperPenaltyBps = 500;
         $.nextLoanId = 1;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -215,6 +218,11 @@ contract CollarVault is
     function maxTotalPrincipal() external view returns (uint256) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         return $.maxTotalPrincipal;
+    }
+
+    function maxRollLtv() external view returns (uint256) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        return $.maxRollLtv;
     }
 
     function totalCommittedPrincipal() external view returns (uint256) {
@@ -413,7 +421,7 @@ contract CollarVault is
         if (params.maturity <= block.timestamp) {
             revert CV_InvalidInput();
         }
-        _validateBorrowAmount(params.collateralAsset, params.collateralAmount, params.putStrike, params.borrowAmount);
+        _validateBorrowRequest(params.collateralAsset, params.putStrike, params.borrowAmount);
         _validatePermit(params.collateralAsset, params.collateralAmount, permit);
         if (params.collateralAmount > type(uint160).max) {
             revert CV_InvalidInput();
@@ -654,6 +662,23 @@ contract CollarVault is
         converted = abi.decode(ret, (bool));
     }
 
+    /// @notice Close a READY_FOR_VARIABLE loan by repaying debt and receiving collateral.
+    function settleReadyLoanByRepay(uint256 loanId)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 repaid, uint256 callerCollateral, uint256 borrowerCollateral)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        address module = $.settleModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+        bytes memory ret =
+            _delegateTo(module, abi.encodeCall(ICollarVaultSettleModule.settleReadyLoanByRepay, (loanId)));
+        (repaid, callerCollateral, borrowerCollateral) = abi.decode(ret, (uint256, uint256, uint256));
+    }
+
     /// @notice Repay an active variable loan via the vault.
     function repayVariableLoan(uint256 loanId, uint256 amount)
         external
@@ -776,7 +801,7 @@ contract CollarVault is
         onlyRole(PARAMETER_ROLE)
     {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        if (asset == address(0) || (allowed && l2Asset == address(0))) {
+        if (asset == address(0) || (allowed && (l2Asset == address(0) || scale == 0))) {
             revert CV_InvalidConfig();
         }
         $.collateralAllowed[asset] = allowed;
@@ -823,12 +848,30 @@ contract CollarVault is
         emit MaxTotalPrincipalUpdated(maxPrincipal);
     }
 
+    /// @notice Update the maximum roll-safety LTV ratio (1e18 precision).
+    function setMaxRollLtv(uint256 newMaxRollLtv) external onlyRole(PARAMETER_ROLE) {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        if (newMaxRollLtv == 0 || newMaxRollLtv > 1e18) {
+            revert CV_InvalidConfig();
+        }
+        $.maxRollLtv = newMaxRollLtv;
+        emit MaxRollLtvUpdated(newMaxRollLtv);
+    }
+
     /// @notice Update max mandate lifetime in seconds.
     function setMaxMandateDuration(uint64 duration) external onlyRole(PARAMETER_ROLE) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (duration == 0) revert CV_InvalidConfig();
         $.maxMandateDuration = duration;
         emit MaxMandateDurationUpdated(duration);
+    }
+
+    /// @notice Update READY fallback-close configuration.
+    function setReadyLoanConfig(uint64 gracePeriod, uint256 keeperPenaltyBps) external onlyRole(PARAMETER_ROLE) {
+        if (gracePeriod == 0) revert CV_InvalidConfig();
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+        $.readyLoanCloseGracePeriod = gracePeriod;
+        $.readyLoanKeeperPenaltyBps = keeperPenaltyBps;
     }
 
     /// @notice Allow or revoke an RFQ signer.
@@ -893,19 +936,12 @@ contract CollarVault is
 
     // (removed) _validateQuote / _validateBorrowAmount(Quote): quote-based flow removed.
 
-    function _validateBorrowAmount(
-        address collateralAsset,
-        uint256 collateralAmount,
-        uint256 putStrike,
-        uint256 borrowAmount
-    ) internal view {
+    function _validateBorrowRequest(address collateralAsset, uint256 putStrike, uint256 borrowAmount) internal view {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
-        uint256 scale = $.strikeScale[collateralAsset];
-        if (scale == 0) {
+        if ($.strikeScale[collateralAsset] == 0) {
             revert CV_InvalidConfig();
         }
-        uint256 expected = Math.mulDiv(collateralAmount, putStrike, scale);
-        if (expected != borrowAmount) {
+        if (putStrike == 0 || borrowAmount == 0) {
             revert CV_InvalidInput();
         }
     }
@@ -1044,7 +1080,7 @@ contract CollarVault is
         if (params.maturity <= block.timestamp) {
             revert CV_InvalidInput();
         }
-        _validateBorrowAmount(params.collateralAsset, params.collateralAmount, params.putStrike, params.borrowAmount);
+        _validateBorrowRequest(params.collateralAsset, params.putStrike, params.borrowAmount);
 
         // Ensure finalize module is configured
         address module = $.finalizeModule;

@@ -467,6 +467,8 @@ contract LZMessagingTest is Test {
             uint256(0.2e18),
             uint256(0),
             uint256(0),
+            uint256(0.8e18),
+            uint256(1e6),
             uint64(block.timestamp + 1 days),
             uint256(1)
         );
