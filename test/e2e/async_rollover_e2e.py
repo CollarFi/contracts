@@ -41,7 +41,7 @@ from common import (
     run,
     sign_no_prefix as _sign_no_prefix,
 )
-from p0_helpers import extract_tx_hash, finalize_fresh_loan_to_active_zero_cost, get_loan, latest_timestamp
+from loan_flow_helpers import extract_tx_hash, finalize_fresh_loan_to_active_zero_cost, get_loan, latest_timestamp
 
 app = typer.Typer(add_completion=False)
 

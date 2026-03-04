@@ -41,7 +41,7 @@ from common import (
     require_code as _require_code,
     set_time as _set_time,
 )
-from p0_helpers import accept_mandate_for_pending, get_pending, run_fresh_pending_loan
+from loan_flow_helpers import accept_mandate_for_pending, get_pending, run_fresh_pending_loan
 
 app = typer.Typer(add_completion=False)
 
