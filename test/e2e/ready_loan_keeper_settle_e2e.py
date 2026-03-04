@@ -55,6 +55,18 @@ def _ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def _expect_revert(fn, err_hint: str) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        msg = str(exc)
+        if err_hint and err_hint not in msg and "custom error" not in msg.lower():
+            raise RuntimeError(f"unexpected revert reason while expecting {err_hint}: {msg}")
+        _print_step(True, f"Observed expected revert: {err_hint}")
+        return
+    raise RuntimeError(f"expected revert not observed: {err_hint}")
+
+
 @app.command()
 def main(
     l1_json: Path = typer.Option(L1_ARTIFACT_JSON),
@@ -238,6 +250,19 @@ def main(
     _set_time(l1_rpc, ready_ts + 3 * 24 * 3600 + 2)
 
     total_due = int(p_borrow) + fixed_interest
+    _ensure_token_balance(l1_rpc, sepolia_usdc, borrower, total_due)
+    cast_send_pk(l1_rpc, sepolia_usdc, "approve(address,uint256)", vault, str(total_due), private_key=BORROWER_PK)
+    _expect_revert(
+        lambda: cast_send_pk(
+            l1_rpc,
+            vault,
+            "settleReadyLoanByRepay(uint256)(uint256,uint256,uint256)",
+            str(loan_id),
+            private_key=BORROWER_PK,
+        ),
+        "CV_Unauthorized",
+    )
+
     penalty_bps = 500
     strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
     put_strike = int(p_put)
