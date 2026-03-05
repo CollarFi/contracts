@@ -49,3 +49,16 @@ uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-e2e.js
 - Most scripts are dry-run unless `--broadcast` is set.
 - `--env testnet|mainnet` resolves `.env.l1.<env>` / `.env.l2.<env>` automatically where applicable.
 - Address resolution fallback order (typical): env var -> deployment output JSON -> Foundry broadcast artifact.
+
+## `lz_harness` helpers
+
+```bash
+# Ensure harness route wiring + endpoint config (dry-run by default)
+uv run python ops/lz_harness/ensure_route.py
+
+# Broadcast only the mismatched settings
+uv run python ops/lz_harness/ensure_route.py --broadcast
+
+# Custom env files + machine-readable output
+uv run python ops/lz_harness/ensure_route.py .env.l1.testnet .env.l2.testnet --json
+```
