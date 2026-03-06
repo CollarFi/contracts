@@ -840,7 +840,13 @@ contract CollarVaultTest is Test {
         public
     {
         putStrike = bound(putStrike, 1, 100_000e6);
-        borrowAmount = bound(borrowAmount, 1, 1_000_000e6);
+
+        // Deposits now always include a signed mandate, so roll-safety LTV is enforced at creation time.
+        // Keep this fuzz case inside valid mandate bounds while still proving borrowAmount is independent
+        // from the naive collateral*putStrike baseline.
+        uint256 maxBorrow = (((uint256(1e8) * putStrike) / uint256(1e8)) * vault.maxRollLtv()) / 1e18;
+        if (maxBorrow <= 1) return;
+        borrowAmount = bound(borrowAmount, 1, maxBorrow - 1);
 
         uint256 expected = (uint256(1e8) * putStrike) / uint256(1e8);
         vm.assume(borrowAmount != expected);
@@ -853,28 +859,13 @@ contract CollarVaultTest is Test {
             borrowAmount: borrowAmount
         });
 
-        IAllowanceTransfer.PermitSingle memory permit = IAllowanceTransfer.PermitSingle({
-            details: IAllowanceTransfer.PermitDetails({
-                token: params.collateralAsset,
-                amount: uint160(params.collateralAmount),
-                expiration: uint48(block.timestamp + 1 days),
-                nonce: 0
-            }),
-            spender: address(vault),
-            sigDeadline: block.timestamp + 1 days
-        });
-
-        bytes memory permitSig = permit2Signer.signPermitSingle(borrowerKey, permit);
-
-        vm.startPrank(borrower);
-        (uint256 loanId,,) = vault.createDepositWithMandatePermit(params, permit, permitSig);
-        vm.stopPrank();
+        uint256 loanId = _requestDeposit(params);
 
         (,,,,, uint256 pendingBorrowAmount) = vault.pendingDeposits(loanId);
         assertEq(pendingBorrowAmount, borrowAmount);
     }
 
-    function testAcceptMandateRevertsWhenRollSafetyLtvExceeded() public {
+    function testCreateDepositWithMandatePermitSupportsSignedMandateOrigination() public {
         vault.setMaxRollLtv(0.8e18);
 
         CollarVault.DepositParams memory params = CollarVault.DepositParams({
@@ -882,31 +873,15 @@ contract CollarVaultTest is Test {
             collateralAmount: 1e8,
             maturity: block.timestamp + 30 days,
             putStrike: 62_000e6,
-            borrowAmount: 50_000e6
+            borrowAmount: 40_000e6
         });
+
         uint256 loanId = _requestDeposit(params);
+        assertGt(loanId, 0);
 
-        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
-            loanId: loanId,
-            collateralAsset: address(wbtc),
-            collateralAmount: params.collateralAmount,
-            maturity: uint64(params.maturity),
-            putStrike: params.putStrike,
-            callStrike: 70_000e6,
-            borrowAmount: params.borrowAmount,
-            minNetInterest: 0,
-            rfqExpiry: uint64(block.timestamp + 1 days),
-            borrower: borrower,
-            nonce: 77_001
-        });
-
-        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
-        bytes memory rfqSig = abi.encodePacked(r, s, v);
-
-        vm.prank(borrower);
-        vm.expectRevert(CollarVault.CV_InsufficientValue.selector);
-        vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+        (address mandateBorrower,,,,,,,,, bool sentToL2) = vault.mandates(loanId);
+        assertEq(mandateBorrower, borrower);
+        assertTrue(sentToL2);
     }
 
     function testFinalizeLoanCannotConsumeSameGuidTwice() public {
@@ -1647,9 +1622,33 @@ contract CollarVaultTest is Test {
 
         bytes memory permitSig = permit2Signer.signPermitSingle(borrowerKey, permit);
 
+        // Always bind deposits to a signed mandate (protocol requirement).
+        // Keep helper-generated mandate short-lived so tests that explicitly call acceptMandate
+        // can still refresh mandate terms immediately after deposit creation.
+        ICollarVaultFinalizeModule.BaselineRfq memory rfq = ICollarVaultFinalizeModule.BaselineRfq({
+            loanId: 0,
+            collateralAsset: params.collateralAsset,
+            collateralAmount: params.collateralAmount,
+            maturity: uint64(params.maturity),
+            putStrike: params.putStrike,
+            callStrike: params.putStrike,
+            borrowAmount: params.borrowAmount,
+            minNetInterest: 0,
+            rfqExpiry: uint64(block.timestamp + 1 days),
+            borrower: borrower,
+            nonce: uint256(keccak256(abi.encodePacked("test-helper", params.maturity, params.borrowAmount, block.timestamp)))
+        });
+        bytes32 rfqHash = vault.hashBaselineRfq(rfq);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
+        bytes memory rfqSig = abi.encodePacked(r, s, v);
+
+        uint64 shortDeadline = uint64(block.timestamp + 1);
+
         vm.startPrank(borrower);
-        (loanId,,) = vault.createDepositWithMandatePermit(params, permit, permitSig);
+        (loanId,,,) = vault.createDepositWithMandatePermit(params, rfq, rfqSig, shortDeadline, permit, permitSig);
         vm.stopPrank();
+
+        vm.warp(block.timestamp + 2);
     }
 }
 

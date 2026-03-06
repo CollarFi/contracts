@@ -396,16 +396,6 @@ contract CollarVault is
         return $.lzMessageConsumed[guid];
     }
 
-    /// @notice Request a collateral deposit via Permit2 and send a deposit intent to L2.
-    /// @dev Deposit-only helper kept for backwards compatibility. Prefer the overload that also accepts mandate terms.
-    function createDepositWithMandatePermit(
-        DepositParams calldata params,
-        IAllowanceTransfer.PermitSingle calldata permit,
-        bytes calldata permitSig
-    ) external payable nonReentrant whenNotPaused returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
-        (loanId, socketMessageId, lzGuid) = _createDepositWithPermit(params, permit, permitSig);
-    }
-
     /// @notice Creates a deposit via Permit2 and accepts a mandate atomically in a single transaction.
     /// @dev Mirrors createDepositWithMandate but uses Permit2 pull instead of prior ERC20 approval.
     /// @param params The deposit parameters.
@@ -462,16 +452,6 @@ contract CollarVault is
         mandateLzGuid = abi.decode(ret, (bytes32));
 
         // Any excess LZ fee budget in each send*AutoFee call is refunded by messenger to `msg.sender`.
-    }
-
-    function _createDepositWithPermit(
-        DepositParams calldata params,
-        IAllowanceTransfer.PermitSingle calldata permit,
-        bytes calldata permitSig
-    ) internal returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
-        _validateAndPullPermitCollateral(params, permit, permitSig);
-
-        (loanId, socketMessageId, lzGuid) = _requestCollateralDeposit(msg.sender, params);
     }
 
     function _validateAndPullPermitCollateral(

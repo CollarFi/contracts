@@ -29,7 +29,7 @@ app = typer.Typer(add_completion=False)
 def _describe_step(step_name: str) -> str:
     descriptions = {
         "grant_l2_keeper": "Grant keeper role on L2 receiver",
-        "create_deposit_with_permit": "Create L1 deposit intent via Permit2",
+        "create_deposit_with_permit": "Create L1 deposit+mandate via Permit2",
         "relay_l1_to_l2_exact": "Relay exact LayerZero packet L1 → L2",
         "simulate_socket_finalized": "Mark socket transfer as finalized on fork",
         "fund_l2_receiver_for_deposit": "Ensure L2 receiver has bridged asset balance",
@@ -396,8 +396,24 @@ def main(
         sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline, BORROWER_PK)
 
         maturity = now + 7 * 24 * 3600
-        params = f"({weth},1000000000000000000,{maturity},1500000000000000000000,1500000000)"
+        put_strike = 1500000000000000000000
+        call_strike = 1700000000000000000000
+        borrow_amount = 1500000000
+        params = f"({weth},1000000000000000000,{maturity},{put_strike},{borrow_amount})"
         permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
+
+        rfq_expiry = now + 3600
+        mandate_deadline = now + 3600
+        rfq_nonce = now
+        rfq_arg = f"(0,{weth},1000000000000000000,{maturity},{put_strike},{call_strike},{borrow_amount},0,{rfq_expiry},{borrower},{rfq_nonce})"
+        rfq_hash = cast_call(
+            l1_rpc,
+            vault,
+            "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
+            rfq_arg,
+        ).splitlines()[0].strip()
+        # RFQ is keeper-signed in production; e2e forks sign with local keeper key.
+        rfq_sig = sign_hash_no_prefix(rfq_hash, ANVIL_PK0)
 
         l2_recipient = cast_call(l1_rpc, vault, "l2Recipient()(address)").splitlines()[0].strip()
         try:
@@ -411,7 +427,7 @@ def main(
         quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
         lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", quote_msg, default_opts)).group(0))
 
-        create_sig = "createDepositWithMandatePermit((address,uint256,uint256,uint256,uint256),((address,uint160,uint48,uint48),address,uint256),bytes)"
+        create_sig = "createDepositWithMandatePermit((address,uint256,uint256,uint256,uint256),(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64,((address,uint160,uint48,uint48),address,uint256),bytes)"
         fallback_bridge = None
         try:
             tx = cast_send(
@@ -419,9 +435,12 @@ def main(
                 vault,
                 create_sig,
                 params,
+                rfq_arg,
+                rfq_sig,
+                str(mandate_deadline),
                 permit_arg,
                 sig,
-                value=str(bridge_fee + lz_fee),
+                value=str(bridge_fee + (2 * lz_fee)),
                 private_key=BORROWER_PK,
             )
         except Exception as e:
@@ -438,9 +457,12 @@ def main(
                 vault,
                 create_sig,
                 params,
+                rfq_arg,
+                rfq_sig,
+                str(mandate_deadline),
                 permit_arg,
                 sig,
-                value=str(lz_fee),
+                value=str(2 * lz_fee),
                 private_key=BORROWER_PK,
             )
         return {
