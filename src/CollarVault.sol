@@ -397,7 +397,7 @@ contract CollarVault is
     }
 
     /// @notice Request a collateral deposit via Permit2 and send a deposit intent to L2.
-    /// @dev Named to mirror createDepositWithMandate while using Permit2 instead of prior ERC20 approval.
+    /// @dev Deposit-only helper kept for backwards compatibility. Prefer the overload that also accepts mandate terms.
     function createDepositWithMandatePermit(
         DepositParams calldata params,
         IAllowanceTransfer.PermitSingle calldata permit,
@@ -406,11 +406,79 @@ contract CollarVault is
         (loanId, socketMessageId, lzGuid) = _createDepositWithPermit(params, permit, permitSig);
     }
 
+    /// @notice Creates a deposit via Permit2 and accepts a mandate atomically in a single transaction.
+    /// @dev Mirrors createDepositWithMandate but uses Permit2 pull instead of prior ERC20 approval.
+    /// @param params The deposit parameters.
+    /// @param rfq The keeper-signed baseline RFQ (loanId may be 0 sentinel for internal flow).
+    /// @param rfqSig Signature of the RFQ by an RFQ signer role holder.
+    /// @param deadline Mandate deadline after which borrower can request return.
+    /// @param permit Permit2 payload authorizing collateral pull.
+    /// @param permitSig Signature for Permit2 payload.
+    function createDepositWithMandatePermit(
+        DepositParams calldata params,
+        ICollarVaultFinalizeModule.BaselineRfq calldata rfq,
+        bytes calldata rfqSig,
+        uint64 deadline,
+        IAllowanceTransfer.PermitSingle calldata permit,
+        bytes calldata permitSig
+    )
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint256 loanId, bytes32 socketMessageId, bytes32 depositLzGuid, bytes32 mandateLzGuid)
+    {
+        CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
+
+        // Ensure finalize module is configured
+        address module = $.finalizeModule;
+        if (module == address(0)) {
+            revert CV_InvalidConfig();
+        }
+
+        _validateAndPullPermitCollateral(params, permit, permitSig);
+
+        // Calculate ETH split: bridge fee + deposit LZ fee + mandate LZ fee.
+        // Keep the same split heuristic used by createDepositWithMandate.
+        uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
+        if (msg.value < bridgeFee) {
+            revert CV_InsufficientValue();
+        }
+        uint256 remainingEth = msg.value - bridgeFee;
+        uint256 ethForDepositLz = remainingEth / 2;
+        uint256 ethForMandateLz = remainingEth - ethForDepositLz;
+
+        // Step 1: Create pending deposit and send DepositIntent to L2.
+        (loanId, socketMessageId, depositLzGuid) =
+            _requestCollateralDepositWithBudget(msg.sender, params, ethForDepositLz + bridgeFee);
+
+        // Step 2: Accept mandate via finalize module.
+        bytes memory ret = _delegateTo(
+            module,
+            abi.encodeCall(
+                ICollarVaultFinalizeModule.acceptMandateInternal, (loanId, rfq, rfqSig, deadline, ethForMandateLz)
+            )
+        );
+        mandateLzGuid = abi.decode(ret, (bytes32));
+
+        // Any excess LZ fee budget in each send*AutoFee call is refunded by messenger to `msg.sender`.
+    }
+
     function _createDepositWithPermit(
         DepositParams calldata params,
         IAllowanceTransfer.PermitSingle calldata permit,
         bytes calldata permitSig
     ) internal returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
+        _validateAndPullPermitCollateral(params, permit, permitSig);
+
+        (loanId, socketMessageId, lzGuid) = _requestCollateralDeposit(msg.sender, params);
+    }
+
+    function _validateAndPullPermitCollateral(
+        DepositParams calldata params,
+        IAllowanceTransfer.PermitSingle calldata permit,
+        bytes calldata permitSig
+    ) internal {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (!$.collateralAllowed[params.collateralAsset]) {
             revert CV_InvalidConfig();
@@ -429,8 +497,6 @@ contract CollarVault is
 
         $.permit2.permit(msg.sender, permit, permitSig);
         $.permit2.transferFrom(msg.sender, address(this), uint160(params.collateralAmount), params.collateralAsset);
-
-        (loanId, socketMessageId, lzGuid) = _requestCollateralDeposit(msg.sender, params);
     }
 
     // (removed) acceptQuote: quote-based RFQ flow replaced by keeper-signed RFQ baseline + acceptMandate.
