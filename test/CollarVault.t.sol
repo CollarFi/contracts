@@ -1636,7 +1636,9 @@ contract CollarVaultTest is Test {
             minNetInterest: 0,
             rfqExpiry: uint64(block.timestamp + 1 days),
             borrower: borrower,
-            nonce: uint256(keccak256(abi.encodePacked("test-helper", params.maturity, params.borrowAmount, block.timestamp)))
+            nonce: uint256(
+                keccak256(abi.encodePacked("test-helper", params.maturity, params.borrowAmount, block.timestamp))
+            )
         });
         bytes32 rfqHash = vault.hashBaselineRfq(rfq);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(rfqSignerKey, rfqHash);
