@@ -412,9 +412,26 @@ If a neutral-settled loan remains `READY_FOR_VARIABLE` and cannot be converted i
 
 This fallback avoids adding an on-chain liquidation/oracle subsystem while preserving deterministic closure.
 
-### 5.4 Rolling a variable loan into a new collar
+### 5.4 Async rollover (pre-maturity)
 
-Rolling is not supported. If a borrower wants a new collar after converting to a variable loan, they must repay the variable loan via `CollarVault`, withdraw collateral via `CollarVault`, and initiate a new collar loan via the standard origination flow.
+Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
+
+1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `deadline`, `nonce`.
+2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
+3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
+4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields, including the roll-safety LTV invariant from §5.1.2.
+5. After successful RFQ execution, L2 receiver sends `RolloverConfirmed` to L1 containing mandate linkage and finalized terms (`callStrike`, `putStrike`, `interestApr`, `expiry`).
+6. Keeper calls `finalizeRollover` on L1. Finalization is a trusted, authenticated commit step: once a valid `RolloverConfirmed` is present, it applies the confirmed terms, updates accounting, consumes guid, and clears pending rollover.
+
+### 5.4.1 Async rollover safety invariants
+
+- Replay protection: mandate hash can be used only once.
+- Hard reverts in `finalizeRollover` are reserved for invalid/forged/mismatched confirmation identity (action, loan, recipient/subaccount, mandate hash, borrower, expiry) or missing pending state.
+- Post-open economic/consistency checks (e.g. strike/economics drift vs mandate bounds) MUST NOT brick the loan at finalization; they are signaled as anomalies and enforced pre-trade in TSA RFQ verification.
+- `finalizeRollover` is idempotent by confirmation guid (duplicate finalize on an already-consumed guid is a no-op).
+- If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
+- While rollover is pending, a second rollover request for the same loan MUST revert.
+- Rollover roll-safety: confirmed rollover terms MUST preserve `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` for the selected conversion route.
 
 ## 6. Smart Contracts and Interactions
 
@@ -436,6 +453,8 @@ Provides functions:
 - `finalizeDepositReturn(loanId, lzGuid)` - permissionless; consumes the L2 `CollateralReturned` message for a pending deposit and transfers collateral back to the borrower. Must revert if a trade was confirmed for the loan. TODO: decide what to do in case the call reverts as the collateral will be stuck in the `CollarVault`.
 - `settleLoan(loanId, outcome, lzGuid)` - restricted to keeper roles; consumes L2 settlement/collateral messages and advances maturity handling. Reverts on-chain if `block.timestamp < maturity`.
 - `tryConvertReadyLoan(loanId)` - restricted to keeper roles; retries conversion for `READY_FOR_VARIABLE` loans and opens a per-loan variable position clone once adapter liquidity is sufficient.
+- `executeRollover(loanId, mandate, mandateSig, newCallStrike, newPutStrike)` - borrower/keeper flow; starts async rollover by validating borrower mandate, storing pending rollover, and sending `RolloverIntent` to L2.
+- `finalizeRollover(loanId, lzGuid)` - keeper; consumes authenticated `RolloverConfirmed` from L2 and commits confirmed rollover terms/accounting on L1.
 - `settleReadyLoanByRepay(loanId)` - closes a `READY_FOR_VARIABLE` loan by repaying `principal + fixedInterest` in USDC and releasing collateral deterministically. Borrower-only during `readyLoanCloseGracePeriod`; keeper-only after expiry with strike-based penalty seize.
 - `repayVariableLoan(loanId, amount)` - borrower/keeper callable; repays variable debt via the vault facade.
 - `withdrawVariableCollateral(loanId, amount)` - borrower/keeper callable; withdraws variable-phase collateral via the vault facade.
@@ -452,6 +471,7 @@ Runs a secure service that:
 - Submits trades via the Trade Module, matching orders with market makers.
 - Monitors oracle prices and maturity times; triggers settlement via the vault contract.
 - Monitors pending collateral deposits, confirms L2 subaccount credit before requesting RFQs or executing trades, coordinates L2 withdrawal execution after borrower-initiated returns, and ensures only one of `TradeConfirmed` or `CollateralReturned` is emitted per loan.
+- Coordinates async rollover lifecycle: routes `RolloverIntent` constraints into L2 validation, executes compliant RFQs, and ensures `RolloverConfirmed` is delivered for L1 finalization.
 - Interacts with the fast bridge and deposit/withdraw handlers.
 
 ### 6.3 Liquidity vault (USDC pool)
@@ -497,6 +517,11 @@ For neutral outcomes, keeper should:
 1. call `settleLoan(loanId, Neutral, lzGuid)` after `CollateralReturned` lands (marks `READY_FOR_VARIABLE`),
 2. periodically call `tryConvertReadyLoan` for queued loans,
 3. if conversion remains unavailable until `readyLoanCloseGracePeriod` expires, call `settleReadyLoanByRepay` with keeper capital.
+
+For rollover-enabled loans, keeper should also:
+1. call `executeRollover` after borrower mandate/signature is available,
+2. execute RFQ on L2 only within mandate constraints,
+3. call `finalizeRollover` on L1 after `RolloverConfirmed` is available.
 
 Borrower can always self-close via `settleReadyLoanByRepay` during the borrower window.
 
@@ -549,24 +574,3 @@ The following items are not yet specified and require clarification before imple
 ## 10. Conclusion
 
 By leveraging Derive's vault architecture and fast bridge, CollarFi can implement a non-custodial lending protocol that hedges collateralized loans with zero-cost collars. An L2 TSA contract owns the Derive subaccount, and the L1 vault coordinates collateral and settlement via rapid bridging. When options expire neutrally, the collateral is bridged back and deposited into Euler V2 to continue earning yield via a variable-rate loan. Careful configuration of signers, nonces, bridge limits and risk parameters ensures solvency and security for lenders and borrowers alike.
-
-### 5.x Async Rollover (pre-maturity)
-
-Rollover is an asynchronous two-phase cross-chain flow and MUST NOT be finalized from L1-only local state.
-
-1. Borrower signs an EIP-712 rollover mandate on L1 with bounds: `newMaturity`, `minCallStrike`, `maxPutStrike`, `minNetInterest`, `deadline`, `nonce`.
-2. Keeper calls `executeRollover` on L1. The vault validates signature/bounds and sends a LayerZero `RolloverIntent` to L2, storing pending rollover state on L1.
-3. L2 receiver stores rollover constraints in `CollarLoanStore` (`rolloverPending=true`) and exposes them to TSA RFQ validation.
-4. Keeper executes RFQ on Derive. TSA validation enforces rollover bounds from loan-store pending rollover fields, including the roll-safety LTV invariant from §5.1.2.
-5. After successful RFQ execution, L2 receiver sends `RolloverConfirmed` to L1 containing mandate linkage and finalized terms (`callStrike`, `putStrike`, `interestApr`, `expiry`).
-6. Keeper calls `finalizeRollover` on L1. Finalization is a trusted, authenticated commit step: once a valid `RolloverConfirmed` is present, it applies the confirmed terms, updates accounting, consumes guid, and clears pending rollover.
-
-Safety invariants:
-- Replay protection: mandate hash can be used only once.
-- Hard reverts in `finalizeRollover` are reserved for invalid/forged/mismatched confirmation identity (action, loan, recipient/subaccount, mandate hash, borrower, expiry) or missing pending state.
-- Post-open economic/consistency checks (e.g. strike/economics drift vs mandate bounds) MUST NOT brick the loan at finalization; they are signaled as anomalies and enforced pre-trade in TSA RFQ verification.
-- `finalizeRollover` is idempotent by confirmation guid (duplicate finalize on an already-consumed guid is a no-op).
-- If no valid `RolloverConfirmed` exists, `finalizeRollover` MUST revert.
-- While rollover is pending, a second rollover request for the same loan MUST revert.
-- Rollover roll-safety: confirmed rollover terms MUST preserve `borrowAmount <= collateralAmount * putStrike / strikeScale * maxRollLtv` for the selected conversion route.
-
