@@ -40,7 +40,7 @@ from common import (
     require_code as _require_code,
     set_time as _set_time,
 )
-from loan_flow_helpers import finalize_fresh_loan_to_active_zero_cost, get_loan
+from loan_flow_helpers import finalize_fresh_atomic_loan_to_active_zero_cost, get_loan
 
 app = typer.Typer(add_completion=False)
 
@@ -86,7 +86,9 @@ def main(
 
     _ensure_liquidity_vault_role(l1_rpc, vault)
 
-    finalized = finalize_fresh_loan_to_active_zero_cost(l1_json, l2_json, l1_rpc, l2_rpc, vault, messenger, sepolia_weth)
+    finalized = finalize_fresh_atomic_loan_to_active_zero_cost(
+        l1_json, l2_json, l1_rpc, l2_rpc, vault, messenger, sepolia_weth
+    )
     loan_id = int(finalized["loanId"])
     pending = finalized["pending"]
     loan = finalized["loan"]

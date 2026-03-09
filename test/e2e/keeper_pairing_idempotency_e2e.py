@@ -40,11 +40,13 @@ from common import (
 from loan_flow_helpers import (
     accept_mandate_for_pending,
     get_loan,
+    get_mandate,
     get_pending,
     inject_deposit_confirmed,
     inject_trade_confirmed,
     parse_json_or_fallback,
-    run_fresh_pending_loan,
+    run_fresh_atomic_loan_before_ack,
+    run_fresh_atomic_pending_loan,
 )
 
 app = typer.Typer(add_completion=False)
@@ -143,18 +145,23 @@ def main(
     _ensure_liquidity_vault_role(l1_rpc, vault)
     _ensure_keeper_role(l1_rpc, vault)
 
-    fresh = run_fresh_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
-    flow = fresh["flow"]
-    flow_loan_id = int(fresh["loanId"])
-    _print_step(True, f"Created pending loan via fresh flow (loanId={flow_loan_id})")
+    # Phase 1: prove the L2 keeper is idempotent after a deposit flow has already
+    # been handled once. Replaying from the same block range should not attempt to
+    # send a second action for the same handled message.
+    initial_atomic_pending_flow = run_fresh_atomic_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
+    initial_flow = initial_atomic_pending_flow["flow"]
+    initial_loan_id = int(initial_atomic_pending_flow["loanId"])
+    _print_step(True, f"Created atomic pending loan via fresh flow (loanId={initial_loan_id})")
 
-    l2_keeper_from_flow = _step_result(flow, "l2_keeper_handle_deposit")
-    if not _keeper_has_status(l2_keeper_from_flow, flow_loan_id, "sent"):
-        raise RuntimeError(f"fresh_loan_flow did not produce sent L2 keeper action: {json.dumps(l2_keeper_from_flow)}")
+    l2_keeper_from_initial_flow = _step_result(initial_flow, "l2_keeper_handle_deposit")
+    if not _keeper_has_status(l2_keeper_from_initial_flow, initial_loan_id, "sent"):
+        raise RuntimeError(
+            f"fresh_loan_flow did not produce sent L2 keeper action: {json.dumps(l2_keeper_from_initial_flow)}"
+        )
     _print_step(True, "Observed L2 keeper completion from fresh loan flow")
 
-    relay_l1_to_l2 = _step_result(flow, "relay_l1_to_l2_exact")
-    l2_start_block = _tx_block(l2_rpc, str(relay_l1_to_l2["relayTx"]))
+    initial_l1_to_l2_relay = _step_result(initial_flow, "relay_l1_to_l2_exact")
+    l2_start_block = _tx_block(l2_rpc, str(initial_l1_to_l2_relay["relayTx"]))
 
     tmpdir = Path(tempfile.mkdtemp(prefix="keeper-pairing-e2e-"))
     l1_env = tmpdir / "l1.env"
@@ -189,28 +196,42 @@ def main(
         raise RuntimeError(f"expected idempotent L2 keeper run with zero attempts, got: {json.dumps(l2_idempotent)}")
     _print_step(True, "Verified L2 keeper idempotent re-run on handled deposit message")
 
-    l1_flow_pending = run_fresh_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
-    loan_id = int(l1_flow_pending["loanId"])
-    pending = get_pending(vault, l1_rpc, loan_id)
-    mandate = accept_mandate_for_pending(l1_rpc, vault, sepolia_weth, loan_id, pending)
-    _print_step(True, f"Created second pending loan + mandate for L1 keeper pairing (loanId={loan_id})")
+    # Phase 2: exercise L1 keeper pairing semantics. The keeper should wait when
+    # only one side of the finalize pair is present, and finalize exactly once
+    # once the matching message arrives.
+    second_atomic_pre_ack_flow = run_fresh_atomic_loan_before_ack(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
+    paired_loan_id = int(second_atomic_pre_ack_flow["loanId"])
+    pending_deposit = get_pending(vault, l1_rpc, paired_loan_id)
+    onchain_mandate = get_mandate(vault, l1_rpc, paired_loan_id)
+    if onchain_mandate["borrower"] == "0x0000000000000000000000000000000000000000":
+        mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, sepolia_weth, paired_loan_id, pending_deposit)
+    else:
+        mandate_ctx = {
+            "borrower": onchain_mandate["borrower"],
+            "mandateDeadline": onchain_mandate["deadline"],
+            "callStrike": onchain_mandate["minCallStrike"],
+            "subaccountId": int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0]),
+        }
+    _print_step(True, f"Loaded second atomic pre-ACK loan + mandate for L1 keeper pairing (loanId={paired_loan_id})")
 
     l1_start_block = int(run(["cast", "block-number", "--rpc-url", l1_rpc]).split()[0])
 
-    trade_guid = inject_trade_confirmed(
+    paired_trade_guid = inject_trade_confirmed(
         l1_rpc,
         messenger,
-        loan_id,
+        paired_loan_id,
         vault,
-        int(mandate["subaccountId"]),
-        int(pending["maturity"]),
-        int(pending["putStrike"]),
-        int(mandate["callStrike"]),
+        int(mandate_ctx["subaccountId"]),
+        int(pending_deposit["maturity"]),
+        int(pending_deposit["putStrike"]),
+        int(mandate_ctx["callStrike"]),
         guid_nonce_base=90_000_000,
     )
     _print_step(True, "Injected trade-confirmed marker before deposit-confirmed message")
 
-    wait_pair = _run_keeper(
+    # With only the trade-confirmed side present, keeper should observe the loan
+    # but hold off because the deposit-confirmed side has not been seen yet.
+    wait_for_pair = _run_keeper(
         [
             "uv",
             "run",
@@ -227,24 +248,26 @@ def main(
             "--json",
         ]
     )
-    if not _keeper_has_status(wait_pair, loan_id, "waiting-pair"):
-        raise RuntimeError(f"expected waiting-pair status for loan {loan_id}, got: {json.dumps(wait_pair)}")
+    if not _keeper_has_status(wait_for_pair, paired_loan_id, "waiting-pair"):
+        raise RuntimeError(f"expected waiting-pair status for loan {paired_loan_id}, got: {json.dumps(wait_for_pair)}")
     _print_step(True, "Observed L1 keeper waiting-pair with only trade-confirmed marker")
 
-    deposit_guid = "0x" + format(95_000_000 + loan_id, "064x")
+    # Once the matching deposit-confirmed message is injected, the pair is complete
+    # and the next keeper pass should finalize the loan.
+    paired_deposit_guid = "0x" + format(95_000_000 + paired_loan_id, "064x")
     inject_deposit_confirmed(
         l1_rpc,
         messenger,
-        loan_id,
+        paired_loan_id,
         vault,
-        int(mandate["subaccountId"]),
+        int(mandate_ctx["subaccountId"]),
         sepolia_weth,
-        int(pending["collateral"]),
-        deposit_guid,
+        int(pending_deposit["collateral"]),
+        paired_deposit_guid,
     )
     _print_step(True, "Injected matching deposit-confirmed message to complete pair")
 
-    complete = _run_keeper(
+    finalized_pair = _run_keeper(
         [
             "uv",
             "run",
@@ -264,11 +287,12 @@ def main(
             "--json",
         ]
     )
-    if not _keeper_has_status(complete, loan_id, "sent"):
-        raise RuntimeError(f"expected finalize completion for loan {loan_id}, got: {json.dumps(complete)}")
+    if not _keeper_has_status(finalized_pair, paired_loan_id, "sent"):
+        raise RuntimeError(f"expected finalize completion for loan {paired_loan_id}, got: {json.dumps(finalized_pair)}")
     _print_step(True, "Observed L1 keeper finalize completion after message pairing")
 
-    repeat = _run_keeper(
+    # Re-running from the persisted keeper state must be a no-op after finalize.
+    repeat_finalize_check = _run_keeper(
         [
             "uv",
             "run",
@@ -286,13 +310,15 @@ def main(
             "--json",
         ]
     )
-    attempted_l1 = _keeper_attempted(repeat)
+    attempted_l1 = _keeper_attempted(repeat_finalize_check)
     if attempted_l1 is None or attempted_l1 != 0:
-        raise RuntimeError(f"expected idempotent L1 keeper re-run with zero attempts, got: {json.dumps(repeat)}")
+        raise RuntimeError(
+            f"expected idempotent L1 keeper re-run with zero attempts, got: {json.dumps(repeat_finalize_check)}"
+        )
 
-    loan = get_loan(vault, l1_rpc, loan_id)
-    if int(loan["state"]) != 1:
-        raise RuntimeError(f"loan not ACTIVE_ZERO_COST after keeper finalize (state={loan['state']})")
+    finalized_loan = get_loan(vault, l1_rpc, paired_loan_id)
+    if int(finalized_loan["state"]) != 1:
+        raise RuntimeError(f"loan not ACTIVE_ZERO_COST after keeper finalize (state={finalized_loan['state']})")
     _print_step(True, "Verified L1 keeper idempotency after finalize completion")
 
     print("\nResult: SUCCESS")
@@ -300,4 +326,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

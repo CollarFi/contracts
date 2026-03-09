@@ -19,6 +19,9 @@ from common import (
     sign_no_prefix,
 )
 
+DEFAULT_MANDATE_TTL = 30 * 60
+MANDATE_TTL_BUFFER = 60
+
 
 def parse_pending_deposit(raw: str) -> dict:
     match = re.search(
@@ -44,6 +47,17 @@ def latest_timestamp(rpc: str) -> int:
     block = json.loads(run(["cast", "block", "latest", "--rpc-url", rpc, "--json"]))
     ts_raw = block.get("timestamp")
     return int(ts_raw, 0) if isinstance(ts_raw, str) else int(ts_raw)
+
+
+def resolve_mandate_ttl(l1_rpc: str, vault: str, requested_ttl: int = DEFAULT_MANDATE_TTL) -> int:
+    max_duration = int(cast_call(l1_rpc, vault, "maxMandateDuration()(uint64)").split()[0])
+    if requested_ttl <= 0 or max_duration <= 0:
+        raise RuntimeError(
+            f"invalid mandate ttl configuration: requested={requested_ttl}, maxDuration={max_duration}"
+        )
+    if max_duration <= MANDATE_TTL_BUFFER:
+        return min(requested_ttl, max_duration)
+    return min(requested_ttl, max_duration - MANDATE_TTL_BUFFER)
 
 
 def parse_loan(vault_loan_raw: str) -> dict:
@@ -121,7 +135,7 @@ def accept_mandate_for_pending(
     collateral_asset: str,
     loan_id: int,
     pending: dict,
-    mandate_ttl: int = 1800,
+    mandate_ttl: int = DEFAULT_MANDATE_TTL,
     rfq_ttl: int = 3600,
     signer_pk: str = ANVIL_PK0,
     borrower_pk: str = BORROWER_PK,
@@ -129,7 +143,7 @@ def accept_mandate_for_pending(
     borrower = borrower_address()
     now_ts = latest_timestamp(l1_rpc)
     rfq_expiry = now_ts + rfq_ttl
-    mandate_deadline = now_ts + mandate_ttl
+    mandate_deadline = now_ts + resolve_mandate_ttl(l1_rpc, vault, mandate_ttl)
     call_strike = int(pending["putStrike"]) + 1
 
     rfq_tuple = (
@@ -269,7 +283,7 @@ def parse_json_or_fallback(raw: str) -> dict:
         return {"raw": value, "txHashes": txs}
 
 
-def run_fresh_pending_loan(
+def run_fresh_atomic_pending_loan(
     l1_json: Path,
     l2_json: Path,
     l1_rpc: str,
@@ -292,7 +306,36 @@ def run_fresh_pending_loan(
     }
 
 
-def finalize_fresh_loan_to_active_zero_cost(
+def run_fresh_atomic_loan_before_ack(
+    l1_json: Path,
+    l2_json: Path,
+    l1_rpc: str,
+    l2_rpc: str,
+    collateral_asset: str,
+) -> dict:
+    flow = run_fresh_loan_flow(
+        l1_json,
+        l2_json,
+        l1_rpc,
+        l2_rpc,
+        collateral_asset,
+        relay_l2_ack_to_l1=False,
+    )
+    if not flow.get("ok"):
+        raise RuntimeError("fresh_loan_flow pre-ack phase failed")
+
+    create_deposit = next((s.get("result") for s in flow.get("steps", []) if s.get("step") == "create_deposit_with_permit"), None)
+    if not isinstance(create_deposit, dict):
+        raise RuntimeError("fresh_loan_flow pre-ack result missing create_deposit_with_permit")
+
+    loan_id = int(create_deposit["loanId"])
+    return {
+        "flow": flow,
+        "loanId": loan_id,
+    }
+
+
+def finalize_fresh_atomic_loan_to_active_zero_cost(
     l1_json: Path,
     l2_json: Path,
     l1_rpc: str,
@@ -301,11 +344,20 @@ def finalize_fresh_loan_to_active_zero_cost(
     messenger: str,
     collateral_asset: str,
 ) -> dict:
-    fresh = run_fresh_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset)
+    fresh = run_fresh_atomic_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset)
     loan_id = int(fresh["loanId"])
     deposit_guid = fresh["depositGuid"]
     pending = get_pending(vault, l1_rpc, loan_id)
-    mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, collateral_asset, loan_id, pending)
+    mandate = get_mandate(vault, l1_rpc, loan_id)
+    if mandate["borrower"] == "0x0000000000000000000000000000000000000000":
+        mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, collateral_asset, loan_id, pending)
+    else:
+        mandate_ctx = {
+            "borrower": mandate["borrower"],
+            "mandateDeadline": mandate["deadline"],
+            "callStrike": mandate["minCallStrike"],
+            "subaccountId": int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0]),
+        }
     subaccount_id = int(mandate_ctx["subaccountId"])
 
     trade_guid = inject_trade_confirmed(

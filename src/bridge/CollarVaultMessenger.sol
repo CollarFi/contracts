@@ -347,4 +347,9 @@ contract CollarVaultMessenger is AccessControl, OApp {
         emit MessageSent(receipt.guid, message.action, message.loanId);
         return receipt.guid;
     }
+
+    function _payNative(uint256 _nativeFee) internal virtual override returns (uint256 nativeFee) {
+        if (msg.value < _nativeFee) revert NotEnoughNative(msg.value);
+        return _nativeFee;
+    }
 }
