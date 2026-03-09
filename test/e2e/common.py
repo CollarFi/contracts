@@ -340,8 +340,16 @@ def ensure_token_balance(rpc: str, token: str, who: str, amount: int) -> None:
         raise RuntimeError(f"failed to top up {token} for {who}: {current} < {amount}")
 
 
-def run_fresh_loan_flow(l1_json: Path, l2_json: Path, l1_rpc: str, l2_rpc: str, collateral_asset: str) -> dict:
-    out = run([
+def run_fresh_loan_flow(
+    l1_json: Path,
+    l2_json: Path,
+    l1_rpc: str,
+    l2_rpc: str,
+    collateral_asset: str,
+    *,
+    relay_l2_ack_to_l1: bool = True,
+) -> dict:
+    cmd = [
         "uv", "run", "python", str(ROOT / "test/e2e/fresh_loan_flow.py"),
         "--l1-json", str(l1_json),
         "--l2-json", str(l2_json),
@@ -349,7 +357,10 @@ def run_fresh_loan_flow(l1_json: Path, l2_json: Path, l1_rpc: str, l2_rpc: str, 
         "--l2-rpc", l2_rpc,
         "--collateral-asset", collateral_asset,
         "--json",
-    ])
+    ]
+    if not relay_l2_ack_to_l1:
+        cmd.append("--no-relay-l2-ack-to-l1")
+    out = run(cmd)
     return json.loads(out)
 
 

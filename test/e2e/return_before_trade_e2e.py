@@ -41,7 +41,7 @@ from common import (
     require_code as _require_code,
     set_time as _set_time,
 )
-from loan_flow_helpers import accept_mandate_for_pending, get_pending, run_fresh_pending_loan
+from loan_flow_helpers import get_mandate, get_pending, run_fresh_atomic_pending_loan
 
 app = typer.Typer(add_completion=False)
 
@@ -95,7 +95,7 @@ def main(
     _ensure_liquidity_vault_role(l1_rpc, vault)
     _print_step(True, f"Loaded deployments: vault={vault}")
 
-    fresh = run_fresh_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
+    fresh = run_fresh_atomic_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
     loan_id = int(fresh["loanId"])
     deposit_guid = fresh["depositGuid"]
     pending = get_pending(vault, l1_rpc, loan_id)
@@ -104,8 +104,10 @@ def main(
     if pending["borrower"].lower() != borrower.lower() or pending["asset"].lower() != sepolia_weth.lower():
         raise RuntimeError("pending deposit does not match expected borrower/asset")
 
-    mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, sepolia_weth, loan_id, pending)
-    _print_step(True, f"Accepted mandate on pending loan (loanId={loan_id})")
+    mandate = get_mandate(vault, l1_rpc, loan_id)
+    if mandate["borrower"].lower() != borrower.lower():
+        raise RuntimeError("atomic origination did not persist the expected mandate")
+    _print_step(True, f"Loaded atomic mandate for pending loan (loanId={loan_id})")
 
     _expect_revert(
         lambda: cast_send_pk(
@@ -118,7 +120,7 @@ def main(
         "requestCollateralReturn before mandate deadline",
     )
 
-    _set_time(l1_rpc, int(mandate_ctx["mandateDeadline"]) + 1)
+    _set_time(l1_rpc, int(mandate["deadline"]) + 1)
 
     lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
     subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
@@ -194,7 +196,7 @@ def main(
         "status": "success",
         "loanId": loan_id,
         "depositGuid": deposit_guid,
-        "mandateDeadline": mandate_ctx["mandateDeadline"],
+        "mandateDeadline": mandate["deadline"],
         "collateralReturnGuid": collateral_return_guid,
     }
     path = Path(tempfile.mkdtemp(prefix="return-before-trade-e2e-")) / "result.json"
@@ -206,4 +208,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

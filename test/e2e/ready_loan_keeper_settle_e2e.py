@@ -49,6 +49,7 @@ from common import (
     set_time as _set_time,
     sign_no_prefix as _sign_no_prefix,
 )
+from loan_flow_helpers import get_mandate
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -146,74 +147,77 @@ def main(
     block_latest = json.loads(run(["cast", "block", "latest", "--rpc-url", l1_rpc, "--json"]))
     ts_raw = block_latest.get("timestamp")
     now_ts = int(ts_raw, 0) if isinstance(ts_raw, str) else int(ts_raw)
-    rfq_expiry = now_ts + 3600
-    mandate_deadline = now_ts + 1800
-    call_strike = int(p_put) + 1
-    rfq_tuple = (
-        f"({loan_id},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{call_strike},"
-        f"{p_borrow},0,{rfq_expiry},{borrower},0)"
-    )
-    rfq_hash = cast_call(
-        l1_rpc,
-        vault,
-        "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
-        rfq_tuple,
-    ).splitlines()[0].strip()
-    rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
-
-    lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
-    subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
-    default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
     apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
     year = 365 * 24 * 3600
     fixed_interest = ((int(p_borrow) * apr) // 10**18) * (int(p_maturity) - now_ts) // year
-    max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
-    strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
-
-    mandate_data = _abi_encode(
-        "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
-        borrower,
-        str(call_strike),
-        p_put,
-        "0",
-        str(fixed_interest),
-        str(max_roll_ltv),
-        str(strike_scale),
-        p_maturity,
-        str(mandate_deadline),
-    )
-    quote_msg = (
-        f"(6,{loan_id},{sepolia_weth},{p_borrow},{vault},{subaccount_id},"
-        f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
-    )
-    lz_fee = int(
-        re.search(
-            r"\d+",
-            cast_call(
-                l1_rpc,
-                lz_messenger,
-                "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
-                quote_msg,
-                default_opts,
-            ),
-        ).group(0)
-    )
-
-    cast_send_pk(
-        l1_rpc,
-        vault,
-        "acceptMandate(uint256,(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64)",
-        str(loan_id),
-        rfq_tuple,
-        rfq_sig,
-        str(mandate_deadline),
-        private_key=BORROWER_PK,
-        value=str(lz_fee),
-    )
-    _print_step(True, "Accepted mandate on L1")
-
+    mandate = get_mandate(vault, l1_rpc, loan_id)
     subaccount_id = cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0]
-    trade_data = _abi_encode("f(uint256,uint256,uint64,int256)", str(int(p_put) + 1), str(p_put), str(p_maturity), "0")
+    if mandate["borrower"] == "0x0000000000000000000000000000000000000000":
+        rfq_expiry = now_ts + 3600
+        mandate_deadline = now_ts + 1800
+        call_strike = int(p_put) + 1
+        rfq_tuple = (
+            f"({loan_id},{sepolia_weth},{p_collateral},{p_maturity},{p_put},{call_strike},"
+            f"{p_borrow},0,{rfq_expiry},{borrower},0)"
+        )
+        rfq_hash = cast_call(
+            l1_rpc,
+            vault,
+            "hashBaselineRfq((uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256))(bytes32)",
+            rfq_tuple,
+        ).splitlines()[0].strip()
+        rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
+
+        lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+        default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
+        max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
+        strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
+        mandate_data = _abi_encode(
+            "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
+            borrower,
+            str(call_strike),
+            p_put,
+            "0",
+            str(fixed_interest),
+            str(max_roll_ltv),
+            str(strike_scale),
+            p_maturity,
+            str(mandate_deadline),
+        )
+        quote_msg = (
+            f"(6,{loan_id},{sepolia_weth},{p_borrow},{vault},{subaccount_id},"
+            f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
+        )
+        lz_fee = int(
+            re.search(
+                r"\d+",
+                cast_call(
+                    l1_rpc,
+                    lz_messenger,
+                    "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+                    quote_msg,
+                    default_opts,
+                ),
+            ).group(0)
+        )
+
+        cast_send_pk(
+            l1_rpc,
+            vault,
+            "acceptMandate(uint256,(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64)",
+            str(loan_id),
+            rfq_tuple,
+            rfq_sig,
+            str(mandate_deadline),
+            private_key=BORROWER_PK,
+            value=str(lz_fee),
+        )
+        _print_step(True, "Accepted mandate on L1")
+    else:
+        call_strike = int(mandate["minCallStrike"])
+        _print_step(True, "Loaded atomic mandate on L1")
+
+    trade_data = _abi_encode("f(uint256,uint256,uint64,int256)", str(call_strike), str(p_put), str(p_maturity), "0")
     trade_msg = _abi_encode(
         "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
         f"(5,{loan_id},0x0000000000000000000000000000000000000000,0,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,{trade_data})",

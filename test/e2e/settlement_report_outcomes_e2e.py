@@ -41,11 +41,12 @@ from common import (
 )
 from loan_flow_helpers import (
     accept_mandate_for_pending,
+    get_mandate,
     get_loan,
     get_pending,
     inject_deposit_confirmed,
     inject_trade_confirmed,
-    run_fresh_pending_loan,
+    run_fresh_atomic_pending_loan,
 )
 
 app = typer.Typer(add_completion=False)
@@ -60,11 +61,20 @@ def _finalize_to_active_zero_cost(
     messenger: str,
     collateral_asset: str,
 ) -> dict:
-    fresh = run_fresh_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset)
+    fresh = run_fresh_atomic_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset)
     loan_id = int(fresh["loanId"])
     deposit_guid = fresh["depositGuid"]
     pending = get_pending(vault, l1_rpc, loan_id)
-    mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, collateral_asset, loan_id, pending)
+    mandate = get_mandate(vault, l1_rpc, loan_id)
+    if mandate["borrower"] == "0x0000000000000000000000000000000000000000":
+        mandate_ctx = accept_mandate_for_pending(l1_rpc, vault, collateral_asset, loan_id, pending)
+    else:
+        mandate_ctx = {
+            "borrower": mandate["borrower"],
+            "mandateDeadline": mandate["deadline"],
+            "callStrike": mandate["minCallStrike"],
+            "subaccountId": int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0]),
+        }
 
     subaccount_id = int(mandate_ctx["subaccountId"])
     trade_guid = inject_trade_confirmed(

@@ -14,7 +14,10 @@ ROOT = Path(__file__).resolve().parents[2]
 THIS_DIR = Path(__file__).resolve().parent
 import sys
 sys.path.insert(0, str(THIS_DIR))
+from common import ensure_liquidity_vault_role as _ensure_liquidity_vault_role
+from common import seed_l1_liquidity_vault as _seed_l1_liquidity_vault
 from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_COLLATERAL_ASSET, L2_ANVIL_PORT, L2_ARTIFACT_JSON
+from loan_flow_helpers import resolve_mandate_ttl
 
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -318,6 +321,7 @@ def main(
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
     collateral_asset: str = typer.Option(L1_COLLATERAL_ASSET, help="Override L1 collateral asset used for fresh deposit"),
     faucet: str = typer.Option("", help="Override faucet contract address"),
+    relay_l2_ack_to_l1: bool = typer.Option(True, "--relay-l2-ack-to-l1/--no-relay-l2-ack-to-l1"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ):
     l1 = json.loads((ROOT / l1_json).read_text())
@@ -381,6 +385,7 @@ def main(
         if scale == 0:
             scale = 10**30
         cast_send(l1_rpc, vault, "setCollateralConfig(address,bool,uint256,address)", weth, "true", str(scale), underlying)
+        _ensure_liquidity_vault_role(l1_rpc, vault)
 
         fund_mode = ensure_token_balance_via_faucet(l1_rpc, faucet_addr, weth, borrower, 10**18)
         cast_send(l1_rpc, weth, "approve(address,uint256)", permit2, str(2**256 - 1), private_key=BORROWER_PK)
@@ -399,11 +404,14 @@ def main(
         put_strike = 1500000000000000000000
         call_strike = 1700000000000000000000
         borrow_amount = 1500000000
+        usdc_asset = cast_call(l1_rpc, vault, "usdc()(address)").splitlines()[0].strip()
+        liquidity_vault = cast_call(l1_rpc, vault, "liquidityVault()(address)").splitlines()[0].strip()
+        _seed_l1_liquidity_vault(l1_rpc, usdc_asset, liquidity_vault, borrow_amount)
         params = f"({weth},1000000000000000000,{maturity},{put_strike},{borrow_amount})"
         permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
 
         rfq_expiry = now + 3600
-        mandate_deadline = now + 3600
+        mandate_deadline = now + resolve_mandate_ttl(l1_rpc, vault)
         rfq_nonce = now
         rfq_arg = f"(0,{weth},1000000000000000000,{maturity},{put_strike},{call_strike},{borrow_amount},0,{rfq_expiry},{borrower},{rfq_nonce})"
         rfq_hash = cast_call(
@@ -424,8 +432,27 @@ def main(
         l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", weth).splitlines()[0].strip()
         subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
         default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
-        quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
-        lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", quote_msg, default_opts)).group(0))
+        deposit_quote_msg = f"(0,{next_loan},{l2_asset},1000000000000000000,{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)"
+        deposit_lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", deposit_quote_msg, default_opts)).group(0))
+        apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
+        year = 365 * 24 * 3600
+        fixed_interest = ((borrow_amount * apr) // 10**18) * (maturity - now) // year
+        max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
+        strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", weth).split()[0])
+        mandate_data = _abi_encode(
+            "f(address,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64)",
+            borrower,
+            str(call_strike),
+            str(put_strike),
+            "0",
+            str(fixed_interest),
+            str(max_roll_ltv),
+            str(strike_scale),
+            str(maturity),
+            str(mandate_deadline),
+        )
+        mandate_quote_msg = f"(6,{next_loan},{weth},{borrow_amount},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
+        mandate_lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", mandate_quote_msg, default_opts)).group(0))
 
         create_sig = "createDepositWithMandatePermit((address,uint256,uint256,uint256,uint256),(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64,((address,uint160,uint48,uint48),address,uint256),bytes)"
         fallback_bridge = None
@@ -440,13 +467,14 @@ def main(
                 str(mandate_deadline),
                 permit_arg,
                 sig,
-                value=str(bridge_fee + (2 * lz_fee)),
+                value=str(bridge_fee + deposit_lz_fee + mandate_lz_fee),
                 private_key=BORROWER_PK,
             )
         except Exception as e:
-            if "TRANSFER_FROM_FAILED" not in str(e):
+            err = str(e)
+            if "TRANSFER_FROM_FAILED" not in err and "NotEnoughNative" not in err:
                 raise
-            # Sepolia fork can carry stale Socket route config that reverts on adapter-side transfer path.
+            # Sepolia fork can carry stale Socket route config or drifted bridge fees.
             fallback_bridge = _deploy_bridge_mock(l1_rpc)
             cast_send(l1_rpc, fallback_bridge, "setFee(uint256)", "0")
             mock_msg_id = "0x" + "11" * 32
@@ -462,7 +490,7 @@ def main(
                 str(mandate_deadline),
                 permit_arg,
                 sig,
-                value=str(2 * lz_fee),
+                value=str(deposit_lz_fee + mandate_lz_fee),
                 private_key=BORROWER_PK,
             )
         return {
@@ -471,7 +499,8 @@ def main(
             "fundMode": fund_mode,
             "borrower": borrower,
             "bridgeFee": bridge_fee,
-            "lzFee": lz_fee,
+            "depositLzFee": deposit_lz_fee,
+            "mandateLzFee": mandate_lz_fee,
             "bridgeAdapterFallback": fallback_bridge,
         }
 
@@ -502,6 +531,14 @@ def main(
         return _parse_keeper_output(p.stdout)
 
     step("l2_keeper_handle_deposit", run_l2_keeper_once)
+
+    if not relay_l2_ack_to_l1:
+        out["ok"] = True
+        if json_output:
+            print(json.dumps(out, indent=2))
+        else:
+            _print_human_summary(out)
+        return
 
     def relay_l2_ack_to_l1():
         k = out["steps"][-1]["result"]

@@ -41,9 +41,11 @@ from common import (
     run,
     sign_no_prefix as _sign_no_prefix,
 )
-from loan_flow_helpers import extract_tx_hash, finalize_fresh_loan_to_active_zero_cost, get_loan, latest_timestamp
+from loan_flow_helpers import extract_tx_hash, finalize_fresh_atomic_loan_to_active_zero_cost, get_loan, latest_timestamp
 
 app = typer.Typer(add_completion=False)
+
+ROLLOVER_MANDATE_TTL = 30 * 60
 
 
 def _ensure_l2_keeper_role(l2_rpc: str, receiver: str) -> None:
@@ -122,7 +124,9 @@ def main(
     _ensure_keeper_role(l1_rpc, vault)
     _ensure_l2_keeper_role(l2_rpc, l2_receiver)
 
-    active = finalize_fresh_loan_to_active_zero_cost(l1_json, l2_json, l1_rpc, l2_rpc, vault, l1_messenger, sepolia_weth)
+    active = finalize_fresh_atomic_loan_to_active_zero_cost(
+        l1_json, l2_json, l1_rpc, l2_rpc, vault, l1_messenger, sepolia_weth
+    )
     loan_id = int(active["loanId"])
     loan = active["loan"]
     _print_step(True, f"Created ACTIVE_ZERO_COST loan for rollover (loanId={loan_id})")
@@ -152,7 +156,7 @@ def main(
     old_maturity = int(loan["maturity"])
     principal = int(loan["principal"])
     new_maturity = old_maturity + 7 * 24 * 3600
-    deadline = now_ts + 24 * 3600
+    deadline = now_ts + ROLLOVER_MANDATE_TTL
     min_call_strike = old_call + 1
     max_put_strike = old_put + 1_000_000
     min_net_interest = 100_000_000_000

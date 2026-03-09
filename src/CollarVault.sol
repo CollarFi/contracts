@@ -428,19 +428,17 @@ contract CollarVault is
 
         _validateAndPullPermitCollateral(params, permit, permitSig);
 
-        // Calculate ETH split: bridge fee + deposit LZ fee + mandate LZ fee.
-        // Keep the same split heuristic used by createDepositWithMandate.
+        uint256 balanceBefore = address(this).balance - msg.value;
         uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
         if (msg.value < bridgeFee) {
             revert CV_InsufficientValue();
         }
-        uint256 remainingEth = msg.value - bridgeFee;
-        uint256 ethForDepositLz = remainingEth / 2;
-        uint256 ethForMandateLz = remainingEth - ethForDepositLz;
 
         // Step 1: Create pending deposit and send DepositIntent to L2.
         (loanId, socketMessageId, depositLzGuid) =
-            _requestCollateralDepositWithBudget(msg.sender, params, ethForDepositLz + bridgeFee);
+            _requestCollateralDepositWithBudget(msg.sender, params, msg.value, address(this));
+
+        uint256 ethForMandateLz = address(this).balance - balanceBefore;
 
         // Step 2: Accept mandate via finalize module.
         bytes memory ret = _delegateTo(
@@ -1016,14 +1014,20 @@ contract CollarVault is
         internal
         returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
     {
-        return _requestCollateralDepositWithBudget(borrower, params, msg.value);
+        return _requestCollateralDepositWithBudget(borrower, params, msg.value, msg.sender);
     }
 
     /// @notice Requests collateral deposit with explicit ETH budget for LZ message.
     /// @param borrower The address of the borrower
     /// @param params The deposit parameters
     /// @param ethForLz The amount of ETH to use for the LZ message fee (msg.value - bridgeFee)
-    function _requestCollateralDepositWithBudget(address borrower, DepositParams calldata params, uint256 ethForLz)
+    /// @param refundTo The address that receives any unused LZ fee budget
+    function _requestCollateralDepositWithBudget(
+        address borrower,
+        DepositParams calldata params,
+        uint256 ethForLz,
+        address refundTo
+    )
         internal
         returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
     {
@@ -1078,7 +1082,7 @@ contract CollarVault is
             address(this),
             $.deriveSubaccountId,
             socketMessageId,
-            msg.sender
+            refundTo
         );
 
         emit CollateralDepositRequested(
@@ -1132,19 +1136,17 @@ contract CollarVault is
         // Pull collateral via standard ERC20 transferFrom (requires prior approval)
         IERC20(params.collateralAsset).safeTransferFrom(msg.sender, address(this), params.collateralAmount);
 
-        // Calculate ETH split: bridge fee + deposit LZ fee + mandate LZ fee.
-        // We keep a simple split heuristic between both LZ messages.
+        uint256 balanceBefore = address(this).balance - msg.value;
         uint256 bridgeFee = estimateBridgeFees(params.collateralAsset, $.l2Recipient, params.collateralAmount);
         if (msg.value < bridgeFee) {
             revert CV_InsufficientValue();
         }
-        uint256 remainingEth = msg.value - bridgeFee;
-        uint256 ethForDepositLz = remainingEth / 2;
-        uint256 ethForMandateLz = remainingEth - ethForDepositLz;
 
         // Step 1: Create the pending deposit and send DepositIntent to L2
         (loanId, socketMessageId, depositLzGuid) =
-            _requestCollateralDepositWithBudget(msg.sender, params, ethForDepositLz + bridgeFee);
+            _requestCollateralDepositWithBudget(msg.sender, params, msg.value, address(this));
+
+        uint256 ethForMandateLz = address(this).balance - balanceBefore;
 
         // Step 2: Accept mandate via delegatecall to finalize module
         // Note: RFQ is passed as-is (with loanId=0 sentinel if used)
