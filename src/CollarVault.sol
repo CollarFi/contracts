@@ -1027,10 +1027,7 @@ contract CollarVault is
         DepositParams calldata params,
         uint256 ethForLz,
         address refundTo
-    )
-        internal
-        returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid)
-    {
+    ) internal returns (uint256 loanId, bytes32 socketMessageId, bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         if (!$.collateralAllowed[params.collateralAsset]) {
             revert CV_InvalidConfig();
