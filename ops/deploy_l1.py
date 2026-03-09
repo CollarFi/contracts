@@ -109,6 +109,7 @@ def main(
         "WETH_STRIKE_SCALE",
         "L2_WRAPPED_WETH_ASSET",
         "DERIVE_SUBACCOUNT_ID",
+        "RFQ_SIGNER",
     ):
         if l1.get(opt):
             env_overrides[opt] = l1[opt]

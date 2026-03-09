@@ -158,8 +158,10 @@ uv run python ops/management/l2_keeper_handle_messages.py --env testnet --broadc
 # L1 notes:
 # - No direct Euler deployment/integration in this flow (liquidity vault can run without setting Euler vault).
 # - If LIQUIDITY_VAULT is not provided, set USDC_ASSET and script deploys a fresh CollarLiquidityVault.
+# - DeployL1 ensures CollarVault has VAULT_ROLE on the configured liquidity vault (critical for reserve/borrow paths).
 # - BRIDGE_CONFIG_ADMIN was removed; ADMIN/VAULT_OWNER is the PARAMETER_ROLE holder at init.
 # - If WETH_ASSET is set, deploy enables it as allowed collateral via setCollateralConfig(WETH_ASSET, true, WETH_STRIKE_SCALE).
+# - Set RFQ_SIGNER in .env.l1.<env> to auto-allowlist a keeper signer via setRfqSigner(..., true).
 
 # Check harness wiring/state
 uv run python ops/lz_harness/status.py

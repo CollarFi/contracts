@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
@@ -29,6 +30,7 @@ contract DeployL1 is Script {
     using OptionsBuilder for bytes;
 
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+    bytes32 internal constant VAULT_ROLE = keccak256("VAULT_ROLE");
 
     struct EnvConfig {
         address admin;
@@ -53,6 +55,7 @@ contract DeployL1 is Script {
         uint256 wethStrikeScale;
         address l2WrappedWethAsset;
         uint256 deriveSubaccountId;
+        address rfqSigner;
         string outputJson;
     }
 
@@ -110,6 +113,7 @@ contract DeployL1 is Script {
         cfg.wethStrikeScale = vm.envOr("WETH_STRIKE_SCALE", uint256(1e30));
         cfg.l2WrappedWethAsset = vm.envOr("L2_WRAPPED_WETH_ASSET", address(0));
         cfg.deriveSubaccountId = vm.envOr("DERIVE_SUBACCOUNT_ID", uint256(0));
+        cfg.rfqSigner = vm.envOr("RFQ_SIGNER", address(0));
 
         cfg.outputJson = vm.envString("OUTPUT_JSON");
     }
@@ -126,6 +130,8 @@ contract DeployL1 is Script {
         dep.settleModule = new CollarVaultSettleModule();
         dep.rolloverModule = new CollarVaultRolloverModule();
 
+        _ensureVaultRoleOnLiquidityVault(dep.liquidityVault, address(dep.vault));
+
         dep.vault.setLZMessenger(ICollarVaultMessenger(address(dep.messenger)));
         if (cfg.deriveSubaccountId != 0) {
             dep.vault.setDeriveSubaccountId(cfg.deriveSubaccountId);
@@ -133,6 +139,9 @@ contract DeployL1 is Script {
         dep.vault.setFinalizeModule(address(dep.finalizeModule));
         dep.vault.setSettleModule(address(dep.settleModule));
         dep.vault.setRolloverModule(address(dep.rolloverModule));
+        if (cfg.rfqSigner != address(0)) {
+            dep.vault.setRfqSigner(cfg.rfqSigner, true);
+        }
 
         if (cfg.wethAsset != address(0)) {
             if (cfg.l2WrappedWethAsset == address(0)) revert("L2_WRAPPED_WETH_ASSET required when WETH_ASSET is set");
@@ -220,6 +229,13 @@ contract DeployL1 is Script {
         return address(0);
     }
 
+    function _ensureVaultRoleOnLiquidityVault(address liquidityVault, address vault) internal {
+        IAccessControl lv = IAccessControl(liquidityVault);
+        if (!lv.hasRole(VAULT_ROLE, vault)) {
+            lv.grantRole(VAULT_ROLE, vault);
+        }
+    }
+
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
         return address(uint160(uint256(raw)));
@@ -265,6 +281,9 @@ contract DeployL1 is Script {
         }
         if (cfg.deriveSubaccountId > 0) {
             console2.log("L1 derive subaccount id", cfg.deriveSubaccountId);
+        }
+        if (cfg.rfqSigner != address(0)) {
+            console2.log("L1 RFQ signer allowlisted", cfg.rfqSigner);
         }
         if (cfg.lzReceiveGas > 0) {
             console2.log("L1 messenger defaultOptions receive gas", cfg.lzReceiveGas);
