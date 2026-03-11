@@ -115,6 +115,8 @@ uv run python ops/deploy_l1.py --env testnet --broadcast
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
 # SOCKET_TRACKER is required and must be a real socket tracker address (no mock fallback).
 # Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
+# DeployL2 applies sane CollarTSA defaults on fresh TSA deploys (signature/risk windows).
+# Override with TSA_* env vars, skip with SKIP_TSA_PARAM_INIT=true, or force on existing TSA with FORCE_TSA_PARAM_INIT=true.
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
 
 # Wire/check L1<->L2 route via the unified route command (includes peer wiring)

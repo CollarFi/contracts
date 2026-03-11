@@ -259,6 +259,17 @@ def main(
         "TSA_INITIAL_OWNER",
         "TSA_SYMBOL",
         "TSA_NAME",
+        "TSA_MIN_SIGNATURE_EXPIRY",
+        "TSA_MAX_SIGNATURE_EXPIRY",
+        "TSA_OPTION_VOL_SLIPPAGE_FACTOR",
+        "TSA_CALL_MAX_DELTA",
+        "TSA_MAX_NEG_CASH",
+        "TSA_OPTION_MIN_TIME_TO_EXPIRY",
+        "TSA_OPTION_MAX_TIME_TO_EXPIRY",
+        "TSA_PUT_MAX_PRICE_FACTOR",
+        "TSA_WORST_SPOT_SELL_PRICE",
+        "SKIP_TSA_PARAM_INIT",
+        "FORCE_TSA_PARAM_INIT",
     ):
         if l2.get(opt):
             env_overrides[opt] = l2[opt]
