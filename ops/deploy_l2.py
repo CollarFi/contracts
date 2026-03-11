@@ -268,8 +268,6 @@ def main(
         "TSA_OPTION_MAX_TIME_TO_EXPIRY",
         "TSA_PUT_MAX_PRICE_FACTOR",
         "TSA_WORST_SPOT_SELL_PRICE",
-        "SKIP_TSA_PARAM_INIT",
-        "FORCE_TSA_PARAM_INIT",
     ):
         if l2.get(opt):
             env_overrides[opt] = l2[opt]

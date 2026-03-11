@@ -83,7 +83,9 @@ contract CollarTSATestUtils is TSATestUtils {
                     optionRiskVerifier: optionRiskVerifier,
                     rfqVerifier: rfqVerifier,
                     rfqDelegateModule: rfqDelegateModule,
-                    loanStore: address(loanStore)
+                    loanStore: address(loanStore),
+                    tsaParams: defaultCollarParams,
+                    collateralManagementParams: defaultCollateralManagementParams
                 })
             )
         );
@@ -104,9 +106,6 @@ contract CollarTSATestUtils is TSATestUtils {
                 feeRecipient: address(0)
             })
         );
-
-        CollarTSA(address(tsa)).setCollarTSAParams(defaultCollarParams);
-        CollarTSA(address(tsa)).setCollateralManagementParams(defaultCollateralManagementParams);
 
         // loanStore is now required in initialize()
 

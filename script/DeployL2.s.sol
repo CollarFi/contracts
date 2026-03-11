@@ -73,10 +73,6 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - TSA_OPTION_MAX_TIME_TO_EXPIRY (default: 365 days)
 /// - TSA_PUT_MAX_PRICE_FACTOR (default: 1.1e18)
 /// - TSA_WORST_SPOT_SELL_PRICE (default: 0.99e18)
-///
-/// Optional toggles:
-/// - SKIP_TSA_PARAM_INIT (bool, default false)
-/// - FORCE_TSA_PARAM_INIT (bool, default false; useful when TSA_PROXY points to an existing deployment)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
@@ -108,6 +104,9 @@ contract DeployL2 is Script {
             name: name
         });
 
+        (CollarTSA.CollarTSAParams memory tsaParams, CollarTSA.CollateralManagementParams memory collateral) =
+            _buildDefaultCollarTsaParams();
+
         CollarTSA.CollarTSAInitParams memory collarInitParams = CollarTSA.CollarTSAInitParams({
             baseFeed: ISpotFeed(vm.envAddress("BASE_FEED")),
             depositModule: IDepositModule(vm.envAddress("DEPOSIT_MODULE")),
@@ -118,7 +117,9 @@ contract DeployL2 is Script {
             optionRiskVerifier: IOptionRiskVerifier(optionRiskVerifierAddr),
             rfqVerifier: IRfqVerifier(rfqVerifierAddr),
             rfqDelegateModule: ICollarTsaRfqDelegateModule(rfqDelegateModuleAddr),
-            loanStore: loanStoreAddr
+            loanStore: loanStoreAddr,
+            tsaParams: tsaParams,
+            collateralManagementParams: collateral
         });
 
         return abi.encodeCall(CollarTSA.initialize, (initialOwner, baseInitParams, collarInitParams));
@@ -162,11 +163,8 @@ contract DeployL2 is Script {
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
         address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
-        bool skipTsaParamInit = vm.envOr("SKIP_TSA_PARAM_INIT", false);
-        bool forceTsaParamInit = vm.envOr("FORCE_TSA_PARAM_INIT", false);
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
-        bool deployedNewTsa = false;
 
         vm.startBroadcast();
 
@@ -203,14 +201,6 @@ contract DeployL2 is Script {
             // Deploy + initialize atomically in transparent proxy constructor.
             // ProxyAdmin owner is PROXY_ADMIN (defaults to ADMIN).
             tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
-            deployedNewTsa = true;
-        }
-
-        if (!skipTsaParamInit && (deployedNewTsa || forceTsaParamInit)) {
-            (CollarTSA.CollarTSAParams memory tsaParams, CollarTSA.CollateralManagementParams memory collateral) =
-                _buildDefaultCollarTsaParams();
-            CollarTSA(tsaProxyAddr).setCollarTSAParams(tsaParams);
-            CollarTSA(tsaProxyAddr).setCollateralManagementParams(collateral);
         }
 
         CollarTSAReceiver receiver = new CollarTSAReceiver(

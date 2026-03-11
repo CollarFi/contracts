@@ -43,6 +43,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
         IRfqVerifier rfqVerifier;
         ICollarTsaRfqDelegateModule rfqDelegateModule;
         address loanStore;
+        CollarTSAParams tsaParams;
+        CollateralManagementParams collateralManagementParams;
     }
 
     struct CollarTSAParams {
@@ -133,6 +135,9 @@ contract CollarTSA is BaseOnChainSigningTSA {
         $.rfqVerifier = collarInitParams.rfqVerifier;
         $.rfqDelegateModule = collarInitParams.rfqDelegateModule;
 
+        _setCollarTSAParams(collarInitParams.tsaParams);
+        _setCollateralManagementParams(collarInitParams.collateralManagementParams);
+
         BaseTSAAddresses memory tsaAddresses = getBaseTSAAddresses();
         tsaAddresses.depositAsset.approve(address($.depositModule), type(uint256).max);
     }
@@ -143,6 +148,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
     /// @notice Set CollarTSA parameters.
     function setCollarTSAParams(CollarTSAParams memory newParams) external onlyOwner {
+        _setCollarTSAParams(newParams);
+    }
+
+    function _setCollarTSAParams(CollarTSAParams memory newParams) internal {
         if (
             newParams.minSignatureExpiry < 1 minutes || newParams.minSignatureExpiry > newParams.maxSignatureExpiry
                 || newParams.optionVolSlippageFactor > 1e18 || newParams.callMaxDelta >= 0.5e18
@@ -161,6 +170,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
         external
         onlyOwner
     {
+        _setCollateralManagementParams(newCollateralMgmtParams);
+    }
+
+    function _setCollateralManagementParams(CollateralManagementParams memory newCollateralMgmtParams) internal {
         if (newCollateralMgmtParams.worstSpotSellPrice > 1e18 || newCollateralMgmtParams.worstSpotSellPrice < 0.8e18) {
             revert CTSA_InvalidParams();
         }
