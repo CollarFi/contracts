@@ -223,16 +223,25 @@ def _find_message_handled_log_for_guid(rpc_url: str, receiver_addr: str, guid: s
     return matched[-1]
 
 
-def _tsa_min_signature_expiry(rpc_url: str, tsa_addr: str) -> int:
+def _tsa_signature_expiry_window(rpc_url: str, tsa_addr: str) -> tuple[int, int]:
     raw = cast_call(
         rpc_url,
         tsa_addr,
         "getCollarTSAParams()((uint256,uint256,uint256,uint256,int256,uint256,uint256,uint256))",
     )
-    m = re.match(r"^\(\s*(\d+)\s*,", raw.strip())
+    m = re.match(r"^\(\s*(\d+)\s*,\s*(\d+)\s*,", raw.strip())
     if not m:
-        raise RuntimeError(f"failed to parse minSignatureExpiry from TSA params: {raw}")
-    return int(m.group(1))
+        raise RuntimeError(f"failed to parse signature expiry window from TSA params: {raw}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def _latest_block_timestamp(rpc_url: str) -> int:
+    out = run(["cast", "block", "latest", "--rpc-url", rpc_url, "--json"])
+    payload = json.loads(out)
+    ts = payload.get("timestamp", 0)
+    if isinstance(ts, str):
+        return int(ts, 16) if ts.startswith("0x") else int(ts)
+    return int(ts)
 
 
 def _format_action_tuple(action: dict[str, Any]) -> str:
@@ -259,9 +268,22 @@ def _reissue_action_signature(
     from_addr: str,
     unlocked: bool,
 ) -> tuple[str, dict[str, Any], int]:
-    min_sig = _tsa_min_signature_expiry(rpc_url, tsa_addr)
+    min_sig, max_sig = _tsa_signature_expiry_window(rpc_url, tsa_addr)
+    chain_now = _latest_block_timestamp(rpc_url)
+    # Keep enough freshness margin beyond API window while respecting TSA bounds.
+    cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
+    target_expiry = chain_now + min_sig + cushion
+    upper_bound = chain_now + max_sig - 1
+    if target_expiry > upper_bound:
+        target_expiry = upper_bound
+    if target_expiry <= chain_now + min_sig:
+        raise RuntimeError(
+            "cannot reissue action with valid expiry window: "
+            f"chain_now={chain_now} min={min_sig} max={max_sig}"
+        )
+
     refreshed = dict(action)
-    refreshed["expiry"] = int(time.time()) + min_sig
+    refreshed["expiry"] = target_expiry
 
     tx_out = cast_send(
         rpc_url,
