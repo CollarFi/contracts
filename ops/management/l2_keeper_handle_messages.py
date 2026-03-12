@@ -432,6 +432,23 @@ def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str)
     return run(cmd)
 
 
+def _wallet_address(*, account: str, private_key: str) -> str:
+    if private_key:
+        return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
+    if account:
+        return run(["cast", "wallet", "address", "--account", account]).strip()
+    raise ValueError("wallet address resolution requires account or private key")
+
+
+def _assert_tsa_signer(rpc_url: str, tsa_addr: str, wallet_addr: str) -> None:
+    raw = cast_call(rpc_url, tsa_addr, "isSigner(address)(bool)", wallet_addr, allow_fail=True)
+    if raw.strip().lower() != "true":
+        raise ValueError(
+            f"wallet {wallet_addr} is not a TSA signer for {tsa_addr}; "
+            "Derive API signature will be rejected"
+        )
+
+
 def _post_private_deposit(
     *,
     api_url: str,
@@ -917,6 +934,9 @@ def main(
             "API submission requires ACCOUNT or --private-key "
             "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
         )
+    if submit_deposit_api or submit_withdraw_api:
+        signer_wallet = _wallet_address(account=account, private_key=pk)
+        _assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
 
     state = _load_state(state_file, start_block)
     _ensure_api_state(state)

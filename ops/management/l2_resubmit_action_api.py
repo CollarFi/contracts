@@ -211,6 +211,23 @@ def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str)
     return run(cmd)
 
 
+def _wallet_address(*, account: str, private_key: str) -> str:
+    if private_key:
+        return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
+    if account:
+        return run(["cast", "wallet", "address", "--account", account]).strip()
+    raise ValueError("wallet address resolution requires account or private key")
+
+
+def _assert_tsa_signer(rpc_url: str, tsa_addr: str, wallet_addr: str) -> None:
+    raw = cast_call(rpc_url, tsa_addr, "isSigner(address)(bool)", wallet_addr, allow_fail=True)
+    if raw.strip().lower() != "true":
+        raise RuntimeError(
+            f"wallet {wallet_addr} is not a TSA signer for {tsa_addr}; "
+            "Derive API signature will be rejected"
+        )
+
+
 def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
     # Cloudflare blocks Python's default urllib user-agent for this API.
     all_headers = {
@@ -359,6 +376,7 @@ def main(
         raise ValueError("missing auth: need ACCOUNT, PRIVATE_KEY, or UNLOCKED=true + FROM")
     if not account and not private_key:
         raise ValueError("API signatures require ACCOUNT or PRIVATE_KEY")
+    wallet_addr = _wallet_address(account=account, private_key=private_key)
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
 
@@ -376,6 +394,7 @@ def main(
     tsa_addr = action_logs[action_index].get("address", "")
     if not tsa_addr:
         raise RuntimeError("failed to infer TSA address from ActionSigned log")
+    _assert_tsa_signer(rpc_url, tsa_addr, wallet_addr)
 
     action_kind = _infer_action_kind(
         original_action.module,
