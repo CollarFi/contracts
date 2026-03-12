@@ -182,7 +182,11 @@ def _extract_tx_hash(cast_send_output: str) -> str:
 def _get_receipt(rpc_url: str, tx_hash: str) -> dict[str, Any]:
     raw = run(["cast", "rpc", "eth_getTransactionReceipt", tx_hash, "--rpc-url", rpc_url])
     payload = json.loads(raw)
-    return payload.get("result") or {}
+    if isinstance(payload, dict) and "result" in payload:
+        return payload.get("result") or {}
+    if isinstance(payload, dict) and "transactionHash" in payload:
+        return payload
+    return {}
 
 
 def _get_block_timestamp(rpc_url: str, block_number: int) -> int:
