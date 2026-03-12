@@ -927,7 +927,8 @@ def main(
             )
             already_handled = already_handled_raw.strip().lower() == "true"
 
-            if already_handled and not _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
+            # Do not trigger API submission for already-processed messages.
+            if already_handled:
                 continue
 
             attempts += 1
@@ -984,59 +985,45 @@ def main(
                             block_no_raw = receipt.get("blockNumber", "0x0")
                             block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
                             signed_at = _get_block_timestamp(rpc_url, block_no)
-                    else:
-                        item["status"] = "already-handled"
-
                     # 2) Optional API submit path for deposit/withdraw
                     if _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
-                        api_submitted = state["apiSubmitted"].get(guid)
-                        if api_submitted:
-                            item["status"] = "api-already-submitted"
-                            item["deriveApi"] = api_submitted.get("deriveApi", {})
-                        else:
-                            if action_data is None or signed_at is None:
-                                action_data, signed_at, source_tx = _action_meta_from_chain(
-                                    rpc_url=rpc_url,
-                                    receiver_addr=receiver_addr,
-                                    tsa_addr=tsa_addr,
-                                    guid=guid,
-                                )
-                                item["sourceSignedTx"] = source_tx
+                        if action_data is None or signed_at is None:
+                            raise RuntimeError("missing fresh ActionSigned metadata for API submission")
 
-                            age_sec = int(time.time()) - int(signed_at)
-                            item["signedAgeSec"] = str(age_sec)
+                        age_sec = int(time.time()) - int(signed_at)
+                        item["signedAgeSec"] = str(age_sec)
 
-                            if age_sec > api_signature_max_age_seconds:
-                                reissue_tx, action_data, signed_at = _reissue_action_signature(
-                                    rpc_url=rpc_url,
-                                    tsa_addr=tsa_addr,
-                                    action=action_data,
-                                    account=account,
-                                    private_key=pk,
-                                    from_addr=sender,
-                                    unlocked=use_unlocked,
-                                )
-                                item["reissuedTx"] = reissue_tx
-                                item["signedAgeSec"] = "0"
-
-                            api_meta = _submit_api_for_action(
-                                action_type=action,
+                        if age_sec > api_signature_max_age_seconds:
+                            reissue_tx, action_data, signed_at = _reissue_action_signature(
                                 rpc_url=rpc_url,
-                                action=action_data,
                                 tsa_addr=tsa_addr,
+                                action=action_data,
                                 account=account,
                                 private_key=pk,
-                                api_url=eff_api_url,
-                                x_lyra_wallet=eff_derive_wallet,
-                                fallback_asset_name=eff_asset_name,
+                                from_addr=sender,
+                                unlocked=use_unlocked,
                             )
-                            item["deriveApi"] = api_meta
-                            state["apiSubmitted"][guid] = {
-                                "action": _action_name(action),
-                                "submittedAt": int(time.time()),
-                                "deriveApi": api_meta,
-                            }
-                            _save_state(state_file, state)
+                            item["reissuedTx"] = reissue_tx
+                            item["signedAgeSec"] = "0"
+
+                        api_meta = _submit_api_for_action(
+                            action_type=action,
+                            rpc_url=rpc_url,
+                            action=action_data,
+                            tsa_addr=tsa_addr,
+                            account=account,
+                            private_key=pk,
+                            api_url=eff_api_url,
+                            x_lyra_wallet=eff_derive_wallet,
+                            fallback_asset_name=eff_asset_name,
+                        )
+                        item["deriveApi"] = api_meta
+                        state["apiSubmitted"][guid] = {
+                            "action": _action_name(action),
+                            "submittedAt": int(time.time()),
+                            "deriveApi": api_meta,
+                        }
+                        _save_state(state_file, state)
 
                     item["status"] = "sent"
                     sent += 1
