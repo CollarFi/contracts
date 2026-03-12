@@ -324,6 +324,22 @@ def _erc20_decimals(rpc_url: str, asset: str) -> int:
     return _parse_uint(raw)
 
 
+def _erc20_symbol(rpc_url: str, asset: str) -> str:
+    raw = cast_call(rpc_url, asset, "symbol()(string)")
+    return raw.strip()
+
+
+def _resolve_asset_name(fallback_asset_name: str, asset_addr: str, rpc_url: str) -> str:
+    if fallback_asset_name:
+        return fallback_asset_name
+    symbol = _erc20_symbol(rpc_url, asset_addr).upper()
+    if symbol == "WETH":
+        return "ETH"
+    if symbol == "WBTC":
+        return "BTC"
+    return symbol
+
+
 def _submit_deposit_to_derive_api(
     *,
     rpc_url: str,
@@ -340,9 +356,7 @@ def _submit_deposit_to_derive_api(
     dep = _decode_deposit_module_data(action["data"])
     decimals = _erc20_decimals(rpc_url, dep["asset"])
     amount_str = _to_decimal_str(dep["amount"], decimals)
-
-    # Use env/CLI fallback asset name (ETH on testnet) unless explicitly overridden elsewhere.
-    asset_name = fallback_asset_name
+    asset_name = _resolve_asset_name(fallback_asset_name, dep["asset"], rpc_url)
 
     debug_payload = {
         "amount": amount_str,
@@ -404,6 +418,134 @@ def _submit_deposit_to_derive_api(
         "apiId": private_resp.get("id"),
     }
 
+
+def _decode_withdraw_module_data(data_hex: str) -> dict[str, Any]:
+    if not data_hex.startswith("0x"):
+        raise ValueError(f"invalid data hex: {data_hex}")
+    decoded_raw = run(["cast", "decode-abi", "--json", "f()(address,uint256)", data_hex])
+    asset, amount = json.loads(decoded_raw)
+    return {
+        "asset": str(asset),
+        "amount": int(amount),
+    }
+
+
+def _post_private_withdraw(
+    *,
+    api_url: str,
+    x_lyra_wallet: str,
+    x_lyra_timestamp: str,
+    x_lyra_signature: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8")
+    req = Request(
+        f"{api_url.rstrip('/')}/private/withdraw",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "X-LyraWallet": x_lyra_wallet,
+            "X-LyraTimestamp": x_lyra_timestamp,
+            "X-LyraSignature": x_lyra_signature,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            status = int(resp.status)
+            out = json.loads(resp.read().decode("utf-8") or "{}")
+    except HTTPError as e:
+        status = int(e.code)
+        try:
+            out = json.loads((e.read() or b"{}").decode("utf-8"))
+        except Exception:
+            out = {"error": {"message": str(e)}}
+    except URLError as e:
+        raise RuntimeError(f"private/withdraw http error: {e}") from e
+
+    if status >= 400 or out.get("error"):
+        raise RuntimeError(f"private/withdraw failed ({status}): {json.dumps(out)}")
+    return out
+
+
+def _submit_withdraw_to_derive_api(
+    *,
+    rpc_url: str,
+    receipt_tx_hash: str,
+    tsa_addr: str,
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    fallback_asset_name: str,
+) -> dict[str, Any]:
+    receipt = _get_receipt(rpc_url, receipt_tx_hash)
+    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
+    wd = _decode_withdraw_module_data(action["data"])
+    decimals = _erc20_decimals(rpc_url, wd["asset"])
+    amount_str = _to_decimal_str(wd["amount"], decimals)
+    asset_name = _resolve_asset_name(fallback_asset_name, wd["asset"], rpc_url)
+
+    debug_payload = {
+        "amount": amount_str,
+        "asset_name": asset_name,
+        "is_atomic_signing": True,
+        "nonce": action["nonce"],
+        "signature_expiry_sec": action["expiry"],
+        "signer": tsa_addr,
+        "subaccount_id": action["subaccountId"],
+    }
+
+    debug_status, debug_json = _http_post_json(f"{api_url.rstrip('/')}/public/withdraw_debug", debug_payload)
+    if debug_status >= 400 or debug_json.get("error"):
+        raise RuntimeError(f"public/withdraw_debug failed ({debug_status}): {json.dumps(debug_json)}")
+
+    typed_hash = debug_json["result"]["typed_data_hash"]
+    if typed_hash.lower() != str(action["typedDataHash"]).lower():
+        raise RuntimeError(
+            "typed hash mismatch between ActionSigned and withdraw_debug "
+            f"(onchain={action['typedDataHash']}, debug={typed_hash})"
+        )
+
+    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
+    if signed_raw.strip().lower() != "true":
+        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
+
+    ts_ms = str(int(time.time() * 1000))
+    auth_sig = _wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+    withdraw_sig = _wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
+
+    private_body = {
+        "amount": amount_str,
+        "asset_name": asset_name,
+        "subaccount_id": action["subaccountId"],
+        "nonce": action["nonce"],
+        "signature_expiry_sec": action["expiry"],
+        "signer": tsa_addr,
+        "signature": withdraw_sig,
+    }
+
+    private_resp = _post_private_withdraw(
+        api_url=api_url,
+        x_lyra_wallet=x_lyra_wallet,
+        x_lyra_timestamp=ts_ms,
+        x_lyra_signature=auth_sig,
+        body=private_body,
+    )
+
+    return {
+        "typedDataHash": typed_hash,
+        "actionHash": debug_json["result"].get("action_hash"),
+        "encodedDataHash": debug_json["result"].get("encoded_data_hashed"),
+        "amount": amount_str,
+        "assetName": asset_name,
+        "subaccountId": str(action["subaccountId"]),
+        "nonce": str(action["nonce"]),
+        "expiry": str(action["expiry"]),
+        "apiResult": private_resp.get("result"),
+        "apiId": private_resp.get("id"),
+    }
+
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -425,7 +567,16 @@ def main(
     poll_seconds: int = typer.Option(5, "--poll-seconds", min=1),
     once: bool = typer.Option(False, "--once", help="Run one polling tick and exit"),
     max_per_tick: int = typer.Option(10, "--max-per-tick", min=1),
-    include_return_requests: bool = typer.Option(False, "--include-return-requests", help="Also handle ReturnRequest messages"),
+    deposit_intents: bool = typer.Option(
+        True,
+        "--deposit-intents/--no-deposit-intents",
+        help="Enable/disable handling of DepositIntent messages.",
+    ),
+    return_requests: bool = typer.Option(
+        True,
+        "--return-requests/--no-return-requests",
+        help="Enable/disable handling of ReturnRequest messages.",
+    ),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
     from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
@@ -436,6 +587,11 @@ def main(
         False,
         "--submit-deposit-api",
         help="After handling DepositIntent, submit matching private/deposit request to Derive API.",
+    ),
+    submit_withdraw_api: bool = typer.Option(
+        False,
+        "--submit-withdraw-api",
+        help="After handling ReturnRequest, submit matching private/withdraw request to Derive API.",
     ),
     derive_api_url: str = typer.Option(
         "",
@@ -473,15 +629,23 @@ def main(
 
     if submit_deposit_api and not broadcast:
         raise ValueError("--submit-deposit-api requires --broadcast")
+    if submit_withdraw_api and not broadcast:
+        raise ValueError("--submit-withdraw-api requires --broadcast")
     if submit_deposit_api and not (account or pk):
         raise ValueError("--submit-deposit-api requires ACCOUNT or --private-key for signing API auth/payload")
+    if submit_withdraw_api and not (account or pk):
+        raise ValueError("--submit-withdraw-api requires ACCOUNT or --private-key for signing API auth/payload")
 
     state = _load_state(state_file, start_block)
     next_block = int(state.get("nextBlock", start_block))
 
-    allowed_actions = {ACTION_DEPOSIT_INTENT}
-    if include_return_requests:
+    allowed_actions: set[int] = set()
+    if deposit_intents:
+        allowed_actions.add(ACTION_DEPOSIT_INTENT)
+    if return_requests:
         allowed_actions.add(ACTION_RETURN_REQUEST)
+    if not allowed_actions:
+        raise ValueError("no actions enabled; use --deposit-intents and/or --return-requests")
 
     handled: list[dict[str, Any]] = []
 
@@ -563,6 +727,18 @@ def main(
 
                     if submit_deposit_api and action == ACTION_DEPOSIT_INTENT:
                         api_meta = _submit_deposit_to_derive_api(
+                            rpc_url=rpc_url,
+                            receipt_tx_hash=tx_hash,
+                            tsa_addr=tsa_addr,
+                            account=account,
+                            private_key=pk,
+                            api_url=eff_api_url,
+                            x_lyra_wallet=eff_derive_wallet,
+                            fallback_asset_name=eff_asset_name,
+                        )
+                        item["deriveApi"] = api_meta
+                    if submit_withdraw_api and action == ACTION_RETURN_REQUEST:
+                        api_meta = _submit_withdraw_to_derive_api(
                             rpc_url=rpc_url,
                             receipt_tx_hash=tx_hash,
                             tsa_addr=tsa_addr,
