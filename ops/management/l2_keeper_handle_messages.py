@@ -777,15 +777,15 @@ def main(
     poll_seconds: int = typer.Option(5, "--poll-seconds", min=1),
     once: bool = typer.Option(False, "--once", help="Run one polling tick and exit"),
     max_per_tick: int = typer.Option(10, "--max-per-tick", min=1),
-    deposit_intents: bool = typer.Option(
-        True,
-        "--deposit-intents/--no-deposit-intents",
-        help="Enable/disable handling of DepositIntent messages.",
+    no_deposit_intents: bool = typer.Option(
+        False,
+        "--no-deposit-intents",
+        help="Disable handling of DepositIntent messages.",
     ),
-    return_requests: bool = typer.Option(
-        True,
-        "--return-requests/--no-return-requests",
-        help="Enable/disable handling of ReturnRequest messages.",
+    no_return_requests: bool = typer.Option(
+        False,
+        "--no-return-requests",
+        help="Disable handling of ReturnRequest messages.",
     ),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
@@ -793,10 +793,10 @@ def main(
     unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
     lz_fee_buffer_bps: int = typer.Option(500, "--lz-fee-buffer-bps", min=0, help="Buffer over quoted LZ native fee (bps)."),
-    submit_deposit_api: bool = typer.Option(
+    no_submit_deposit_api: bool = typer.Option(
         False,
-        "--submit-deposit-api",
-        help="After handling DepositIntent, submit matching private/deposit request to Derive API.",
+        "--no-submit-deposit-api",
+        help="Disable Derive private/deposit submission after handling DepositIntent.",
     ),
     no_submit_withdraw_api: bool = typer.Option(
         False,
@@ -842,14 +842,16 @@ def main(
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
     eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+    deposit_intents = not no_deposit_intents
+    return_requests = not no_return_requests
+    submit_deposit_api = broadcast and (not no_submit_deposit_api)
     submit_withdraw_api = broadcast and (not no_submit_withdraw_api)
 
-    if submit_deposit_api and not broadcast:
-        raise ValueError("--submit-deposit-api requires --broadcast")
-    if submit_deposit_api and not (account or pk):
-        raise ValueError("--submit-deposit-api requires ACCOUNT or --private-key for signing API auth/payload")
-    if submit_withdraw_api and not (account or pk):
-        raise ValueError("withdraw API submit requires ACCOUNT or --private-key (or disable via --no-submit-withdraw-api)")
+    if (submit_deposit_api or submit_withdraw_api) and not (account or pk):
+        raise ValueError(
+            "API submission requires ACCOUNT or --private-key "
+            "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
+        )
 
     state = _load_state(state_file, start_block)
     _ensure_api_state(state)
