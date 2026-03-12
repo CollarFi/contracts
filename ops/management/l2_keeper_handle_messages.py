@@ -432,6 +432,14 @@ def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str)
     return run(cmd)
 
 
+def _wallet_address(*, account: str, private_key: str) -> str:
+    if private_key:
+        return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
+    if account:
+        return run(["cast", "wallet", "address", "--account", account]).strip()
+    raise ValueError("wallet address resolution requires account or private key")
+
+
 def _post_private_deposit(
     *,
     api_url: str,
@@ -906,7 +914,9 @@ def main(
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
-    eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+    eff_derive_wallet = (
+        derive_wallet or env.get("DERIVE_WALLET") or _wallet_address(account=account, private_key=pk)
+    ).strip()
     deposit_intents = not no_deposit_intents
     return_requests = not no_return_requests
     submit_deposit_api = broadcast and (not no_submit_deposit_api)

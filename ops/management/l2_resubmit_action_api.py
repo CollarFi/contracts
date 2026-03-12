@@ -211,6 +211,14 @@ def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str)
     return run(cmd)
 
 
+def _wallet_address(*, account: str, private_key: str) -> str:
+    if private_key:
+        return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
+    if account:
+        return run(["cast", "wallet", "address", "--account", account]).strip()
+    raise ValueError("wallet address resolution requires account or private key")
+
+
 def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
     # Cloudflare blocks Python's default urllib user-agent for this API.
     all_headers = {
@@ -456,7 +464,7 @@ def main(
         "signature": action_sig,
     }
 
-    x_lyra_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+    x_lyra_wallet = (derive_wallet or env.get("DERIVE_WALLET") or _wallet_address(account=account, private_key=private_key)).strip()
     private_endpoint = f"{eff_api_url.rstrip('/')}/private/{action_kind}"
     private_status, private_json = _http_post_json(
         private_endpoint,
