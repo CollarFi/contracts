@@ -619,7 +619,51 @@ contract LZMessagingTest is Test {
         receiver.sendCollateralReturned{value: 1}(1, address(token), 2e18, socketMessageId);
     }
 
+    function testHandleDepositRevertsWhenLoanIdTooLargeForNonce() public {
+        bytes32 socketMessageId = bytes32(uint256(100));
+        CollarLZMessages.Message memory message =
+            _buildMessageWithLoanId(CollarLZMessages.Action.DepositIntent, socketMessageId, 1_000_000);
+
+        socket.setExecuted(socketMessageId, true);
+        token.mint(address(receiver), message.amount);
+
+        bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
+            message.loanId,
+            message.asset,
+            message.amount,
+            message.recipient,
+            message.subaccountId,
+            message.socketMessageId,
+            address(this)
+        );
+        _deliverToReceiver(guid, message);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_LoanIdTooLargeForNonce.selector);
+        receiver.handleMessage(guid);
+    }
+
+    function testHandleReturnRequestRevertsWhenLoanIdTooLargeForNonce() public {
+        CollarLZMessages.Message memory message =
+            _buildMessageWithLoanId(CollarLZMessages.Action.ReturnRequest, bytes32(0), 1_000_000);
+
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_LoanIdTooLargeForNonce.selector);
+        receiver.handleMessage(guid);
+    }
+
     function _buildMessage(CollarLZMessages.Action action, bytes32 socketMessageId)
+        internal
+        view
+        returns (CollarLZMessages.Message memory)
+    {
+        return _buildMessageWithLoanId(action, socketMessageId, 1);
+    }
+
+    function _buildMessageWithLoanId(CollarLZMessages.Action action, bytes32 socketMessageId, uint256 loanId)
         internal
         view
         returns (CollarLZMessages.Message memory)
@@ -627,7 +671,7 @@ contract LZMessagingTest is Test {
         uint256 subaccountId = tsa.subAccount();
         return CollarLZMessages.Message({
             action: action,
-            loanId: 1,
+            loanId: loanId,
             asset: address(token),
             amount: 1e18,
             recipient: address(this),

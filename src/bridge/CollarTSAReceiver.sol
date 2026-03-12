@@ -76,6 +76,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_CollateralReturnedAfterTrade();
     error CTR_TradeConfirmedAfterReturn();
     error CTR_TradeAlreadyConfirmed();
+    error CTR_LoanIdTooLargeForNonce();
 
     constructor(
         address admin,
@@ -421,6 +422,9 @@ contract CollarTSAReceiver is AccessControl, OApp {
     }
 
     function _deriveActionNonce(uint256 loanId, bytes32 entropy) internal view returns (uint256) {
+        if (loanId > 999_999) {
+            revert CTR_LoanIdTooLargeForNonce();
+        }
         uint256 timestampMs = block.timestamp * 1_000;
         uint256 random3 = uint256(entropy) % 1_000;
         uint256 loanIdSuffix = loanId % 1_000_000;
