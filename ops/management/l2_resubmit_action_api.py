@@ -2,27 +2,35 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal, getcontext
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import typer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
+from l2_common import (  # noqa: E402
+    assert_tsa_signer,
+    derive_reissue_nonce,
+    extract_tx_hash,
+    get_receipt,
+    http_post_json,
+    is_retryable_signature_sync_error,
+    latest_block_timestamp,
+    tsa_signature_expiry_window,
+    wallet_address,
+    wallet_sign,
+)
 from py_lib.envs import resolve_l2_env_path  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
 ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
 MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
-MAX_LOAN_ID_FOR_NONCE_SUFFIX = 999_999
 
 
 @dataclass
@@ -42,36 +50,6 @@ class SignedAction:
 class HandledMessageMeta:
     guid: str
     loan_id: int
-
-
-def _run_json(cmd: list[str]) -> Any:
-    return json.loads(run(cmd))
-
-
-def _get_receipt(rpc_url: str, tx_hash: str) -> dict[str, Any]:
-    payload = _run_json(["cast", "rpc", "eth_getTransactionReceipt", tx_hash, "--rpc-url", rpc_url])
-    if isinstance(payload, dict) and "result" in payload:
-        return payload.get("result") or {}
-    if isinstance(payload, dict):
-        return payload
-    return {}
-
-
-def _extract_tx_hash(cast_send_output: str) -> str:
-    # cast send formats vary by version:
-    # - "Transaction: 0x..."
-    # - key/value lines with "transactionHash      0x..."
-    # - JSON with "transactionHash":"0x..."
-    for pattern in (
-        r'"transactionHash"\s*:\s*"(0x[a-fA-F0-9]{64})"',
-        r"\btransactionHash\b\s*[:=]?\s*(0x[a-fA-F0-9]{64})",
-        r"\bTransaction:\s*(0x[a-fA-F0-9]{64})",
-    ):
-        m = re.search(pattern, cast_send_output, flags=re.IGNORECASE)
-        if m:
-            return m.group(1)
-
-    raise ValueError(f"failed to extract tx hash from cast output: {cast_send_output}")
 
 
 def _decode_action_log(log: dict[str, Any]) -> SignedAction:
@@ -125,37 +103,6 @@ def _find_message_handled_meta(receipt: dict[str, Any]) -> HandledMessageMeta | 
     return None
 
 
-def _latest_block_timestamp(rpc_url: str) -> int:
-    payload = _run_json(["cast", "block", "latest", "--rpc-url", rpc_url, "--json"])
-    ts = payload.get("timestamp", 0)
-    if isinstance(ts, str):
-        return int(ts, 16) if ts.startswith("0x") else int(ts)
-    return int(ts)
-
-
-def _tsa_signature_expiry_window(rpc_url: str, tsa_addr: str) -> tuple[int, int]:
-    raw = cast_call(
-        rpc_url,
-        tsa_addr,
-        "getCollarTSAParams()((uint256,uint256,uint256,uint256,int256,uint256,uint256,uint256))",
-    )
-
-    # cast may annotate large integers with scientific notation hints, e.g.
-    #   86400 [8.64e4]
-    # Strip those hints, then parse first two tuple fields.
-    cleaned = re.sub(r"\s*\[[^\]]+\]", "", raw)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    m = re.match(r"^\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,", cleaned)
-    if not m:
-        raise RuntimeError(f"failed to parse signature expiry window from TSA params: {raw}")
-    return int(m.group(1)), int(m.group(2))
-
-
-def _format_action_tuple(action: SignedAction, expiry: int) -> str:
-    return _format_action_tuple_with_nonce(action, expiry, action.nonce)
-
-
 def _format_action_tuple_with_nonce(action: SignedAction, expiry: int, nonce: int) -> str:
     return (
         "("
@@ -171,8 +118,8 @@ def _format_action_tuple_with_nonce(action: SignedAction, expiry: int, nonce: in
 
 
 def _compute_fresh_expiry(rpc_url: str, tsa_addr: str) -> int:
-    min_sig, max_sig = _tsa_signature_expiry_window(rpc_url, tsa_addr)
-    chain_now = _latest_block_timestamp(rpc_url)
+    min_sig, max_sig = tsa_signature_expiry_window(rpc_url, tsa_addr)
+    chain_now = latest_block_timestamp(rpc_url)
 
     cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
     target_expiry = chain_now + min_sig + cushion
@@ -185,84 +132,6 @@ def _compute_fresh_expiry(rpc_url: str, tsa_addr: str) -> int:
             f"chain_now={chain_now} min={min_sig} max={max_sig}"
         )
     return target_expiry
-
-
-def _derive_reissue_nonce(rpc_url: str, loan_id: int) -> int:
-    if loan_id > MAX_LOAN_ID_FOR_NONCE_SUFFIX:
-        raise RuntimeError(f"loanId too large for nonce suffix (max={MAX_LOAN_ID_FOR_NONCE_SUFFIX}, got={loan_id})")
-
-    # Mirror receiver nonce convention:
-    # nonce = timestamp_sec || loanId(6 digits)
-    chain_now = _latest_block_timestamp(rpc_url)
-    return (chain_now * 1_000_000) + loan_id
-
-
-def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str) -> str:
-    cmd = ["cast", "wallet", "sign"]
-    if no_hash:
-        cmd.append("--no-hash")
-    if private_key:
-        cmd += ["--private-key", private_key]
-    elif account:
-        cmd += ["--account", account]
-    else:
-        raise ValueError("wallet signing requires account or private key")
-    cmd.append(message)
-    return run(cmd)
-
-
-def _wallet_address(*, account: str, private_key: str) -> str:
-    if private_key:
-        return run(["cast", "wallet", "address", "--private-key", private_key]).strip()
-    if account:
-        return run(["cast", "wallet", "address", "--account", account]).strip()
-    raise ValueError("wallet address resolution requires account or private key")
-
-
-def _assert_tsa_signer(rpc_url: str, tsa_addr: str, wallet_addr: str) -> None:
-    raw = cast_call(rpc_url, tsa_addr, "isSigner(address)(bool)", wallet_addr, allow_fail=True)
-    if raw.strip().lower() != "true":
-        raise RuntimeError(
-            f"wallet {wallet_addr} is not a TSA signer for {tsa_addr}; "
-            "Derive API signature will be rejected"
-        )
-
-
-def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
-    # Cloudflare blocks Python's default urllib user-agent for this API.
-    all_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "curl/8.5.0",
-    }
-    if headers:
-        all_headers.update(headers)
-
-    body = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=body, headers=all_headers, method="POST")
-    try:
-        with urlopen(req, timeout=30) as resp:
-            status = int(resp.status)
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-            return status, data
-    except HTTPError as e:
-        try:
-            data = json.loads((e.read() or b"{}").decode("utf-8"))
-        except Exception:
-            data = {"error": {"message": str(e)}}
-        return int(e.code), data
-    except URLError as e:
-        raise RuntimeError(f"http post failed: {url}: {e}") from e
-
-
-def _is_retryable_signature_sync_error(status: int, payload: dict[str, Any]) -> bool:
-    err = payload.get("error")
-    if not isinstance(err, dict):
-        return False
-
-    code = err.get("code")
-    text = f"{err.get('message', '')} {err.get('data', '')}".lower()
-    return bool(code == 14014 or str(code) == "14014" or "signature invalid" in text)
 
 
 def _decode_deposit_module_data(data_hex: str) -> tuple[str, int]:
@@ -404,11 +273,11 @@ def main(
         raise ValueError("missing auth: need ACCOUNT, PRIVATE_KEY, or UNLOCKED=true + FROM")
     if not account and not private_key:
         raise ValueError("API signatures require ACCOUNT or PRIVATE_KEY")
-    wallet_addr = _wallet_address(account=account, private_key=private_key)
+    wallet_addr = wallet_address(account=account, private_key=private_key)
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
 
-    receipt = _get_receipt(rpc_url, tx_hash)
+    receipt = get_receipt(rpc_url, tx_hash)
     if not receipt:
         raise RuntimeError(f"transaction receipt not found for tx={tx_hash}")
 
@@ -422,7 +291,7 @@ def main(
     tsa_addr = action_logs[action_index].get("address", "")
     if not tsa_addr:
         raise RuntimeError("failed to infer TSA address from ActionSigned log")
-    _assert_tsa_signer(rpc_url, tsa_addr, wallet_addr)
+    assert_tsa_signer(rpc_url, tsa_addr, wallet_addr)
 
     action_kind = _infer_action_kind(
         original_action.module,
@@ -443,7 +312,7 @@ def main(
         )
 
     new_expiry = _compute_fresh_expiry(rpc_url, tsa_addr)
-    new_nonce = _derive_reissue_nonce(rpc_url, nonce_loan_id)
+    new_nonce = derive_reissue_nonce(latest_block_timestamp(rpc_url), nonce_loan_id)
 
     reissue_out = cast_send(
         rpc_url,
@@ -456,9 +325,9 @@ def main(
         from_addr=sender or None,
         unlocked=use_unlocked,
     )
-    reissue_tx = _extract_tx_hash(reissue_out)
+    reissue_tx = extract_tx_hash(reissue_out)
 
-    reissue_receipt = _get_receipt(rpc_url, reissue_tx)
+    reissue_receipt = get_receipt(rpc_url, reissue_tx)
     reissue_logs = _find_action_signed_logs(reissue_receipt)
     if not reissue_logs:
         raise RuntimeError(f"ActionSigned not found in reissue tx={reissue_tx}")
@@ -474,7 +343,7 @@ def main(
     )
 
     debug_endpoint = f"{eff_api_url.rstrip('/')}/public/{action_kind}_debug"
-    debug_status, debug_json = _http_post_json(debug_endpoint, debug_payload)
+    debug_status, debug_json = http_post_json(debug_endpoint, debug_payload)
     if debug_status >= 400 or debug_json.get("error"):
         raise RuntimeError(f"{debug_endpoint} failed ({debug_status}): {json.dumps(debug_json)}")
 
@@ -490,8 +359,8 @@ def main(
         raise RuntimeError(f"TSA signedData({debug_hash}) returned false")
 
     ts_ms = str(int(time.time() * 1000))
-    auth_sig = _wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
-    action_sig = _wallet_sign(debug_hash, no_hash=True, account=account, private_key=private_key)
+    auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+    action_sig = wallet_sign(debug_hash, no_hash=True, account=account, private_key=private_key)
 
     private_payload = {
         "amount": amount_str,
@@ -511,7 +380,7 @@ def main(
     private_attempts_used = 0
     for attempt in range(1, post_reissue_api_retry_attempts + 1):
         private_attempts_used = attempt
-        private_status, private_json = _http_post_json(
+        private_status, private_json = http_post_json(
             private_endpoint,
             private_payload,
             headers={
@@ -523,7 +392,7 @@ def main(
         if private_status < 400 and not private_json.get("error"):
             break
 
-        retryable = _is_retryable_signature_sync_error(private_status, private_json)
+        retryable = is_retryable_signature_sync_error(private_status, private_json)
         if not retryable or attempt >= post_reissue_api_retry_attempts:
             break
 
