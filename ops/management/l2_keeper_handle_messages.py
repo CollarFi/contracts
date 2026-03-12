@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 import re
 import time
+from decimal import Decimal, getcontext
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import typer
 from rich import print
@@ -27,6 +30,7 @@ ACTION_DEPOSIT_CONFIRMED = 3
 ACTION_COLLATERAL_RETURNED = 4
 ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
+ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
 
 
 def _resolve_env_path(env_profile: str, l2_env_file: Path) -> Path:
@@ -163,6 +167,243 @@ def _parse_pending_message(raw: str) -> dict[str, Any]:
         "data": m.group(11),
     }
 
+
+def _extract_tx_hash(cast_send_output: str) -> str:
+    m = re.search(r"Transaction:\s*(0x[a-fA-F0-9]{64})", cast_send_output)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b0x[a-fA-F0-9]{64}\b", cast_send_output)
+    if m:
+        return m.group(0)
+    raise ValueError(f"failed to extract tx hash from cast output: {cast_send_output}")
+
+
+def _get_receipt(rpc_url: str, tx_hash: str) -> dict[str, Any]:
+    raw = run(["cast", "rpc", "eth_getTransactionReceipt", tx_hash, "--rpc-url", rpc_url])
+    payload = json.loads(raw)
+    return payload.get("result") or {}
+
+
+def _http_post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    body = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(req, timeout=30) as resp:
+            status = int(resp.status)
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+            return status, data
+    except HTTPError as e:
+        try:
+            data = json.loads((e.read() or b"{}").decode("utf-8"))
+        except Exception:
+            data = {"error": {"message": str(e)}}
+        return int(e.code), data
+    except URLError as e:
+        raise RuntimeError(f"http post failed: {url}: {e}") from e
+
+
+def _decode_action_signed_from_receipt(receipt: dict[str, Any], tsa_addr: str) -> dict[str, Any]:
+    tsa = tsa_addr.lower()
+    for log in receipt.get("logs", []):
+        topics = log.get("topics") or []
+        if len(topics) < 3:
+            continue
+        if str(log.get("address", "")).lower() != tsa:
+            continue
+        if str(topics[0]).lower() != ACTION_SIGNED_TOPIC0:
+            continue
+
+        data_hex = str(log.get("data", "0x"))
+        if not data_hex.startswith("0x"):
+            continue
+        decoded_raw = run(
+            [
+                "cast",
+                "decode-abi",
+                "--json",
+                "f()((uint256,uint256,address,bytes,uint256,address,address))",
+                data_hex,
+            ]
+        )
+        decoded = json.loads(decoded_raw)[0]
+        return {
+            "eventSigner": "0x" + str(topics[1])[-40:],
+            "typedDataHash": str(topics[2]),
+            "subaccountId": int(decoded[0]),
+            "nonce": int(decoded[1]),
+            "module": str(decoded[2]),
+            "data": str(decoded[3]),
+            "expiry": int(decoded[4]),
+            "owner": str(decoded[5]),
+            "signer": str(decoded[6]),
+        }
+
+    raise RuntimeError("ActionSigned event not found in handleMessage receipt")
+
+
+def _decode_deposit_module_data(data_hex: str) -> dict[str, Any]:
+    if not data_hex.startswith("0x"):
+        raise ValueError(f"invalid data hex: {data_hex}")
+    decoded_raw = run(["cast", "decode-abi", "--json", "f()(uint256,address,address)", data_hex])
+    amount, asset, manager = json.loads(decoded_raw)
+    return {
+        "amount": int(amount),
+        "asset": str(asset),
+        "manager": str(manager),
+    }
+
+
+def _to_decimal_str(amount: int, decimals: int) -> str:
+    getcontext().prec = 80
+    q = Decimal(amount) / (Decimal(10) ** Decimal(decimals))
+    s = format(q.normalize(), "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str) -> str:
+    cmd = ["cast", "wallet", "sign"]
+    if no_hash:
+        cmd.append("--no-hash")
+    if private_key:
+        cmd += ["--private-key", private_key]
+    elif account:
+        cmd += ["--account", account]
+    else:
+        raise ValueError("wallet signing requires account or private key")
+    cmd.append(message)
+    return run(cmd)
+
+
+def _post_private_deposit(
+    *,
+    api_url: str,
+    x_lyra_wallet: str,
+    x_lyra_timestamp: str,
+    x_lyra_signature: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "body": body,
+        "headers": {
+            "Content-Type": "application/json",
+            "X-LyraWallet": x_lyra_wallet,
+            "X-LyraTimestamp": x_lyra_timestamp,
+            "X-LyraSignature": x_lyra_signature,
+        },
+    }
+    # Build raw request with headers via urllib for no extra deps.
+    data = json.dumps(body).encode("utf-8")
+    req = Request(
+        f"{api_url.rstrip('/')}/private/deposit",
+        data=data,
+        headers=payload["headers"],
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            status = int(resp.status)
+            out = json.loads(resp.read().decode("utf-8") or "{}")
+    except HTTPError as e:
+        status = int(e.code)
+        try:
+            out = json.loads((e.read() or b"{}").decode("utf-8"))
+        except Exception:
+            out = {"error": {"message": str(e)}}
+    except URLError as e:
+        raise RuntimeError(f"private/deposit http error: {e}") from e
+
+    if status >= 400 or out.get("error"):
+        raise RuntimeError(f"private/deposit failed ({status}): {json.dumps(out)}")
+    return out
+
+
+def _erc20_decimals(rpc_url: str, asset: str) -> int:
+    raw = cast_call(rpc_url, asset, "decimals()(uint8)")
+    return _parse_uint(raw)
+
+
+def _submit_deposit_to_derive_api(
+    *,
+    rpc_url: str,
+    receipt_tx_hash: str,
+    tsa_addr: str,
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    fallback_asset_name: str,
+) -> dict[str, Any]:
+    receipt = _get_receipt(rpc_url, receipt_tx_hash)
+    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
+    dep = _decode_deposit_module_data(action["data"])
+    decimals = _erc20_decimals(rpc_url, dep["asset"])
+    amount_str = _to_decimal_str(dep["amount"], decimals)
+
+    # Use env/CLI fallback asset name (ETH on testnet) unless explicitly overridden elsewhere.
+    asset_name = fallback_asset_name
+
+    debug_payload = {
+        "amount": amount_str,
+        "asset_name": asset_name,
+        "is_atomic_signing": True,
+        "nonce": action["nonce"],
+        "signature_expiry_sec": action["expiry"],
+        "signer": tsa_addr,
+        "subaccount_id": action["subaccountId"],
+    }
+
+    debug_status, debug_json = _http_post_json(f"{api_url.rstrip('/')}/public/deposit_debug", debug_payload)
+    if debug_status >= 400 or debug_json.get("error"):
+        raise RuntimeError(f"public/deposit_debug failed ({debug_status}): {json.dumps(debug_json)}")
+
+    typed_hash = debug_json["result"]["typed_data_hash"]
+    if typed_hash.lower() != str(action["typedDataHash"]).lower():
+        raise RuntimeError(
+            "typed hash mismatch between ActionSigned and deposit_debug "
+            f"(onchain={action['typedDataHash']}, debug={typed_hash})"
+        )
+
+    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
+    if signed_raw.strip().lower() != "true":
+        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
+
+    ts_ms = str(int(time.time() * 1000))
+    auth_sig = _wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+    deposit_sig = _wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
+
+    private_body = {
+        "amount": amount_str,
+        "asset_name": asset_name,
+        "subaccount_id": action["subaccountId"],
+        "nonce": action["nonce"],
+        "signature_expiry_sec": action["expiry"],
+        "signer": tsa_addr,
+        "signature": deposit_sig,
+    }
+
+    private_resp = _post_private_deposit(
+        api_url=api_url,
+        x_lyra_wallet=x_lyra_wallet,
+        x_lyra_timestamp=ts_ms,
+        x_lyra_signature=auth_sig,
+        body=private_body,
+    )
+
+    return {
+        "typedDataHash": typed_hash,
+        "actionHash": debug_json["result"].get("action_hash"),
+        "encodedDataHash": debug_json["result"].get("encoded_data_hashed"),
+        "amount": amount_str,
+        "assetName": asset_name,
+        "subaccountId": str(action["subaccountId"]),
+        "nonce": str(action["nonce"]),
+        "expiry": str(action["expiry"]),
+        "apiResult": private_resp.get("result"),
+        "apiId": private_resp.get("id"),
+    }
+
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -191,6 +432,26 @@ def main(
     unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
     lz_fee_buffer_bps: int = typer.Option(500, "--lz-fee-buffer-bps", min=0, help="Buffer over quoted LZ native fee (bps)."),
+    submit_deposit_api: bool = typer.Option(
+        False,
+        "--submit-deposit-api",
+        help="After handling DepositIntent, submit matching private/deposit request to Derive API.",
+    ),
+    derive_api_url: str = typer.Option(
+        "",
+        "--derive-api-url",
+        help="Derive API base URL (default: DERIVE_API_URL env or https://api-demo.lyra.finance)",
+    ),
+    derive_wallet: str = typer.Option(
+        "",
+        "--derive-wallet",
+        help="X-LyraWallet header override (default: TSA address)",
+    ),
+    derive_asset_name: str = typer.Option(
+        "",
+        "--derive-asset-name",
+        help="Asset name for private/public deposit payloads (default: DERIVE_ASSET_NAME env or ETH)",
+    ),
 ) -> None:
     l2_env_file = resolve_l2_env_path(env_profile, l2_env_file)
     env = load_env(l2_env_file)
@@ -203,6 +464,17 @@ def main(
     receiver_addr = receiver or resolve_addr(env, "L2_RECEIVER", "l2Receiver", "l2")
     if broadcast and not account and not pk and not (use_unlocked and sender):
         raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
+
+    tsa_addr = cast_call(rpc_url, receiver_addr, "tsa()(address)").strip()
+
+    eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
+    eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
+    eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+
+    if submit_deposit_api and not broadcast:
+        raise ValueError("--submit-deposit-api requires --broadcast")
+    if submit_deposit_api and not (account or pk):
+        raise ValueError("--submit-deposit-api requires ACCOUNT or --private-key for signing API auth/payload")
 
     state = _load_state(state_file, start_block)
     next_block = int(state.get("nextBlock", start_block))
@@ -286,7 +558,21 @@ def main(
                         from_addr=sender or None,
                         unlocked=use_unlocked,
                     )
-                    item["tx"] = tx
+                    tx_hash = _extract_tx_hash(tx)
+                    item["tx"] = tx_hash
+
+                    if submit_deposit_api and action == ACTION_DEPOSIT_INTENT:
+                        api_meta = _submit_deposit_to_derive_api(
+                            rpc_url=rpc_url,
+                            receipt_tx_hash=tx_hash,
+                            tsa_addr=tsa_addr,
+                            account=account,
+                            private_key=pk,
+                            api_url=eff_api_url,
+                            x_lyra_wallet=eff_derive_wallet,
+                            fallback_asset_name=eff_asset_name,
+                        )
+                        item["deriveApi"] = api_meta
                     item["status"] = "sent"
                     sent += 1
                 except Exception as exc:
