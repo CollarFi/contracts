@@ -886,6 +886,8 @@ def main(
             topics = log.get("topics", [])
             if len(topics) < 3:
                 continue
+            block_raw = log.get("blockNumber", "0x0")
+            block_no = int(block_raw, 16) if isinstance(block_raw, str) and block_raw.startswith("0x") else int(block_raw)
             guid = topics[1]
             loan_id = int(topics[2], 16)
             data = log.get("data", "0x")
@@ -910,6 +912,7 @@ def main(
             item = {
                 "guid": guid,
                 "loanId": str(loan_id),
+                "eventBlock": str(block_no),
                 "action": _action_name(action),
                 "tx": None,
                 "status": "dry-run",
@@ -1071,7 +1074,10 @@ def main(
                     f"advanced={result['advancedCursor']}"
                 )
                 for item in handled[-result["attempted"] :]:
-                    print(f"  - {item['action']} loan={item['loanId']} guid={item['guid']} -> {item['status']}")
+                    print(
+                        f"  - {item['action']} loan={item['loanId']} guid={item['guid']} "
+                        f"block={item.get('eventBlock', '?')} -> {item['status']}"
+                    )
         except Exception as exc:
             print(f"[red][error][/red] {exc}")
         time.sleep(poll_seconds)
