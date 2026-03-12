@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import time
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -32,6 +33,7 @@ ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
 ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
 MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
+MAX_LOAN_ID_FOR_NONCE_SUFFIX = 999_999
 
 
 def _resolve_env_path(env_profile: str, l2_env_file: Path) -> Path:
@@ -170,12 +172,19 @@ def _parse_pending_message(raw: str) -> dict[str, Any]:
 
 
 def _extract_tx_hash(cast_send_output: str) -> str:
-    m = re.search(r"Transaction:\s*(0x[a-fA-F0-9]{64})", cast_send_output)
-    if m:
-        return m.group(1)
-    m = re.search(r"\b0x[a-fA-F0-9]{64}\b", cast_send_output)
-    if m:
-        return m.group(0)
+    # cast send formats vary by version:
+    # - "Transaction: 0x..."
+    # - key/value lines with "transactionHash      0x..."
+    # - JSON with "transactionHash":"0x..."
+    for pattern in (
+        r'"transactionHash"\s*:\s*"(0x[a-fA-F0-9]{64})"',
+        r"\btransactionHash\b\s*[:=]?\s*(0x[a-fA-F0-9]{64})",
+        r"\bTransaction:\s*(0x[a-fA-F0-9]{64})",
+    ):
+        m = re.search(pattern, cast_send_output, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+
     raise ValueError(f"failed to extract tx hash from cast output: {cast_send_output}")
 
 
@@ -229,7 +238,14 @@ def _tsa_signature_expiry_window(rpc_url: str, tsa_addr: str) -> tuple[int, int]
         tsa_addr,
         "getCollarTSAParams()((uint256,uint256,uint256,uint256,int256,uint256,uint256,uint256))",
     )
-    m = re.match(r"^\(\s*(\d+)\s*,\s*(\d+)\s*,", raw.strip())
+
+    # cast may annotate large integers with scientific notation hints, e.g.
+    #   86400 [8.64e4]
+    # Strip those hints, then parse first two tuple fields.
+    cleaned = re.sub(r"\s*\[[^\]]+\]", "", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    m = re.match(r"^\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,", cleaned)
     if not m:
         raise RuntimeError(f"failed to parse signature expiry window from TSA params: {raw}")
     return int(m.group(1)), int(m.group(2))
@@ -242,6 +258,17 @@ def _latest_block_timestamp(rpc_url: str) -> int:
     if isinstance(ts, str):
         return int(ts, 16) if ts.startswith("0x") else int(ts)
     return int(ts)
+
+
+def _derive_reissue_nonce(chain_now: int, loan_id: int) -> int:
+    if loan_id > MAX_LOAN_ID_FOR_NONCE_SUFFIX:
+        raise RuntimeError(f"loanId too large for nonce suffix (max={MAX_LOAN_ID_FOR_NONCE_SUFFIX}, got={loan_id})")
+
+    # Mirror receiver nonce convention:
+    # nonce = timestamp_ms || random3 || loanId(6 digits)
+    timestamp_ms = chain_now * 1_000
+    random3 = secrets.randbelow(1_000)
+    return (timestamp_ms * 1_000_000_000) + (random3 * 1_000_000) + loan_id
 
 
 def _format_action_tuple(action: dict[str, Any]) -> str:
@@ -263,6 +290,7 @@ def _reissue_action_signature(
     rpc_url: str,
     tsa_addr: str,
     action: dict[str, Any],
+    loan_id: int,
     account: str,
     private_key: str,
     from_addr: str,
@@ -283,6 +311,7 @@ def _reissue_action_signature(
         )
 
     refreshed = dict(action)
+    refreshed["nonce"] = _derive_reissue_nonce(chain_now, loan_id)
     refreshed["expiry"] = target_expiry
 
     tx_out = cast_send(
@@ -307,7 +336,16 @@ def _reissue_action_signature(
 
 def _http_post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     body = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    req = Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "curl/8.5.0",
+        },
+        method="POST",
+    )
     try:
         with urlopen(req, timeout=30) as resp:
             status = int(resp.status)
@@ -409,6 +447,8 @@ def _post_private_deposit(
         "body": body,
         "headers": {
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "curl/8.5.0",
             "X-LyraWallet": x_lyra_wallet,
             "X-LyraTimestamp": x_lyra_timestamp,
             "X-LyraSignature": x_lyra_signature,
@@ -588,6 +628,8 @@ def _post_private_withdraw(
         data=data,
         headers={
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "curl/8.5.0",
             "X-LyraWallet": x_lyra_wallet,
             "X-LyraTimestamp": x_lyra_timestamp,
             "X-LyraSignature": x_lyra_signature,
@@ -998,12 +1040,14 @@ def main(
                                 rpc_url=rpc_url,
                                 tsa_addr=tsa_addr,
                                 action=action_data,
+                                loan_id=loan_id,
                                 account=account,
                                 private_key=pk,
                                 from_addr=sender,
                                 unlocked=use_unlocked,
                             )
                             item["reissuedTx"] = reissue_tx
+                            item["reissuedNonce"] = str(action_data["nonce"])
                             item["signedAgeSec"] = "0"
 
                         api_meta = _submit_api_for_action(
