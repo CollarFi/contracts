@@ -787,11 +787,6 @@ def main(
         "--return-requests/--no-return-requests",
         help="Enable/disable handling of ReturnRequest messages.",
     ),
-    include_return_requests: bool = typer.Option(
-        False,
-        "--include-return-requests",
-        help="Deprecated compatibility flag (return requests are enabled by default).",
-    ),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
     from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
@@ -803,10 +798,10 @@ def main(
         "--submit-deposit-api",
         help="After handling DepositIntent, submit matching private/deposit request to Derive API.",
     ),
-    submit_withdraw_api: bool = typer.Option(
+    no_submit_withdraw_api: bool = typer.Option(
         False,
-        "--submit-withdraw-api",
-        help="After handling ReturnRequest, submit matching private/withdraw request to Derive API.",
+        "--no-submit-withdraw-api",
+        help="Disable Derive private/withdraw submission after handling ReturnRequest.",
     ),
     api_signature_max_age_seconds: int = typer.Option(
         300,
@@ -847,15 +842,14 @@ def main(
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
     eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+    submit_withdraw_api = broadcast and (not no_submit_withdraw_api)
 
     if submit_deposit_api and not broadcast:
         raise ValueError("--submit-deposit-api requires --broadcast")
-    if submit_withdraw_api and not broadcast:
-        raise ValueError("--submit-withdraw-api requires --broadcast")
     if submit_deposit_api and not (account or pk):
         raise ValueError("--submit-deposit-api requires ACCOUNT or --private-key for signing API auth/payload")
     if submit_withdraw_api and not (account or pk):
-        raise ValueError("--submit-withdraw-api requires ACCOUNT or --private-key for signing API auth/payload")
+        raise ValueError("withdraw API submit requires ACCOUNT or --private-key (or disable via --no-submit-withdraw-api)")
 
     state = _load_state(state_file, start_block)
     _ensure_api_state(state)
@@ -865,8 +859,6 @@ def main(
     if deposit_intents:
         allowed_actions.add(ACTION_DEPOSIT_INTENT)
     if return_requests:
-        allowed_actions.add(ACTION_RETURN_REQUEST)
-    if include_return_requests:
         allowed_actions.add(ACTION_RETURN_REQUEST)
     if not allowed_actions:
         raise ValueError("no actions enabled; use --deposit-intents and/or --return-requests")
