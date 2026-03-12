@@ -255,6 +255,16 @@ def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] |
         raise RuntimeError(f"http post failed: {url}: {e}") from e
 
 
+def _is_retryable_signature_sync_error(status: int, payload: dict[str, Any]) -> bool:
+    err = payload.get("error")
+    if not isinstance(err, dict):
+        return False
+
+    code = err.get("code")
+    text = f"{err.get('message', '')} {err.get('data', '')}".lower()
+    return bool(code == 14014 or str(code) == "14014" or "signature invalid" in text)
+
+
 def _decode_deposit_module_data(data_hex: str) -> tuple[str, int]:
     decoded_raw = run(["cast", "decode-abi", "--json", "f()(uint256,address,address)", data_hex])
     amount, asset, _manager = json.loads(decoded_raw)
@@ -357,6 +367,24 @@ def main(
         0,
         "--loan-id",
         help="Override loanId used for nonce derivation when MessageHandled log is absent.",
+    ),
+    post_reissue_api_retry_attempts: int = typer.Option(
+        6,
+        "--post-reissue-api-retry-attempts",
+        min=1,
+        help="Retries for Derive API calls after onchain reissue when signature invalid error is returned.",
+    ),
+    post_reissue_api_retry_initial_delay_seconds: float = typer.Option(
+        2.0,
+        "--post-reissue-api-retry-initial-delay-seconds",
+        min=0.0,
+        help="Initial retry delay (seconds) for post-reissue Derive API retries.",
+    ),
+    post_reissue_api_retry_max_delay_seconds: float = typer.Option(
+        20.0,
+        "--post-reissue-api-retry-max-delay-seconds",
+        min=0.0,
+        help="Maximum retry delay (seconds) for post-reissue Derive API retries.",
     ),
     derive_api_url: str = typer.Option("", "--derive-api-url", help="Derive API base URL."),
     derive_wallet: str = typer.Option("", "--derive-wallet", help="X-LyraWallet override."),
@@ -477,15 +505,31 @@ def main(
 
     x_lyra_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
     private_endpoint = f"{eff_api_url.rstrip('/')}/private/{action_kind}"
-    private_status, private_json = _http_post_json(
-        private_endpoint,
-        private_payload,
-        headers={
-            "X-LyraWallet": x_lyra_wallet,
-            "X-LyraTimestamp": ts_ms,
-            "X-LyraSignature": auth_sig,
-        },
-    )
+    delay_seconds = post_reissue_api_retry_initial_delay_seconds
+    private_status = 0
+    private_json: dict[str, Any] = {}
+    private_attempts_used = 0
+    for attempt in range(1, post_reissue_api_retry_attempts + 1):
+        private_attempts_used = attempt
+        private_status, private_json = _http_post_json(
+            private_endpoint,
+            private_payload,
+            headers={
+                "X-LyraWallet": x_lyra_wallet,
+                "X-LyraTimestamp": ts_ms,
+                "X-LyraSignature": auth_sig,
+            },
+        )
+        if private_status < 400 and not private_json.get("error"):
+            break
+
+        retryable = _is_retryable_signature_sync_error(private_status, private_json)
+        if not retryable or attempt >= post_reissue_api_retry_attempts:
+            break
+
+        time.sleep(delay_seconds)
+        delay_seconds = min(max(delay_seconds * 1.7, 0.0), post_reissue_api_retry_max_delay_seconds)
+
     if private_status >= 400 or private_json.get("error"):
         raise RuntimeError(f"{private_endpoint} failed ({private_status}): {json.dumps(private_json)}")
 
@@ -508,6 +552,7 @@ def main(
         "debugEndpoint": debug_endpoint,
         "privateEndpoint": private_endpoint,
         "debugResult": debug_json.get("result"),
+        "privateAttempts": private_attempts_used,
         "privateResult": private_json.get("result"),
         "privateId": private_json.get("id"),
     }

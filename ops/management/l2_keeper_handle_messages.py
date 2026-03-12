@@ -358,6 +358,11 @@ def _http_post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, A
         raise RuntimeError(f"http post failed: {url}: {e}") from e
 
 
+def _is_retryable_signature_sync_error_text(err_text: str) -> bool:
+    t = err_text.lower()
+    return "14014" in t or "signature invalid" in t
+
+
 def _decode_action_signed_from_receipt(receipt: dict[str, Any], tsa_addr: str) -> dict[str, Any]:
     tsa = tsa_addr.lower()
     for log in receipt.get("logs", []):
@@ -891,6 +896,24 @@ def main(
         min=1,
         help="If signed action is older than this, re-sign action before submitting Derive API request.",
     ),
+    post_reissue_api_retry_attempts: int = typer.Option(
+        6,
+        "--post-reissue-api-retry-attempts",
+        min=1,
+        help="Retries for Derive API submit after onchain reissue when signature invalid is returned.",
+    ),
+    post_reissue_api_retry_initial_delay_seconds: float = typer.Option(
+        2.0,
+        "--post-reissue-api-retry-initial-delay-seconds",
+        min=0.0,
+        help="Initial retry delay (seconds) for post-reissue Derive API retries.",
+    ),
+    post_reissue_api_retry_max_delay_seconds: float = typer.Option(
+        20.0,
+        "--post-reissue-api-retry-max-delay-seconds",
+        min=0.0,
+        help="Maximum retry delay (seconds) for post-reissue Derive API retries.",
+    ),
     derive_api_url: str = typer.Option(
         "",
         "--derive-api-url",
@@ -1067,17 +1090,40 @@ def main(
                             item["reissuedNonce"] = str(action_data["nonce"])
                             item["signedAgeSec"] = "0"
 
-                        api_meta = _submit_api_for_action(
-                            action_type=action,
-                            rpc_url=rpc_url,
-                            action=action_data,
-                            tsa_addr=tsa_addr,
-                            account=account,
-                            private_key=pk,
-                            api_url=eff_api_url,
-                            x_lyra_wallet=eff_derive_wallet,
-                            fallback_asset_name=eff_asset_name,
-                        )
+                        retry_attempts = post_reissue_api_retry_attempts if item.get("reissuedTx") else 1
+                        retry_delay = post_reissue_api_retry_initial_delay_seconds
+                        api_meta: dict[str, Any] | None = None
+                        for api_attempt in range(1, retry_attempts + 1):
+                            try:
+                                api_meta = _submit_api_for_action(
+                                    action_type=action,
+                                    rpc_url=rpc_url,
+                                    action=action_data,
+                                    tsa_addr=tsa_addr,
+                                    account=account,
+                                    private_key=pk,
+                                    api_url=eff_api_url,
+                                    x_lyra_wallet=eff_derive_wallet,
+                                    fallback_asset_name=eff_asset_name,
+                                )
+                                item["deriveApiAttempts"] = str(api_attempt)
+                                break
+                            except Exception as exc:
+                                if (
+                                    api_attempt >= retry_attempts
+                                    or not _is_retryable_signature_sync_error_text(str(exc))
+                                ):
+                                    raise
+                                item["deriveApiAttempts"] = str(api_attempt)
+                                time.sleep(retry_delay)
+                                retry_delay = min(
+                                    max(retry_delay * 1.7, 0.0),
+                                    post_reissue_api_retry_max_delay_seconds,
+                                )
+
+                        if api_meta is None:
+                            raise RuntimeError("derive API submit failed after retries")
+
                         item["deriveApi"] = api_meta
                         state["apiSubmitted"][guid] = {
                             "action": _action_name(action),
