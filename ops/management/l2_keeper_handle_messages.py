@@ -31,6 +31,7 @@ ACTION_COLLATERAL_RETURNED = 4
 ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
 ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
+MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
 
 
 def _resolve_env_path(env_profile: str, l2_env_file: Path) -> Path:
@@ -182,6 +183,100 @@ def _get_receipt(rpc_url: str, tx_hash: str) -> dict[str, Any]:
     raw = run(["cast", "rpc", "eth_getTransactionReceipt", tx_hash, "--rpc-url", rpc_url])
     payload = json.loads(raw)
     return payload.get("result") or {}
+
+
+def _get_block_timestamp(rpc_url: str, block_number: int) -> int:
+    out = run(["cast", "block", str(block_number), "--rpc-url", rpc_url, "--json"])
+    payload = json.loads(out)
+    ts = payload.get("timestamp", 0)
+    if isinstance(ts, str):
+        return int(ts, 16) if ts.startswith("0x") else int(ts)
+    return int(ts)
+
+
+def _find_message_handled_log_for_guid(rpc_url: str, receiver_addr: str, guid: str) -> dict[str, Any]:
+    out = run(
+        [
+            "cast",
+            "logs",
+            "MessageHandled(bytes32,uint8,uint256)",
+            "--address",
+            receiver_addr,
+            "--from-block",
+            "0",
+            "--to-block",
+            "latest",
+            "--rpc-url",
+            rpc_url,
+            "--json",
+        ]
+    )
+    logs = json.loads(out)
+    target = guid.lower()
+    matched = [l for l in logs if (l.get("topics") or [None, None])[1].lower() == target]
+    if not matched:
+        raise RuntimeError(f"MessageHandled log not found for guid={guid}")
+    return matched[-1]
+
+
+def _tsa_min_signature_expiry(rpc_url: str, tsa_addr: str) -> int:
+    raw = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getCollarTSAParams()((uint256,uint256,uint256,uint256,int256,uint256,uint256,uint256))",
+    )
+    m = re.match(r"^\(\s*(\d+)\s*,", raw.strip())
+    if not m:
+        raise RuntimeError(f"failed to parse minSignatureExpiry from TSA params: {raw}")
+    return int(m.group(1))
+
+
+def _format_action_tuple(action: dict[str, Any]) -> str:
+    return (
+        "("
+        f"{action['subaccountId']},"
+        f"{action['nonce']},"
+        f"{action['module']},"
+        f"{action['data']},"
+        f"{action['expiry']},"
+        f"{action['owner']},"
+        f"{action['signer']}"
+        ")"
+    )
+
+
+def _reissue_action_signature(
+    *,
+    rpc_url: str,
+    tsa_addr: str,
+    action: dict[str, Any],
+    account: str,
+    private_key: str,
+    from_addr: str,
+    unlocked: bool,
+) -> tuple[str, dict[str, Any], int]:
+    min_sig = _tsa_min_signature_expiry(rpc_url, tsa_addr)
+    refreshed = dict(action)
+    refreshed["expiry"] = int(time.time()) + min_sig
+
+    tx_out = cast_send(
+        rpc_url,
+        account or None,
+        tsa_addr,
+        "signActionData((uint256,uint256,address,bytes,uint256,address,address),bytes)",
+        _format_action_tuple(refreshed),
+        "0x",
+        private_key=private_key or None,
+        from_addr=from_addr or None,
+        unlocked=unlocked,
+    )
+    tx_hash = _extract_tx_hash(tx_out)
+    receipt = _get_receipt(rpc_url, tx_hash)
+    signed = _decode_action_signed_from_receipt(receipt, tsa_addr)
+    block_no_raw = receipt.get("blockNumber", "0x0")
+    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
+    signed_at = _get_block_timestamp(rpc_url, block_no)
+    return tx_hash, signed, signed_at
 
 
 def _http_post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -340,10 +435,10 @@ def _resolve_asset_name(fallback_asset_name: str, asset_addr: str, rpc_url: str)
     return symbol
 
 
-def _submit_deposit_to_derive_api(
+def _submit_deposit_to_derive_api_from_action(
     *,
     rpc_url: str,
-    receipt_tx_hash: str,
+    action: dict[str, Any],
     tsa_addr: str,
     account: str,
     private_key: str,
@@ -351,8 +446,6 @@ def _submit_deposit_to_derive_api(
     x_lyra_wallet: str,
     fallback_asset_name: str,
 ) -> dict[str, Any]:
-    receipt = _get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
     dep = _decode_deposit_module_data(action["data"])
     decimals = _erc20_decimals(rpc_url, dep["asset"])
     amount_str = _to_decimal_str(dep["amount"], decimals)
@@ -419,6 +512,31 @@ def _submit_deposit_to_derive_api(
     }
 
 
+def _submit_deposit_to_derive_api(
+    *,
+    rpc_url: str,
+    receipt_tx_hash: str,
+    tsa_addr: str,
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    fallback_asset_name: str,
+) -> dict[str, Any]:
+    receipt = _get_receipt(rpc_url, receipt_tx_hash)
+    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
+    return _submit_deposit_to_derive_api_from_action(
+        rpc_url=rpc_url,
+        action=action,
+        tsa_addr=tsa_addr,
+        account=account,
+        private_key=private_key,
+        api_url=api_url,
+        x_lyra_wallet=x_lyra_wallet,
+        fallback_asset_name=fallback_asset_name,
+    )
+
+
 def _decode_withdraw_module_data(data_hex: str) -> dict[str, Any]:
     if not data_hex.startswith("0x"):
         raise ValueError(f"invalid data hex: {data_hex}")
@@ -468,10 +586,10 @@ def _post_private_withdraw(
     return out
 
 
-def _submit_withdraw_to_derive_api(
+def _submit_withdraw_to_derive_api_from_action(
     *,
     rpc_url: str,
-    receipt_tx_hash: str,
+    action: dict[str, Any],
     tsa_addr: str,
     account: str,
     private_key: str,
@@ -479,8 +597,6 @@ def _submit_withdraw_to_derive_api(
     x_lyra_wallet: str,
     fallback_asset_name: str,
 ) -> dict[str, Any]:
-    receipt = _get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
     wd = _decode_withdraw_module_data(action["data"])
     decimals = _erc20_decimals(rpc_url, wd["asset"])
     amount_str = _to_decimal_str(wd["amount"], decimals)
@@ -546,6 +662,100 @@ def _submit_withdraw_to_derive_api(
         "apiId": private_resp.get("id"),
     }
 
+
+def _submit_withdraw_to_derive_api(
+    *,
+    rpc_url: str,
+    receipt_tx_hash: str,
+    tsa_addr: str,
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    fallback_asset_name: str,
+) -> dict[str, Any]:
+    receipt = _get_receipt(rpc_url, receipt_tx_hash)
+    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
+    return _submit_withdraw_to_derive_api_from_action(
+        rpc_url=rpc_url,
+        action=action,
+        tsa_addr=tsa_addr,
+        account=account,
+        private_key=private_key,
+        api_url=api_url,
+        x_lyra_wallet=x_lyra_wallet,
+        fallback_asset_name=fallback_asset_name,
+    )
+
+
+def _ensure_api_state(state: dict[str, Any]) -> None:
+    if "apiSubmitted" not in state or not isinstance(state.get("apiSubmitted"), dict):
+        state["apiSubmitted"] = {}
+
+
+def _action_meta_from_chain(
+    *,
+    rpc_url: str,
+    receiver_addr: str,
+    tsa_addr: str,
+    guid: str,
+) -> tuple[dict[str, Any], int, str]:
+    handled_log = _find_message_handled_log_for_guid(rpc_url, receiver_addr, guid)
+    tx_hash = str(handled_log.get("transactionHash"))
+    if not tx_hash:
+        raise RuntimeError(f"missing tx hash for MessageHandled guid={guid}")
+
+    receipt = _get_receipt(rpc_url, tx_hash)
+    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
+
+    block_no_raw = receipt.get("blockNumber", "0x0")
+    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
+    signed_at = _get_block_timestamp(rpc_url, block_no)
+    return action, signed_at, tx_hash
+
+
+def _submit_api_for_action(
+    *,
+    action_type: int,
+    rpc_url: str,
+    action: dict[str, Any],
+    tsa_addr: str,
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    fallback_asset_name: str,
+) -> dict[str, Any]:
+    if action_type == ACTION_DEPOSIT_INTENT:
+        return _submit_deposit_to_derive_api_from_action(
+            rpc_url=rpc_url,
+            action=action,
+            tsa_addr=tsa_addr,
+            account=account,
+            private_key=private_key,
+            api_url=api_url,
+            x_lyra_wallet=x_lyra_wallet,
+            fallback_asset_name=fallback_asset_name,
+        )
+    if action_type == ACTION_RETURN_REQUEST:
+        return _submit_withdraw_to_derive_api_from_action(
+            rpc_url=rpc_url,
+            action=action,
+            tsa_addr=tsa_addr,
+            account=account,
+            private_key=private_key,
+            api_url=api_url,
+            x_lyra_wallet=x_lyra_wallet,
+            fallback_asset_name=fallback_asset_name,
+        )
+    raise RuntimeError(f"API submit unsupported for action type {action_type}")
+
+
+def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdraw_api: bool) -> bool:
+    return (action_type == ACTION_DEPOSIT_INTENT and submit_deposit_api) or (
+        action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
+    )
+
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -577,6 +787,11 @@ def main(
         "--return-requests/--no-return-requests",
         help="Enable/disable handling of ReturnRequest messages.",
     ),
+    include_return_requests: bool = typer.Option(
+        False,
+        "--include-return-requests",
+        help="Deprecated compatibility flag (return requests are enabled by default).",
+    ),
     broadcast: bool = typer.Option(False, help="Send onchain transactions (default: dry-run)"),
     private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
     from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
@@ -592,6 +807,12 @@ def main(
         False,
         "--submit-withdraw-api",
         help="After handling ReturnRequest, submit matching private/withdraw request to Derive API.",
+    ),
+    api_signature_max_age_seconds: int = typer.Option(
+        300,
+        "--api-signature-max-age-seconds",
+        min=1,
+        help="If signed action is older than this, re-sign action before submitting Derive API request.",
     ),
     derive_api_url: str = typer.Option(
         "",
@@ -637,12 +858,15 @@ def main(
         raise ValueError("--submit-withdraw-api requires ACCOUNT or --private-key for signing API auth/payload")
 
     state = _load_state(state_file, start_block)
+    _ensure_api_state(state)
     next_block = int(state.get("nextBlock", start_block))
 
     allowed_actions: set[int] = set()
     if deposit_intents:
         allowed_actions.add(ACTION_DEPOSIT_INTENT)
     if return_requests:
+        allowed_actions.add(ACTION_RETURN_REQUEST)
+    if include_return_requests:
         allowed_actions.add(ACTION_RETURN_REQUEST)
     if not allowed_actions:
         raise ValueError("no actions enabled; use --deposit-intents and/or --return-requests")
@@ -680,7 +904,8 @@ def main(
                 allow_fail=True,
             )
             already_handled = already_handled_raw.strip().lower() == "true"
-            if already_handled:
+
+            if already_handled and not _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
                 continue
 
             attempts += 1
@@ -694,61 +919,102 @@ def main(
 
             if broadcast:
                 try:
-                    value_wei = None
-                    pending_raw = cast_call(
-                        rpc_url,
-                        receiver_addr,
-                        "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
-                        guid,
-                        allow_fail=True,
-                    )
-                    if action == ACTION_DEPOSIT_INTENT:
-                        if pending_raw == "N/A":
-                            raise RuntimeError("failed to read pendingMessages for fee quote")
-                        fee = _quote_ack_native_fee(rpc_url, receiver_addr, pending_raw)
-                        fee_with_buffer = fee + (fee * lz_fee_buffer_bps) // 10_000
-                        value_wei = str(fee_with_buffer)
-                        item["quotedAckNativeFee"] = str(fee)
-                        item["valueWei"] = value_wei
+                    # 1) Ensure action is signed onchain (either fresh handleMessage or already handled lookup/reissue)
+                    action_data: dict[str, Any] | None = None
+                    signed_at: int | None = None
 
-                    tx = cast_send(
-                        rpc_url,
-                        account or None,
-                        receiver_addr,
-                        "handleMessage(bytes32)",
-                        guid,
-                        value_wei=value_wei,
-                        private_key=pk or None,
-                        from_addr=sender or None,
-                        unlocked=use_unlocked,
-                    )
-                    tx_hash = _extract_tx_hash(tx)
-                    item["tx"] = tx_hash
+                    if not already_handled:
+                        value_wei = None
+                        pending_raw = cast_call(
+                            rpc_url,
+                            receiver_addr,
+                            "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+                            guid,
+                            allow_fail=True,
+                        )
+                        if action == ACTION_DEPOSIT_INTENT:
+                            if pending_raw == "N/A":
+                                raise RuntimeError("failed to read pendingMessages for fee quote")
+                            fee = _quote_ack_native_fee(rpc_url, receiver_addr, pending_raw)
+                            fee_with_buffer = fee + (fee * lz_fee_buffer_bps) // 10_000
+                            value_wei = str(fee_with_buffer)
+                            item["quotedAckNativeFee"] = str(fee)
+                            item["valueWei"] = value_wei
 
-                    if submit_deposit_api and action == ACTION_DEPOSIT_INTENT:
-                        api_meta = _submit_deposit_to_derive_api(
-                            rpc_url=rpc_url,
-                            receipt_tx_hash=tx_hash,
-                            tsa_addr=tsa_addr,
-                            account=account,
-                            private_key=pk,
-                            api_url=eff_api_url,
-                            x_lyra_wallet=eff_derive_wallet,
-                            fallback_asset_name=eff_asset_name,
+                        tx = cast_send(
+                            rpc_url,
+                            account or None,
+                            receiver_addr,
+                            "handleMessage(bytes32)",
+                            guid,
+                            value_wei=value_wei,
+                            private_key=pk or None,
+                            from_addr=sender or None,
+                            unlocked=use_unlocked,
                         )
-                        item["deriveApi"] = api_meta
-                    if submit_withdraw_api and action == ACTION_RETURN_REQUEST:
-                        api_meta = _submit_withdraw_to_derive_api(
-                            rpc_url=rpc_url,
-                            receipt_tx_hash=tx_hash,
-                            tsa_addr=tsa_addr,
-                            account=account,
-                            private_key=pk,
-                            api_url=eff_api_url,
-                            x_lyra_wallet=eff_derive_wallet,
-                            fallback_asset_name=eff_asset_name,
-                        )
-                        item["deriveApi"] = api_meta
+                        tx_hash = _extract_tx_hash(tx)
+                        item["tx"] = tx_hash
+
+                        if _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
+                            receipt = _get_receipt(rpc_url, tx_hash)
+                            action_data = _decode_action_signed_from_receipt(receipt, tsa_addr)
+                            block_no_raw = receipt.get("blockNumber", "0x0")
+                            block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
+                            signed_at = _get_block_timestamp(rpc_url, block_no)
+                    else:
+                        item["status"] = "already-handled"
+
+                    # 2) Optional API submit path for deposit/withdraw
+                    if _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
+                        api_submitted = state["apiSubmitted"].get(guid)
+                        if api_submitted:
+                            item["status"] = "api-already-submitted"
+                            item["deriveApi"] = api_submitted.get("deriveApi", {})
+                        else:
+                            if action_data is None or signed_at is None:
+                                action_data, signed_at, source_tx = _action_meta_from_chain(
+                                    rpc_url=rpc_url,
+                                    receiver_addr=receiver_addr,
+                                    tsa_addr=tsa_addr,
+                                    guid=guid,
+                                )
+                                item["sourceSignedTx"] = source_tx
+
+                            age_sec = int(time.time()) - int(signed_at)
+                            item["signedAgeSec"] = str(age_sec)
+
+                            if age_sec > api_signature_max_age_seconds:
+                                reissue_tx, action_data, signed_at = _reissue_action_signature(
+                                    rpc_url=rpc_url,
+                                    tsa_addr=tsa_addr,
+                                    action=action_data,
+                                    account=account,
+                                    private_key=pk,
+                                    from_addr=sender,
+                                    unlocked=use_unlocked,
+                                )
+                                item["reissuedTx"] = reissue_tx
+                                item["signedAgeSec"] = "0"
+
+                            api_meta = _submit_api_for_action(
+                                action_type=action,
+                                rpc_url=rpc_url,
+                                action=action_data,
+                                tsa_addr=tsa_addr,
+                                account=account,
+                                private_key=pk,
+                                api_url=eff_api_url,
+                                x_lyra_wallet=eff_derive_wallet,
+                                fallback_asset_name=eff_asset_name,
+                            )
+                            item["deriveApi"] = api_meta
+                            state["apiSubmitted"][guid] = {
+                                "action": _action_name(action),
+                                "submittedAt": int(time.time()),
+                                "deriveApi": api_meta,
+                            }
+                            _save_state(state_file, state)
+
                     item["status"] = "sent"
                     sent += 1
                 except Exception as exc:
