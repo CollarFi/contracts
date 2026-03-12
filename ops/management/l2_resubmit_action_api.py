@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -193,11 +192,9 @@ def _derive_reissue_nonce(rpc_url: str, loan_id: int) -> int:
         raise RuntimeError(f"loanId too large for nonce suffix (max={MAX_LOAN_ID_FOR_NONCE_SUFFIX}, got={loan_id})")
 
     # Mirror receiver nonce convention:
-    # nonce = timestamp_ms || random3 || loanId(6 digits)
+    # nonce = timestamp_sec || loanId(6 digits)
     chain_now = _latest_block_timestamp(rpc_url)
-    timestamp_ms = chain_now * 1_000
-    random3 = secrets.randbelow(1_000)
-    return (timestamp_ms * 1_000_000_000) + (random3 * 1_000_000) + loan_id
+    return (chain_now * 1_000_000) + loan_id
 
 
 def _wallet_sign(message: str, *, no_hash: bool, account: str, private_key: str) -> str:

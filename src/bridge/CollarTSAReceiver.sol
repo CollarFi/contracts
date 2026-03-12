@@ -421,14 +421,12 @@ contract CollarTSAReceiver is AccessControl, OApp {
         return _quote(remoteEid, abi.encode(message), options, false);
     }
 
-    function _deriveActionNonce(uint256 loanId, bytes32 entropy) internal view returns (uint256) {
+    function _deriveActionNonce(uint256 loanId) internal view returns (uint256) {
         if (loanId > 999_999) {
             revert CTR_LoanIdTooLargeForNonce();
         }
-        uint256 timestampMs = block.timestamp * 1_000;
-        uint256 random3 = uint256(entropy) % 1_000;
-        uint256 loanIdSuffix = loanId % 1_000_000;
-        return (timestampMs * 1_000_000_000) + (random3 * 1_000_000) + loanIdSuffix;
+        uint256 timestampSec = block.timestamp;
+        return (timestampSec * 1_000_000) + loanId;
     }
 
     function _signDeposit(CollarLZMessages.Message memory message, bytes32 guid) internal {
@@ -446,9 +444,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
             amount: message.amount, asset: wrappedDepositAsset, managerForNewAccount: address(0)
         });
 
-        uint256 nonce = _deriveActionNonce(
-            message.loanId, keccak256(abi.encodePacked(guid, message.socketMessageId, message.subaccountId, message.loanId))
-        );
+        guid;
+        uint256 nonce = _deriveActionNonce(message.loanId);
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: message.subaccountId,
@@ -471,9 +468,8 @@ contract CollarTSAReceiver is AccessControl, OApp {
         IWithdrawalModule.WithdrawalData memory withdrawalData =
             IWithdrawalModule.WithdrawalData({asset: wrappedDepositAsset, assetAmount: message.amount});
 
-        uint256 nonce = _deriveActionNonce(
-            message.loanId, keccak256(abi.encodePacked(guid, message.socketMessageId, message.subaccountId, message.loanId))
-        );
+        guid;
+        uint256 nonce = _deriveActionNonce(message.loanId);
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: message.subaccountId,

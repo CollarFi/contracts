@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import secrets
 import time
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -265,10 +264,8 @@ def _derive_reissue_nonce(chain_now: int, loan_id: int) -> int:
         raise RuntimeError(f"loanId too large for nonce suffix (max={MAX_LOAN_ID_FOR_NONCE_SUFFIX}, got={loan_id})")
 
     # Mirror receiver nonce convention:
-    # nonce = timestamp_ms || random3 || loanId(6 digits)
-    timestamp_ms = chain_now * 1_000
-    random3 = secrets.randbelow(1_000)
-    return (timestamp_ms * 1_000_000_000) + (random3 * 1_000_000) + loan_id
+    # nonce = timestamp_sec || loanId(6 digits)
+    return (chain_now * 1_000_000) + loan_id
 
 
 def _format_action_tuple(action: dict[str, Any]) -> str:
