@@ -235,7 +235,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
 
             loanStore.recordCollateral(message.loanId, message.asset, message.amount);
 
-            _signDeposit(message);
+            _signDeposit(message, guid);
             _sendAck(message, CollarLZMessages.Action.DepositConfirmed);
         } else if (message.action == CollarLZMessages.Action.ReturnRequest) {
             if (message.subaccountId != tsa.subAccount()) {
@@ -420,7 +420,14 @@ contract CollarTSAReceiver is AccessControl, OApp {
         return _quote(remoteEid, abi.encode(message), options, false);
     }
 
-    function _signDeposit(CollarLZMessages.Message memory message) internal {
+    function _deriveActionNonce(uint256 loanId, bytes32 entropy) internal view returns (uint256) {
+        uint256 timestampMs = block.timestamp * 1_000;
+        uint256 random3 = uint256(entropy) % 1_000;
+        uint256 loanIdSuffix = loanId % 1_000_000;
+        return (timestampMs * 1_000_000_000) + (random3 * 1_000_000) + loanIdSuffix;
+    }
+
+    function _signDeposit(CollarLZMessages.Message memory message, bytes32 guid) internal {
         ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
         (, address depositModule,,,,) = tsa.getCollarTSAAddresses();
         (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
@@ -435,9 +442,13 @@ contract CollarTSAReceiver is AccessControl, OApp {
             amount: message.amount, asset: wrappedDepositAsset, managerForNewAccount: address(0)
         });
 
+        uint256 nonce = _deriveActionNonce(
+            message.loanId, keccak256(abi.encodePacked(guid, message.socketMessageId, message.subaccountId, message.loanId))
+        );
+
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: message.subaccountId,
-            nonce: uint256(message.socketMessageId),
+            nonce: nonce,
             module: IMatchingModule(depositModule),
             data: abi.encode(depositData),
             expiry: block.timestamp + params.minSignatureExpiry,
@@ -456,7 +467,9 @@ contract CollarTSAReceiver is AccessControl, OApp {
         IWithdrawalModule.WithdrawalData memory withdrawalData =
             IWithdrawalModule.WithdrawalData({asset: wrappedDepositAsset, assetAmount: message.amount});
 
-        uint256 nonce = message.socketMessageId != bytes32(0) ? uint256(message.socketMessageId) : uint256(guid);
+        uint256 nonce = _deriveActionNonce(
+            message.loanId, keccak256(abi.encodePacked(guid, message.socketMessageId, message.subaccountId, message.loanId))
+        );
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: message.subaccountId,

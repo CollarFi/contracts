@@ -247,7 +247,7 @@ contract LZMessagingTest is Test {
         IActionVerifier.Action memory action = tsa.getLastAction();
         assertEq(address(action.module), tsa.depositModule());
         assertEq(action.subaccountId, message.subaccountId);
-        assertEq(action.nonce, uint256(message.socketMessageId));
+        assertEq(action.nonce, _expectedActionNonce(message.loanId, guid, message.socketMessageId, message.subaccountId));
 
         CollarLZMessages.Message memory ackMessage = abi.decode(endpointL2.lastMessage(), (CollarLZMessages.Message));
         assertEq(endpointL2.lastDstEid(), L1_EID);
@@ -307,7 +307,7 @@ contract LZMessagingTest is Test {
         receiver.handleMessage(guid);
     }
 
-    function testHandleReturnRequestSignsWithdrawalWithGuidNonce() public {
+    function testHandleReturnRequestSignsWithdrawalWithLoanTaggedNonce() public {
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
 
         bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
@@ -320,7 +320,7 @@ contract LZMessagingTest is Test {
         IActionVerifier.Action memory action = tsa.getLastAction();
         assertEq(address(action.module), tsa.withdrawalModule());
         assertEq(action.subaccountId, message.subaccountId);
-        assertEq(action.nonce, uint256(guid));
+        assertEq(action.nonce, _expectedActionNonce(message.loanId, guid, message.socketMessageId, message.subaccountId));
     }
 
     function testHandleReturnRequestRevertsAfterTradeConfirmed() public {
@@ -638,6 +638,17 @@ contract LZMessagingTest is Test {
             takerNonce: 0,
             data: bytes("")
         });
+    }
+
+    function _expectedActionNonce(uint256 loanId, bytes32 guid, bytes32 socketMessageId, uint256 subaccountId)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 timestampMs = block.timestamp * 1_000;
+        uint256 random3 = uint256(keccak256(abi.encodePacked(guid, socketMessageId, subaccountId, loanId))) % 1_000;
+        uint256 loanIdSuffix = loanId % 1_000_000;
+        return (timestampMs * 1_000_000_000) + (random3 * 1_000_000) + loanIdSuffix;
     }
 
     function _deliverToReceiver(bytes32 guid, CollarLZMessages.Message memory message) internal {
