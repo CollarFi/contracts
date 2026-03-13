@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IntLib} from "lyra-utils/math/IntLib.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
 import {SafeCast} from "openzeppelin/utils/math/SafeCast.sol";
+import {ECDSA} from "openzeppelin/utils/cryptography/ECDSA.sol";
 import {DecimalMath} from "lyra-utils/decimals/DecimalMath.sol";
 import {SignedDecimalMath} from "lyra-utils/decimals/SignedDecimalMath.sol";
 import {ConvertDecimals} from "lyra-utils/decimals/ConvertDecimals.sol";
@@ -90,7 +91,13 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
         /// @dev External verifier for option pricing/delta/expiry checks to reduce TSA bytecode size.
         IOptionRiskVerifier optionRiskVerifier;
+
+        /// @dev Becomes true when an atomic withdrawal action is successfully signed via permit,
+        /// using nonce convention timestamp*1e6 + loanId.
+        mapping(uint256 => bool) withdrawExecuted;
     }
+
+    uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
 
     // keccak256(abi.encode(uint256(keccak256("lyra.storage.CollarTSA")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant CollarTSAStorageLocation =
@@ -206,6 +213,25 @@ contract CollarTSA is BaseOnChainSigningTSA {
         }
         _getCollarTSAStorage().rfqDelegateModule = newModule;
         emit CollarTsaRfqDelegateModuleSet(address(newModule));
+    }
+
+    function signActionViaPermit(IMatching.Action memory action, bytes memory extraData, bytes memory signerSig)
+        external
+        override
+        onlySubmitters
+    {
+        bytes32 hash = getActionTypedDataHash(action);
+        (address recovered, ECDSA.RecoverError error,) = ECDSA.tryRecover(hash, signerSig);
+        require(error == ECDSA.RecoverError.NoError && this.isSigner(recovered), "Invalid signature");
+
+        _signActionData(action, extraData);
+
+        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        if (address(action.module) == address($.withdrawalModule)) {
+            uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
+            $.withdrawExecuted[loanId] = true;
+            emit WithdrawExecuted(loanId, action.nonce, hash);
+        }
     }
 
     ///////////////////////
@@ -483,6 +509,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return ($.baseFeed, $.depositModule, $.withdrawalModule, $.tradeModule, $.rfqModule, $.optionAsset);
     }
 
+    function withdrawExecuted(uint256 loanId) external view returns (bool) {
+        return _getCollarTSAStorage().withdrawExecuted[loanId];
+    }
+
     ///////////////////
     // Events/Errors //
     ///////////////////
@@ -490,6 +520,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     event CollarTSAParamsSet(CollarTSAParams params);
     event CollarCollateralManagementParamsSet(CollateralManagementParams collateralManagementParams);
     event CollarTsaRfqDelegateModuleSet(address module);
+    event WithdrawExecuted(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
 
     error CTSA_InvalidParams();
     error CTSA_InvalidActionExpiry();

@@ -78,6 +78,36 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         collarTsa.signActionData(action, "");
     }
 
+    function testSignActionViaPermitMarksWithdrawExecutedByLoanId() public {
+        uint256 usdcAmount = 1_000e6;
+        usdc.mint(address(this), usdcAmount);
+        usdc.approve(address(cash), usdcAmount);
+        cash.deposit(tsaSubacc, usdcAmount);
+
+        uint256 loanId = 42;
+        uint256 nonce = block.timestamp * 1_000_000 + loanId;
+
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsaSubacc,
+            nonce: nonce,
+            module: withdrawalModule,
+            data: _encodeWithdrawData(500e6, address(cash)),
+            expiry: block.timestamp + 8 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        bytes32 typedHash = collarTsa.getActionTypedDataHash(action);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, typedHash);
+        bytes memory signerSig = abi.encodePacked(r, s, v);
+
+        collarTsa.setSubmitter(address(this), true);
+
+        assertFalse(collarTsa.withdrawExecuted(loanId));
+        collarTsa.signActionViaPermit(action, "", signerSig);
+        assertTrue(collarTsa.withdrawExecuted(loanId));
+    }
+
     function testRejectsCashWithdrawalWhenInsufficient() public {
         uint256 usdcAmount = 100e6;
         usdc.mint(address(this), usdcAmount);
