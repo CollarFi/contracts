@@ -78,7 +78,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         collarTsa.signActionData(action, "");
     }
 
-    function testSignActionViaPermitMarksWithdrawExecutedByLoanId() public {
+    function testSignActionViaPermitRecordsWithdrawNonceByLoanId() public {
         uint256 usdcAmount = 1_000e6;
         usdc.mint(address(this), usdcAmount);
         usdc.approve(address(cash), usdcAmount);
@@ -104,8 +104,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         collarTsa.setSubmitter(address(this), true);
 
         assertFalse(collarTsa.withdrawExecuted(loanId));
+        assertEq(collarTsa.withdrawExecutionNonce(loanId), 0);
         collarTsa.signActionViaPermit(action, "", signerSig);
-        assertTrue(collarTsa.withdrawExecuted(loanId));
+        assertEq(collarTsa.withdrawExecutionNonce(loanId), nonce);
+        // Direct signActionViaPermit call only records nonce; execution proof requires module nonce consumption.
+        assertFalse(collarTsa.withdrawExecuted(loanId));
     }
 
     function testRejectsCashWithdrawalWhenInsufficient() public {

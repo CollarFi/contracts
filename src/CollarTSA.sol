@@ -24,6 +24,10 @@ import {ICollarTsaRfqDelegateModule} from "./interfaces/ICollarTsaRfqDelegateMod
 
 import {IOptionRiskVerifier} from "./interfaces/IOptionRiskVerifier.sol";
 
+interface IWithdrawalNonceTracker {
+    function usedNonces(address owner, uint256 nonce) external view returns (bool);
+}
+
 /// @title CollarTSA
 /// @notice TSA that allows selling covered calls and buying long puts for collar construction.
 contract CollarTSA is BaseOnChainSigningTSA {
@@ -92,9 +96,9 @@ contract CollarTSA is BaseOnChainSigningTSA {
         /// @dev External verifier for option pricing/delta/expiry checks to reduce TSA bytecode size.
         IOptionRiskVerifier optionRiskVerifier;
 
-        /// @dev Becomes true when an atomic withdrawal action is successfully signed via permit,
-        /// using nonce convention timestamp*1e6 + loanId.
-        mapping(uint256 => bool) withdrawExecuted;
+        /// @dev Last nonce recorded for loanId during atomic withdrawal signing.
+        /// Nonce convention: timestamp*1e6 + loanId.
+        mapping(uint256 => uint256) withdrawExecutionNonce;
     }
 
     uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
@@ -229,8 +233,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
         CollarTSAStorage storage $ = _getCollarTSAStorage();
         if (address(action.module) == address($.withdrawalModule)) {
             uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
-            $.withdrawExecuted[loanId] = true;
-            emit WithdrawExecuted(loanId, action.nonce, hash);
+            $.withdrawExecutionNonce[loanId] = action.nonce;
+            emit WithdrawNonceRecorded(loanId, action.nonce, hash);
         }
     }
 
@@ -509,8 +513,17 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return ($.baseFeed, $.depositModule, $.withdrawalModule, $.tradeModule, $.rfqModule, $.optionAsset);
     }
 
+    function withdrawExecutionNonce(uint256 loanId) external view returns (uint256) {
+        return _getCollarTSAStorage().withdrawExecutionNonce[loanId];
+    }
+
     function withdrawExecuted(uint256 loanId) external view returns (bool) {
-        return _getCollarTSAStorage().withdrawExecuted[loanId];
+        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        uint256 nonce = $.withdrawExecutionNonce[loanId];
+        if (nonce == 0 || address($.withdrawalModule) == address(0)) {
+            return false;
+        }
+        return IWithdrawalNonceTracker(address($.withdrawalModule)).usedNonces(address(this), nonce);
     }
 
     ///////////////////
@@ -520,7 +533,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     event CollarTSAParamsSet(CollarTSAParams params);
     event CollarCollateralManagementParamsSet(CollateralManagementParams collateralManagementParams);
     event CollarTsaRfqDelegateModuleSet(address module);
-    event WithdrawExecuted(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
+    event WithdrawNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
 
     error CTSA_InvalidParams();
     error CTSA_InvalidActionExpiry();
