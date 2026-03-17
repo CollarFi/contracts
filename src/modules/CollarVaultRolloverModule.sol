@@ -43,6 +43,18 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
         int256 realizedC
     );
 
+    event RolloverRequested(
+        uint256 indexed loanId,
+        address indexed borrower,
+        uint64 newMaturity,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint64 deadline,
+        bytes32 mandateHash,
+        bytes32 lzGuid
+    );
+
     function executeRollover(
         uint256 loanId,
         CollarVaultShared.RolloverMandate calldata mandate,
@@ -110,6 +122,18 @@ contract CollarVaultRolloverModule is ICollarVaultRolloverModule {
 
         guid = $.lzMessenger.sendRolloverIntentAutoFee{value: msg.value}(
             loanId, loan.collateralAsset, loan.principal, address(this), $.deriveSubaccountId, rolloverData, msg.sender
+        );
+
+        emit RolloverRequested(
+            loanId,
+            mandate.borrower,
+            mandate.newMaturity,
+            mandate.minCallStrike,
+            mandate.maxPutStrike,
+            mandate.minNetInterest,
+            mandate.deadline,
+            mandateHash,
+            guid
         );
     }
 

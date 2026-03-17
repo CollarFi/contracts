@@ -108,14 +108,23 @@ contract MockCollarTSA is ICollarTSA {
     address public withdrawalModule;
     address public rfqModule;
     address public wrappedDepositAsset;
+    address public cashAsset;
     uint256 public subaccountId;
+    uint256 public bridgeFee;
+    bytes32 public bridgeMessageId;
+    address public lastBridgeAsset;
+    uint256 public lastBridgeAmount;
+    address public lastBridgeReceiver;
+    uint256 public lastBridgeValue;
+    uint256 public bridgeCallCount;
     CollarTSAParams private params;
 
-    constructor(address wrappedDepositAsset_, address rfqModule_) {
+    constructor(address wrappedDepositAsset_, address cashAsset_, address rfqModule_) {
         depositModule = address(0x1234);
         withdrawalModule = address(0x5678);
         rfqModule = rfqModule_;
         wrappedDepositAsset = wrappedDepositAsset_;
+        cashAsset = cashAsset_;
         subaccountId = 1;
         params.minSignatureExpiry = 1 minutes;
         params.maxSignatureExpiry = 30 minutes;
@@ -142,11 +151,32 @@ contract MockCollarTSA is ICollarTSA {
         view
         returns (address, address, address, address, address, address, address)
     {
-        return (address(0), address(0), wrappedDepositAsset, address(0), address(0), address(0), address(0));
+        return (address(0), address(0), wrappedDepositAsset, cashAsset, address(0), address(0), address(0));
     }
 
     function subAccount() external view returns (uint256) {
         return subaccountId;
+    }
+
+    function setBridgeFee(uint256 fee_) external {
+        bridgeFee = fee_;
+    }
+
+    function setBridgeMessageId(bytes32 messageId_) external {
+        bridgeMessageId = messageId_;
+    }
+
+    function estimateBridgeFees(address, address, uint256) external view returns (uint256) {
+        return bridgeFee;
+    }
+
+    function bridgeToL1(address asset, uint256 amount, address receiver) external payable returns (bytes32 socketMessageId) {
+        lastBridgeAsset = asset;
+        lastBridgeAmount = amount;
+        lastBridgeReceiver = receiver;
+        lastBridgeValue = msg.value;
+        bridgeCallCount++;
+        return bridgeMessageId;
     }
 }
 
@@ -158,7 +188,9 @@ contract LZMessagingTest is Test {
     CollarLoanStore internal loanStore;
     MockRfqModule internal rfqModule;
     MockERC20 internal token;
+    MockERC20 internal settlementToken;
     MockWrappedDepositAsset internal wrappedDepositAsset;
+    MockWrappedDepositAsset internal wrappedCashAsset;
     MockEndpointV2 internal endpointL1;
     MockEndpointV2 internal endpointL2;
     address internal vaultRecipient;
@@ -171,10 +203,12 @@ contract LZMessagingTest is Test {
         endpointL2 = new MockEndpointV2();
 
         token = new MockERC20("Mock", "MOCK", 18);
+        settlementToken = new MockERC20("Settlement", "SET", 6);
         wrappedDepositAsset = new MockWrappedDepositAsset(address(token));
+        wrappedCashAsset = new MockWrappedDepositAsset(address(settlementToken));
         socket = new MockSocketMessageTracker();
         rfqModule = new MockRfqModule();
-        tsa = new MockCollarTSA(address(wrappedDepositAsset), address(rfqModule));
+        tsa = new MockCollarTSA(address(wrappedDepositAsset), address(wrappedCashAsset), address(rfqModule));
         loanStore = new CollarLoanStore(address(this));
 
         messenger = new CollarVaultMessenger(address(this), address(this), address(endpointL1), L2_EID);
@@ -581,6 +615,162 @@ contract LZMessagingTest is Test {
         assertEq(uint8(stored.action), uint8(CollarLZMessages.Action.CollateralReturned));
         assertEq(stored.loanId, 1);
         assertEq(stored.socketMessageId, socketMessageId);
+    }
+
+    function testBridgePendingReturnAndNotifyBridgesAndStoresOnL1() public {
+        uint256 bridgeFee = 3;
+        bytes32 socketMessageId = bytes32(uint256(301));
+
+        tsa.setBridgeFee(bridgeFee);
+        tsa.setBridgeMessageId(socketMessageId);
+
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
+
+        (bytes32 bridgedMessageId, bytes32 lzGuid) =
+            receiver.bridgePendingReturnAndNotify{value: bridgeFee + 1}(1, address(token), 2e18);
+
+        assertEq(bridgedMessageId, socketMessageId);
+        assertEq(tsa.lastBridgeAsset(), address(token));
+        assertEq(tsa.lastBridgeAmount(), 2e18);
+        assertEq(tsa.lastBridgeReceiver(), vaultRecipient);
+        assertEq(tsa.lastBridgeValue(), bridgeFee);
+
+        CollarLZMessages.Message memory returnedMessage =
+            abi.decode(endpointL2.lastMessage(), (CollarLZMessages.Message));
+        assertEq(lzGuid, endpointL2.lastGuid());
+        assertEq(uint8(returnedMessage.action), uint8(CollarLZMessages.Action.CollateralReturned));
+        assertEq(returnedMessage.asset, address(token));
+        assertEq(returnedMessage.socketMessageId, socketMessageId);
+    }
+
+    function testBridgeNeutralCollateralAndNotifyBridgesAndStoresOnL1() public {
+        uint256 bridgeFee = 4;
+        bytes32 socketMessageId = bytes32(uint256(302));
+        bytes32 quoteHash = keccak256("quote");
+        uint256 takerNonce = 12;
+
+        tsa.setBridgeFee(bridgeFee);
+        tsa.setBridgeMessageId(socketMessageId);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        receiver.sendTradeConfirmed{value: 1}(
+            CollarTSAReceiver.TradeConfirmedParams({
+                loanId: 1,
+                asset: address(token),
+                amount: 0,
+                socketMessageId: bytes32(0),
+                quoteHash: quoteHash,
+                takerNonce: takerNonce,
+                callStrike: 0,
+                putStrike: 0,
+                expiry: 0,
+                realizedC: 0
+            })
+        );
+
+        (bytes32 bridgedMessageId, bytes32 lzGuid) =
+            receiver.bridgeNeutralCollateralAndNotify{value: bridgeFee + 1}(1, address(0xCAFE), 2e18);
+
+        assertEq(bridgedMessageId, socketMessageId);
+        assertEq(lzGuid, endpointL2.lastGuid());
+        assertEq(tsa.lastBridgeAsset(), address(token));
+        assertEq(tsa.lastBridgeAmount(), 2e18);
+        assertEq(tsa.lastBridgeReceiver(), vaultRecipient);
+
+        CollarLZMessages.Message memory returnedMessage =
+            abi.decode(endpointL2.lastMessage(), (CollarLZMessages.Message));
+        assertEq(uint8(returnedMessage.action), uint8(CollarLZMessages.Action.CollateralReturned));
+        assertEq(returnedMessage.asset, address(0xCAFE));
+        assertEq(returnedMessage.socketMessageId, socketMessageId);
+    }
+
+    function testBridgeSettlementAndNotifyBridgesCashAssetAndStoresOnL1() public {
+        uint256 bridgeFee = 5;
+        bytes32 socketMessageId = bytes32(uint256(303));
+        bytes32 quoteHash = keccak256("quote");
+        uint256 takerNonce = 13;
+
+        tsa.setBridgeFee(bridgeFee);
+        tsa.setBridgeMessageId(socketMessageId);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        receiver.sendTradeConfirmed{value: 1}(
+            CollarTSAReceiver.TradeConfirmedParams({
+                loanId: 1,
+                asset: address(token),
+                amount: 0,
+                socketMessageId: bytes32(0),
+                quoteHash: quoteHash,
+                takerNonce: takerNonce,
+                callStrike: 0,
+                putStrike: 0,
+                expiry: 0,
+                realizedC: 0
+            })
+        );
+
+        (bytes32 bridgedMessageId, bytes32 lzGuid) =
+            receiver.bridgeSettlementAndNotify{value: bridgeFee + 1}(1, address(0xBEEF), 100e6, 2e18);
+
+        assertEq(bridgedMessageId, socketMessageId);
+        assertEq(lzGuid, endpointL2.lastGuid());
+        assertEq(tsa.lastBridgeAsset(), address(settlementToken));
+        assertEq(tsa.lastBridgeAmount(), 100e6);
+        assertEq(tsa.lastBridgeReceiver(), vaultRecipient);
+
+        CollarLZMessages.Message memory settlementMessage =
+            abi.decode(endpointL2.lastMessage(), (CollarLZMessages.Message));
+        assertEq(uint8(settlementMessage.action), uint8(CollarLZMessages.Action.SettlementReport));
+        assertEq(settlementMessage.asset, address(0xBEEF));
+        assertEq(settlementMessage.amount, 100e6);
+        assertEq(settlementMessage.secondaryAmount, 2e18);
+        assertEq(settlementMessage.socketMessageId, socketMessageId);
+    }
+
+    function testBridgePendingReturnAndNotifyRevertsOnInsufficientValue() public {
+        tsa.setBridgeFee(3);
+
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_InsufficientValue.selector);
+        receiver.bridgePendingReturnAndNotify{value: 2}(1, address(token), 2e18);
+    }
+
+    function testBridgeSettlementAndNotifyRevertsIfAlreadyReported() public {
+        uint256 bridgeFee = 2;
+        bytes32 quoteHash = keccak256("quote");
+        uint256 takerNonce = 14;
+
+        tsa.setBridgeFee(bridgeFee);
+        tsa.setBridgeMessageId(bytes32(uint256(304)));
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        receiver.sendTradeConfirmed{value: 1}(
+            CollarTSAReceiver.TradeConfirmedParams({
+                loanId: 1,
+                asset: address(token),
+                amount: 0,
+                socketMessageId: bytes32(0),
+                quoteHash: quoteHash,
+                takerNonce: takerNonce,
+                callStrike: 0,
+                putStrike: 0,
+                expiry: 0,
+                realizedC: 0
+            })
+        );
+
+        receiver.bridgeSettlementAndNotify{value: bridgeFee + 1}(1, address(0xBEEF), 100e6, 0);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_SettlementAlreadyReported.selector);
+        receiver.sendSettlementReport{value: 1}(1, address(0xBEEF), 100e6, 0, bytes32(uint256(305)));
     }
 
     function testSendCollateralReturnedRevertsAfterTradeConfirmed() public {

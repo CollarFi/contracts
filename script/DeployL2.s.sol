@@ -9,8 +9,10 @@ import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarLoanStore} from "../src/CollarLoanStore.sol";
 import {CollarTSAReceiver} from "../src/bridge/CollarTSAReceiver.sol";
 import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {ICollarLoanStore} from "../src/interfaces/ICollarLoanStore.sol";
 import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol";
+import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
 import {BaseTSA} from "v2-matching/src/tokenizedSubaccounts/BaseTSA.sol";
@@ -73,6 +75,13 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - TSA_OPTION_MAX_TIME_TO_EXPIRY (default: 365 days)
 /// - TSA_PUT_MAX_PRICE_FACTOR (default: 1.1e18)
 /// - TSA_WORST_SPOT_SELL_PRICE (default: 0.99e18)
+///
+/// Optional L2->L1 WETH Socket bridge config:
+/// - WETH_ASSET                  (optional; defaults to WRAPPED_DEPOSIT_ASSET.wrappedAsset())
+/// - WETH_SOCKET_BRIDGE          (new Socket controller on L2)
+/// - WETH_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
+/// - WETH_MSG_GAS_LIMIT          (default: 100000)
+/// - WETH_PAYLOAD_SIZE           (default: 161)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
@@ -104,7 +113,7 @@ contract DeployL2 is Script {
             name: name
         });
 
-        (CollarTSA.CollarTSAParams memory tsaParams, CollarTSA.CollateralManagementParams memory collateral) =
+        (ICollarTSA.CollarTSAParams memory tsaParams, ICollarTSA.CollateralManagementParams memory collateral) =
             _buildDefaultCollarTsaParams();
 
         CollarTSA.CollarTSAInitParams memory collarInitParams = CollarTSA.CollarTSAInitParams({
@@ -128,9 +137,9 @@ contract DeployL2 is Script {
     function _buildDefaultCollarTsaParams()
         internal
         view
-        returns (CollarTSA.CollarTSAParams memory tsaParams, CollarTSA.CollateralManagementParams memory collateral)
+        returns (ICollarTSA.CollarTSAParams memory tsaParams, ICollarTSA.CollateralManagementParams memory collateral)
     {
-        tsaParams = CollarTSA.CollarTSAParams({
+        tsaParams = ICollarTSA.CollarTSAParams({
             minSignatureExpiry: vm.envOr("TSA_MIN_SIGNATURE_EXPIRY", uint256(30 minutes)),
             maxSignatureExpiry: vm.envOr("TSA_MAX_SIGNATURE_EXPIRY", uint256(6 hours)),
             optionVolSlippageFactor: vm.envOr("TSA_OPTION_VOL_SLIPPAGE_FACTOR", uint256(0.9e18)),
@@ -141,7 +150,7 @@ contract DeployL2 is Script {
             putMaxPriceFactor: vm.envOr("TSA_PUT_MAX_PRICE_FACTOR", uint256(1.1e18))
         });
 
-        collateral = CollarTSA.CollateralManagementParams({
+        collateral = ICollarTSA.CollateralManagementParams({
             worstSpotSellPrice: vm.envOr("TSA_WORST_SPOT_SELL_PRICE", uint256(0.99e18))
         });
     }
@@ -163,8 +172,14 @@ contract DeployL2 is Script {
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
         address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
+        address wethAsset = vm.envOr("WETH_ASSET", address(0));
+        address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
+        address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
+        uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
+        address wethAdapter = address(0);
 
         vm.startBroadcast();
 
@@ -224,6 +239,27 @@ contract DeployL2 is Script {
             receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
         }
 
+        if (wethSocketBridge != address(0) || wethSocketConnector != address(0)) {
+            if (wethSocketBridge == address(0) || wethSocketConnector == address(0)) {
+                revert("WETH_SOCKET_BRIDGE and WETH_SOCKET_CONNECTOR required together");
+            }
+
+            if (wethAsset == address(0)) {
+                wethAsset = address(IWrappedERC20Asset(vm.envAddress("WRAPPED_DEPOSIT_ASSET")).wrappedAsset());
+            }
+            if (wethAsset == address(0)) {
+                revert("WETH_ASSET required");
+            }
+
+            wethAdapter = address(
+                new SocketBridgeAdapterNew(
+                    wethAsset, wethSocketBridge, wethSocketConnector, wethMsgGasLimit, wethPayloadSize, "", ""
+                )
+            );
+            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
+            CollarTSA(tsaProxyAddr).setBridgeCoordinator(address(receiver));
+        }
+
         vm.stopBroadcast();
 
         string memory outPath = vm.envString("OUTPUT_JSON");
@@ -239,6 +275,7 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
+        json = vm.serializeAddress("addrs", "l2WethAdapter", wethAdapter);
         vm.writeJson(json, outPath);
 
         console2.log("L2 receiver", address(receiver));
@@ -250,6 +287,12 @@ contract DeployL2 is Script {
         console2.log("L2 optionRiskVerifier", optionRiskVerifierAddr);
         console2.log("L2 rfqVerifier", rfqVerifierAddr);
         console2.log("L2 lzEndpoint", lzEndpoint);
+        if (wethAdapter != address(0)) {
+            console2.log("L2 WETH adapter", wethAdapter);
+            console2.log("L2 WETH bridge asset", wethAsset);
+            console2.log("L2 WETH socket bridge", wethSocketBridge);
+            console2.log("L2 WETH socket connector", wethSocketConnector);
+        }
         console2.log("Wrote", outPath);
     }
 }

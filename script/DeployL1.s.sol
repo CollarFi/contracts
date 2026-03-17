@@ -140,7 +140,7 @@ contract DeployL1 is Script {
         dep.vault.setSettleModule(address(dep.settleModule));
         dep.vault.setRolloverModule(address(dep.rolloverModule));
         if (cfg.rfqSigner != address(0)) {
-            dep.vault.setRfqSigner(cfg.rfqSigner, true);
+            dep.vault.grantRole(dep.vault.RFQ_SIGNER_ROLE(), cfg.rfqSigner);
         }
 
         if (cfg.wethAsset != address(0)) {

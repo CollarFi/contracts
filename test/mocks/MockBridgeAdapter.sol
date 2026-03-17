@@ -6,6 +6,10 @@ import {IBridgeAdapter} from "../../src/interfaces/IBridgeAdapter.sol";
 contract MockBridgeAdapter is IBridgeAdapter {
     uint256 public fee;
     bytes32 public msgId;
+    address public lastReceiver;
+    uint256 public lastAmount;
+    uint256 public lastValue;
+    uint256 public bridgeCallCount;
 
     function setFee(uint256 fee_) external {
         fee = fee_;
@@ -23,5 +27,10 @@ contract MockBridgeAdapter is IBridgeAdapter {
         return fee;
     }
 
-    function bridge(address, uint256) external payable override {}
+    function bridge(address receiver, uint256 amount) external payable override {
+        lastReceiver = receiver;
+        lastAmount = amount;
+        lastValue = msg.value;
+        bridgeCallCount++;
+    }
 }

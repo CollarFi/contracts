@@ -36,7 +36,7 @@ def _describe_step(step_name: str) -> str:
         "relay_l1_to_l2_exact": "Relay exact LayerZero packet L1 → L2",
         "simulate_socket_finalized": "Mark socket transfer as finalized on fork",
         "fund_l2_receiver_for_deposit": "Ensure L2 receiver has bridged asset balance",
-        "grant_tsa_signer": "Grant receiver signer role on TSA",
+        "grant_tsa_signer": "Grant receiver and keeper signer roles on TSA",
         "l2_keeper_handle_deposit": "Run L2 keeper once to process deposit and send ACK",
         "relay_l2_to_l1_exact": "Relay exact LayerZero packet L2 → L1",
         "verify_expected_state": "Verify expected post-run protocol state",
@@ -293,10 +293,23 @@ def _ensure_l2_keeper_role(l2_rpc: str, receiver: str, keeper: str) -> dict:
 
 
 def _ensure_tsa_signer(l2_rpc: str, tsa: str, receiver: str) -> dict:
-    is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() == "true"
-    if is_signer:
-        return {"alreadySigner": True}
-    return {"alreadySigner": False, "setSignerTx": cast_send(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")}
+    updates: dict[str, object] = {}
+
+    receiver_is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() == "true"
+    if receiver_is_signer:
+        updates["receiverAlreadySigner"] = True
+    else:
+        updates["receiverAlreadySigner"] = False
+        updates["receiverSetSignerTx"] = cast_send(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")
+
+    keeper_is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", ANVIL_ADDR0).strip().lower() == "true"
+    if keeper_is_signer:
+        updates["keeperAlreadySigner"] = True
+    else:
+        updates["keeperAlreadySigner"] = False
+        updates["keeperSetSignerTx"] = cast_send(l2_rpc, tsa, "setSigner(address,bool)", ANVIL_ADDR0, "true")
+
+    return updates
 
 
 def _parse_keeper_output(raw: str) -> dict:

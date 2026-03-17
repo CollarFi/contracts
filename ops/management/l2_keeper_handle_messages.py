@@ -7,6 +7,7 @@ import time
 from decimal import Decimal, getcontext
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import typer
 from rich import print
@@ -43,6 +44,7 @@ ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
 ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
 MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 def _resolve_env_path(env_profile: str, l2_env_file: Path) -> Path:
@@ -361,13 +363,20 @@ def _post_private_deposit(
 
 
 def _erc20_decimals(rpc_url: str, asset: str) -> int:
-    raw = cast_call(rpc_url, asset, "decimals()(uint8)")
+    raw = cast_call(rpc_url, _metadata_asset(rpc_url, asset), "decimals()(uint8)")
     return _parse_uint(raw)
 
 
 def _erc20_symbol(rpc_url: str, asset: str) -> str:
-    raw = cast_call(rpc_url, asset, "symbol()(string)")
+    raw = cast_call(rpc_url, _metadata_asset(rpc_url, asset), "symbol()(string)")
     return raw.strip()
+
+
+def _metadata_asset(rpc_url: str, asset: str) -> str:
+    raw = cast_call(rpc_url, asset, "wrappedAsset()(address)", allow_fail=True).strip().split()[0]
+    if raw.startswith("0x") and raw.lower() != ZERO_ADDRESS:
+        return raw
+    return asset
 
 
 def _resolve_asset_name(fallback_asset_name: str, asset_addr: str, rpc_url: str) -> str:
@@ -379,6 +388,78 @@ def _resolve_asset_name(fallback_asset_name: str, asset_addr: str, rpc_url: str)
     if symbol == "WBTC":
         return "BTC"
     return symbol
+
+
+def _is_local_rpc(rpc_url: str) -> bool:
+    try:
+        parsed = urlparse(rpc_url)
+    except Exception:
+        return False
+    return parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+
+def _matching_addr(rpc_url: str, tsa_addr: str, configured_matching: str) -> str:
+    if configured_matching:
+        return configured_matching
+    raw = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+    )
+    return raw.strip().splitlines()[-1].strip()
+
+
+def _ensure_local_trade_executor(rpc_url: str, matching_addr: str, executor_addr: str) -> None:
+    if cast_call(rpc_url, matching_addr, "tradeExecutors(address)(bool)", executor_addr, allow_fail=True).strip().lower() == "true":
+        return
+
+    owner_addr = cast_call(rpc_url, matching_addr, "owner()(address)").strip()
+    cast_send(
+        rpc_url,
+        None,
+        matching_addr,
+        "setTradeExecutor(address,bool)",
+        executor_addr,
+        "true",
+        from_addr=owner_addr,
+        unlocked=True,
+    )
+
+
+def _submit_action_to_local_matching(
+    *,
+    rpc_url: str,
+    matching_addr: str,
+    action: dict[str, Any],
+    account: str,
+    private_key: str,
+    from_addr: str,
+    unlocked: bool,
+) -> dict[str, Any]:
+    sender_addr = wallet_address(account=account, private_key=private_key) if (account or private_key) else from_addr
+    _ensure_local_trade_executor(rpc_url, matching_addr, sender_addr)
+
+    tx_out = cast_send(
+        rpc_url,
+        account or None,
+        matching_addr,
+        "verifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes)",
+        f"[{_format_action_tuple(action)}]",
+        "[0x]",
+        "0x",
+        private_key=private_key or None,
+        from_addr=from_addr or None,
+        unlocked=unlocked,
+    )
+    tx_hash = extract_tx_hash(tx_out)
+    return {
+        "mode": "localMatching",
+        "matchingTx": tx_hash,
+        "typedDataHash": str(action["typedDataHash"]),
+        "subaccountId": str(action["subaccountId"]),
+        "nonce": str(action["nonce"]),
+        "expiry": str(action["expiry"]),
+    }
 
 
 def _submit_deposit_to_derive_api_from_action(
@@ -651,12 +732,26 @@ def _submit_api_for_action(
     rpc_url: str,
     action: dict[str, Any],
     tsa_addr: str,
+    matching_addr: str,
     account: str,
     private_key: str,
+    from_addr: str,
+    unlocked: bool,
     api_url: str,
     x_lyra_wallet: str,
     fallback_asset_name: str,
 ) -> dict[str, Any]:
+    if _is_local_rpc(rpc_url):
+        return _submit_action_to_local_matching(
+            rpc_url=rpc_url,
+            matching_addr=matching_addr,
+            action=action,
+            account=account,
+            private_key=private_key,
+            from_addr=from_addr,
+            unlocked=unlocked,
+        )
+
     if action_type == ACTION_DEPOSIT_INTENT:
         return _submit_deposit_to_derive_api_from_action(
             rpc_url=rpc_url,
@@ -787,10 +882,12 @@ def main(
         raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
     tsa_addr = cast_call(rpc_url, receiver_addr, "tsa()(address)").strip()
+    matching_addr = _matching_addr(rpc_url, tsa_addr, env.get("MATCHING", "").strip())
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
     eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
+    local_matching_submit = _is_local_rpc(rpc_url)
     deposit_intents = not no_deposit_intents
     return_requests = not no_return_requests
     submit_deposit_api = broadcast and (not no_submit_deposit_api)
@@ -801,7 +898,7 @@ def main(
             "API submission requires ACCOUNT or --private-key "
             "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
         )
-    if submit_deposit_api or submit_withdraw_api:
+    if (submit_deposit_api or submit_withdraw_api) and not local_matching_submit:
         signer_wallet = wallet_address(account=account, private_key=pk)
         assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
 
@@ -944,8 +1041,11 @@ def main(
                                     rpc_url=rpc_url,
                                     action=action_data,
                                     tsa_addr=tsa_addr,
+                                    matching_addr=matching_addr,
                                     account=account,
                                     private_key=pk,
+                                    from_addr=sender,
+                                    unlocked=use_unlocked,
                                     api_url=eff_api_url,
                                     x_lyra_wallet=eff_derive_wallet,
                                     fallback_asset_name=eff_asset_name,

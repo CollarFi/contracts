@@ -100,7 +100,7 @@ contract CollarVaultTest is Test {
         vault.setSocketVaultConfig(address(wbtc), IBridgeAdapter(address(adapter)));
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);
-        vault.setRfqSigner(rfqSigner, true);
+        vault.grantRole(vault.RFQ_SIGNER_ROLE(), rfqSigner);
         vault.setMaxMandateDuration(uint64(2 days));
 
         // fund liquidity
@@ -497,7 +497,22 @@ contract CollarVaultTest is Test {
         bytes32 mandateHash = vault.hashRolloverMandate(mandate);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateHash);
         bytes memory sig = abi.encodePacked(r, s, v);
+        uint64 expectedNonce = messenger.nonce() + 1;
+        bytes32 expectedGuid =
+            keccak256(abi.encodePacked(expectedNonce, loanId, CollarLZMessages.Action.RolloverIntent));
 
+        vm.expectEmit(true, true, false, true);
+        emit CollarVault.RolloverRequested(
+            loanId,
+            borrower,
+            mandate.newMaturity,
+            mandate.minCallStrike,
+            mandate.maxPutStrike,
+            mandate.minNetInterest,
+            mandate.deadline,
+            mandateHash,
+            expectedGuid
+        );
         vm.prank(keeper);
         bytes32 requestGuid = vault.executeRollover(loanId, mandate, sig, 26_500e6, 20_500e6);
 

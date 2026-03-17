@@ -4,9 +4,12 @@ pragma solidity ^0.8.20;
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
+import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
 
 import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarTSATestUtils} from "./utils/CollarTSATestUtils.sol";
+import {MockBridgeAdapter} from "./mocks/MockBridgeAdapter.sol";
 
 contract CollarTSA_ValidationTests is CollarTSATestUtils {
     function setUp() public override {
@@ -109,6 +112,68 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         assertEq(collarTsa.withdrawExecutionNonce(loanId), nonce);
         // Direct signActionViaPermit call only records nonce; execution proof requires module nonce consumption.
         assertFalse(collarTsa.withdrawExecuted(loanId));
+    }
+
+    function testEstimateBridgeFeesUsesConfiguredAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        adapter.setFee(123);
+
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+
+        assertEq(collarTsa.estimateBridgeFees(bridgeAsset, address(0xCAFE), 1e18), 123);
+    }
+
+    function testEstimateBridgeFeesRevertsWithoutConfig() public {
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.estimateBridgeFees(address(0xBEEF), address(0xCAFE), 1e18);
+    }
+
+    function testSetSocketBridgeConfigAllowsClearingAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, IBridgeAdapter(address(0)));
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.estimateBridgeFees(bridgeAsset, address(0xCAFE), 1e18);
+    }
+
+    function testBridgeToL1RequiresCoordinator() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        adapter.setFee(5);
+        adapter.setMessageId(bytes32(uint256(11)));
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(address(0xBEEF));
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.bridgeToL1{value: 5}(bridgeAsset, 1e18, address(0xCAFE));
+    }
+
+    function testBridgeToL1UsesConfiguredAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        address coordinator = address(0xBEEF);
+        uint256 amount = 3e18;
+        uint256 fee = 5;
+        bytes32 messageId = bytes32(uint256(42));
+
+        adapter.setFee(fee);
+        adapter.setMessageId(messageId);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(coordinator);
+
+        vm.deal(coordinator, fee);
+        vm.prank(coordinator);
+        bytes32 returnedMessageId = collarTsa.bridgeToL1{value: fee}(bridgeAsset, amount, address(0xCAFE));
+
+        assertEq(returnedMessageId, messageId);
+        assertEq(adapter.lastReceiver(), address(0xCAFE));
+        assertEq(adapter.lastAmount(), amount);
+        assertEq(adapter.lastValue(), fee);
+        assertEq(adapter.bridgeCallCount(), 1);
     }
 
     function testRejectsCashWithdrawalWhenInsufficient() public {
@@ -225,7 +290,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, expiry);
 
-        CollarTSA.CollarTSAParams memory params = collarTsa.getCollarTSAParams();
+        ICollarTSA.CollarTSAParams memory params = collarTsa.getCollarTSAParams();
         params.putMaxPriceFactor = 1e18;
         collarTsa.setCollarTSAParams(params);
 

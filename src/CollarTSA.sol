@@ -5,6 +5,7 @@ import {IntLib} from "lyra-utils/math/IntLib.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
 import {SafeCast} from "openzeppelin/utils/math/SafeCast.sol";
 import {ECDSA} from "openzeppelin/utils/cryptography/ECDSA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DecimalMath} from "lyra-utils/decimals/DecimalMath.sol";
 import {SignedDecimalMath} from "lyra-utils/decimals/SignedDecimalMath.sol";
 import {ConvertDecimals} from "lyra-utils/decimals/ConvertDecimals.sol";
@@ -21,6 +22,11 @@ import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IRfqVerifier} from "./interfaces/IRfqVerifier.sol";
 import {ICollarTsaRfqDelegateModule} from "./interfaces/ICollarTsaRfqDelegateModule.sol";
+import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
+import {ICollarTSA} from "./interfaces/ICollarTSA.sol";
+import {CollarTSABridgeHelper} from "./bridge/CollarTSABridgeHelper.sol";
+import {CollarTSABridgeLib} from "./libraries/CollarTSABridgeLib.sol";
+import {CollarTSAStorageLib} from "./libraries/CollarTSAStorageLib.sol";
 
 import {IOptionRiskVerifier} from "./interfaces/IOptionRiskVerifier.sol";
 
@@ -37,6 +43,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
     using DecimalMath for uint256;
     using SignedDecimalMath for int256;
 
+    address private immutable bridgeHelper;
+
     struct CollarTSAInitParams {
         ISpotFeed baseFeed;
         IDepositModule depositModule;
@@ -48,72 +56,18 @@ contract CollarTSA is BaseOnChainSigningTSA {
         IRfqVerifier rfqVerifier;
         ICollarTsaRfqDelegateModule rfqDelegateModule;
         address loanStore;
-        CollarTSAParams tsaParams;
-        CollateralManagementParams collateralManagementParams;
-    }
-
-    struct CollarTSAParams {
-        /// @dev Minimum time before an action is expired
-        uint256 minSignatureExpiry;
-        /// @dev Maximum time before an action is expired
-        uint256 maxSignatureExpiry;
-        /// @dev The worst difference to vol that is accepted for pricing options (e.g. 0.9e18)
-        uint256 optionVolSlippageFactor;
-        /// @dev The highest delta for calls accepted by the TSA after vol/fwd slippage is applied (e.g. 0.15e18).
-        uint256 callMaxDelta;
-        /// @dev Maximum amount of negative cash allowed when opening option positions. (e.g. -100e18)
-        int256 maxNegCash;
-        /// @dev Lower bound for option expiry
-        uint256 optionMinTimeToExpiry;
-        /// @dev Upper bound for option expiry
-        uint256 optionMaxTimeToExpiry;
-        /// @dev Maximum price factor for long puts relative to mark (e.g. 1.05e18).
-        uint256 putMaxPriceFactor;
-    }
-
-    struct CollateralManagementParams {
-        uint256 worstSpotSellPrice;
-    }
-
-    /// @custom:storage-location erc7201:lyra.storage.CollarTSA
-    struct CollarTSAStorage {
-        IDepositModule depositModule;
-        IWithdrawalModule withdrawalModule;
-        ITradeModule tradeModule;
-        IRfqModule rfqModule;
-        IOptionAsset optionAsset;
-        ISpotFeed baseFeed;
-        IRfqVerifier rfqVerifier;
-        ICollarTsaRfqDelegateModule rfqDelegateModule;
-        CollarTSAParams params;
-        CollateralManagementParams collateralManagementParams;
-        /// @dev Only one hash is considered valid at a time, and it is revoked when a new one comes in.
-        bytes32 lastSeenHash;
-
-        /// @dev L2 loan store to enforce borrower mandates and track per-loan collateral accounting.
-        address loanStore;
-
-        /// @dev External verifier for option pricing/delta/expiry checks to reduce TSA bytecode size.
-        IOptionRiskVerifier optionRiskVerifier;
-
-        /// @dev Last nonce recorded for loanId during atomic withdrawal signing.
-        /// Nonce convention: timestamp*1e6 + loanId.
-        mapping(uint256 => uint256) withdrawExecutionNonce;
+        ICollarTSA.CollarTSAParams tsaParams;
+        ICollarTSA.CollateralManagementParams collateralManagementParams;
     }
 
     uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
 
-    // keccak256(abi.encode(uint256(keccak256("lyra.storage.CollarTSA")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant CollarTSAStorageLocation =
-        0x62b72349c5c9dfc4c2d0e5f1b0600421e6f0d0f8ac3a0ffdf4c4c0b7d4b4b000;
-
-    function _getCollarTSAStorage() private pure returns (CollarTSAStorage storage $) {
-        assembly {
-            $.slot := CollarTSAStorageLocation
-        }
+    function _getCollarTSAStorage() private pure returns (CollarTSAStorageLib.CollarTSAStorage storage $) {
+        return CollarTSAStorageLib.get();
     }
 
     constructor() {
+        bridgeHelper = address(new CollarTSABridgeHelper());
         _disableInitializers();
     }
 
@@ -125,7 +79,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     ) external reinitializer(6) {
         __BaseTSA_init(initialOwner, initParams);
 
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
 
         $.depositModule = collarInitParams.depositModule;
         $.withdrawalModule = collarInitParams.withdrawalModule;
@@ -158,11 +112,11 @@ contract CollarTSA is BaseOnChainSigningTSA {
     ///////////
 
     /// @notice Set CollarTSA parameters.
-    function setCollarTSAParams(CollarTSAParams memory newParams) external onlyOwner {
+    function setCollarTSAParams(ICollarTSA.CollarTSAParams memory newParams) external onlyOwner {
         _setCollarTSAParams(newParams);
     }
 
-    function _setCollarTSAParams(CollarTSAParams memory newParams) internal {
+    function _setCollarTSAParams(ICollarTSA.CollarTSAParams memory newParams) internal {
         if (
             newParams.minSignatureExpiry < 1 minutes || newParams.minSignatureExpiry > newParams.maxSignatureExpiry
                 || newParams.optionVolSlippageFactor > 1e18 || newParams.callMaxDelta >= 0.5e18
@@ -177,14 +131,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     /// @notice Set collateral management parameters.
-    function setCollateralManagementParams(CollateralManagementParams memory newCollateralMgmtParams)
+    function setCollateralManagementParams(ICollarTSA.CollateralManagementParams memory newCollateralMgmtParams)
         external
         onlyOwner
     {
         _setCollateralManagementParams(newCollateralMgmtParams);
     }
 
-    function _setCollateralManagementParams(CollateralManagementParams memory newCollateralMgmtParams) internal {
+    function _setCollateralManagementParams(ICollarTSA.CollateralManagementParams memory newCollateralMgmtParams) internal {
         if (newCollateralMgmtParams.worstSpotSellPrice > 1e18 || newCollateralMgmtParams.worstSpotSellPrice < 0.8e18) {
             revert CTSA_InvalidParams();
         }
@@ -193,7 +147,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         emit CollarCollateralManagementParamsSet(newCollateralMgmtParams);
     }
 
-    function loanStore() public view returns (address) {
+    function loanStore() external view returns (address) {
         return _getCollarTSAStorage().loanStore;
     }
 
@@ -219,6 +173,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
         emit CollarTsaRfqDelegateModuleSet(address(newModule));
     }
 
+    function setSocketBridgeConfig(address asset, IBridgeAdapter adapter) external onlyOwner {
+        CollarTSABridgeLib.setSocketBridgeConfig(_getCollarTSAStorage().bridge, asset, adapter);
+    }
+
+    function setBridgeCoordinator(address coordinator) external onlyOwner {
+        CollarTSABridgeLib.setBridgeCoordinator(_getCollarTSAStorage().bridge, coordinator);
+    }
+
     function signActionViaPermit(IMatching.Action memory action, bytes memory extraData, bytes memory signerSig)
         external
         override
@@ -226,11 +188,13 @@ contract CollarTSA is BaseOnChainSigningTSA {
     {
         bytes32 hash = getActionTypedDataHash(action);
         (address recovered, ECDSA.RecoverError error,) = ECDSA.tryRecover(hash, signerSig);
-        require(error == ECDSA.RecoverError.NoError && this.isSigner(recovered), "Invalid signature");
+        if (error != ECDSA.RecoverError.NoError || !this.isSigner(recovered)) {
+            revert CTSA_InvalidSignature();
+        }
 
         _signActionData(action, extraData);
 
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         if (address(action.module) == address($.withdrawalModule)) {
             uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
             $.withdrawExecutionNonce[loanId] = action.nonce;
@@ -248,7 +212,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         override
         checkBlocked
     {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
 
         if (
             action.expiry < block.timestamp + $.params.minSignatureExpiry
@@ -313,7 +277,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
                 revert CTSA_WithdrawingUtilisedCollateral();
             }
 
-            CollarTSAStorage storage $ = _getCollarTSAStorage();
+            CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
             if (cashBalance < $.params.maxNegCash) {
                 revert CTSA_WithdrawalNegativeCash();
             }
@@ -362,7 +326,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     /////////////////
 
     function _validateCallDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         IOptionRiskVerifier($.optionRiskVerifier)
             .validateCall(
                 IOptionRiskVerifier.ValidateCallParams({
@@ -380,7 +344,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     function _validatePutDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         IOptionRiskVerifier($.optionRiskVerifier)
             .validatePut(
                 IOptionRiskVerifier.ValidatePutParams({
@@ -496,20 +460,36 @@ contract CollarTSA is BaseOnChainSigningTSA {
         (spotPrice,) = _getCollarTSAStorage().baseFeed.getSpot();
     }
 
+    function estimateBridgeFees(address asset, address, uint256) external view returns (uint256) {
+        return CollarTSABridgeLib.estimateBridgeFees(_getCollarTSAStorage().bridge, asset);
+    }
+
+    function bridgeToL1(address, uint256, address) external payable returns (bytes32 socketMessageId) {
+        (bool ok, bytes memory ret) = bridgeHelper.delegatecall(msg.data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+        assembly {
+            socketMessageId := mload(add(ret, 0x20))
+        }
+    }
+
     ///////////
     // Views //
     ///////////
 
-    function getCollarTSAParams() public view returns (CollarTSAParams memory) {
+    function getCollarTSAParams() external view returns (ICollarTSA.CollarTSAParams memory) {
         return _getCollarTSAStorage().params;
     }
 
     function getCollarTSAAddresses()
-        public
+        external
         view
         returns (ISpotFeed, IDepositModule, IWithdrawalModule, ITradeModule, IRfqModule, IOptionAsset)
     {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         return ($.baseFeed, $.depositModule, $.withdrawalModule, $.tradeModule, $.rfqModule, $.optionAsset);
     }
 
@@ -518,7 +498,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     function withdrawExecuted(uint256 loanId) external view returns (bool) {
-        CollarTSAStorage storage $ = _getCollarTSAStorage();
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         uint256 nonce = $.withdrawExecutionNonce[loanId];
         if (nonce == 0 || address($.withdrawalModule) == address(0)) {
             return false;
@@ -530,12 +510,14 @@ contract CollarTSA is BaseOnChainSigningTSA {
     // Events/Errors //
     ///////////////////
 
-    event CollarTSAParamsSet(CollarTSAParams params);
-    event CollarCollateralManagementParamsSet(CollateralManagementParams collateralManagementParams);
+    event CollarTSAParamsSet(ICollarTSA.CollarTSAParams params);
+    event CollarCollateralManagementParamsSet(ICollarTSA.CollateralManagementParams collateralManagementParams);
     event CollarTsaRfqDelegateModuleSet(address module);
     event WithdrawNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
 
     error CTSA_InvalidParams();
+    error CTSA_InvalidConfig();
+    error CTSA_InvalidSignature();
     error CTSA_InvalidActionExpiry();
     error CTSA_InvalidModule();
     error CTSA_InvalidSubaccount();
@@ -545,7 +527,6 @@ contract CollarTSA is BaseOnChainSigningTSA {
     error CTSA_WithdrawingUtilisedCollateral();
     error CTSA_WithdrawalNegativeCash();
     error CTSA_SellingTooManyCalls();
-    error CTSA_CannotSellOptionsWithNegativeCash();
     error CTSA_CanOnlyOpenShortCalls();
     error CTSA_OnlyLongPutsAllowed();
     error CTSA_InvalidOptionBalance();

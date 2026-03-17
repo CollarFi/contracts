@@ -424,6 +424,8 @@ def main(
             str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
             str(l2_fork_env),
             "--once",
+            "--no-submit-deposit-api",
+            "--no-submit-withdraw-api",
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
