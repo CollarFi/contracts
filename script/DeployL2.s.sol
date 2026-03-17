@@ -28,6 +28,7 @@ import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.so
 import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
+import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 import {IOptionRiskVerifier} from "../src/interfaces/IOptionRiskVerifier.sol";
 import {OptionRiskVerifier} from "../src/verifiers/OptionRiskVerifier.sol";
 import {IRfqVerifier} from "../src/interfaces/IRfqVerifier.sol";
@@ -82,6 +83,11 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - WETH_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
 /// - WETH_MSG_GAS_LIMIT          (default: 100000)
 /// - WETH_PAYLOAD_SIZE           (default: 161)
+/// - USDC_ASSET                  (optional; defaults to CASH.wrappedAsset())
+/// - USDC_SOCKET_BRIDGE          (new Socket controller on L2)
+/// - USDC_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
+/// - USDC_MSG_GAS_LIMIT          (default: 100000)
+/// - USDC_PAYLOAD_SIZE           (default: 161)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
@@ -177,9 +183,16 @@ contract DeployL2 is Script {
         address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
+        address usdcAsset = vm.envOr("USDC_ASSET", address(0));
+        address usdcSocketBridge = vm.envOr("USDC_SOCKET_BRIDGE", address(0));
+        address usdcSocketConnector = vm.envOr("USDC_SOCKET_CONNECTOR", address(0));
+        uint256 usdcMsgGasLimit = vm.envOr("USDC_MSG_GAS_LIMIT", uint256(100_000));
+        uint256 usdcPayloadSize = vm.envOr("USDC_PAYLOAD_SIZE", uint256(161));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
         address wethAdapter = address(0);
+        address usdcAdapter = address(0);
+        bool bridgeConfigured = false;
 
         vm.startBroadcast();
 
@@ -257,6 +270,31 @@ contract DeployL2 is Script {
                 )
             );
             CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
+            bridgeConfigured = true;
+        }
+
+        if (usdcSocketBridge != address(0) || usdcSocketConnector != address(0)) {
+            if (usdcSocketBridge == address(0) || usdcSocketConnector == address(0)) {
+                revert("USDC_SOCKET_BRIDGE and USDC_SOCKET_CONNECTOR required together");
+            }
+
+            if (usdcAsset == address(0)) {
+                usdcAsset = address(IERC20BasedAsset(vm.envAddress("CASH")).wrappedAsset());
+            }
+            if (usdcAsset == address(0)) {
+                revert("USDC_ASSET required");
+            }
+
+            usdcAdapter = address(
+                new SocketBridgeAdapterNew(
+                    usdcAsset, usdcSocketBridge, usdcSocketConnector, usdcMsgGasLimit, usdcPayloadSize, "", ""
+                )
+            );
+            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(usdcAsset, IBridgeAdapter(usdcAdapter));
+            bridgeConfigured = true;
+        }
+
+        if (bridgeConfigured) {
             CollarTSA(tsaProxyAddr).setBridgeCoordinator(address(receiver));
         }
 
@@ -276,6 +314,7 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
         json = vm.serializeAddress("addrs", "l2WethAdapter", wethAdapter);
+        json = vm.serializeAddress("addrs", "l2UsdcAdapter", usdcAdapter);
         vm.writeJson(json, outPath);
 
         console2.log("L2 receiver", address(receiver));
@@ -292,6 +331,12 @@ contract DeployL2 is Script {
             console2.log("L2 WETH bridge asset", wethAsset);
             console2.log("L2 WETH socket bridge", wethSocketBridge);
             console2.log("L2 WETH socket connector", wethSocketConnector);
+        }
+        if (usdcAdapter != address(0)) {
+            console2.log("L2 USDC adapter", usdcAdapter);
+            console2.log("L2 USDC bridge asset", usdcAsset);
+            console2.log("L2 USDC socket bridge", usdcSocketBridge);
+            console2.log("L2 USDC socket connector", usdcSocketConnector);
         }
         console2.log("Wrote", outPath);
     }

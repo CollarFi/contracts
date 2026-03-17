@@ -124,6 +124,16 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         assertEq(collarTsa.estimateBridgeFees(bridgeAsset, address(0xCAFE), 1e18), 123);
     }
 
+    function testEstimateBridgeFeesUsesConfiguredCashAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address cashBridgeAsset = address(cash.wrappedAsset());
+        adapter.setFee(456);
+
+        collarTsa.setSocketBridgeConfig(cashBridgeAsset, adapter);
+
+        assertEq(collarTsa.estimateBridgeFees(cashBridgeAsset, address(0xCAFE), 1_000e6), 456);
+    }
+
     function testEstimateBridgeFeesRevertsWithoutConfig() public {
         vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
         collarTsa.estimateBridgeFees(address(0xBEEF), address(0xCAFE), 1e18);
@@ -159,6 +169,30 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         uint256 amount = 3e18;
         uint256 fee = 5;
         bytes32 messageId = bytes32(uint256(42));
+
+        adapter.setFee(fee);
+        adapter.setMessageId(messageId);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(coordinator);
+
+        vm.deal(coordinator, fee);
+        vm.prank(coordinator);
+        bytes32 returnedMessageId = collarTsa.bridgeToL1{value: fee}(bridgeAsset, amount, address(0xCAFE));
+
+        assertEq(returnedMessageId, messageId);
+        assertEq(adapter.lastReceiver(), address(0xCAFE));
+        assertEq(adapter.lastAmount(), amount);
+        assertEq(adapter.lastValue(), fee);
+        assertEq(adapter.bridgeCallCount(), 1);
+    }
+
+    function testBridgeToL1UsesConfiguredCashAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(cash.wrappedAsset());
+        address coordinator = address(0xBEEF);
+        uint256 amount = 1_000e6;
+        uint256 fee = 7;
+        bytes32 messageId = bytes32(uint256(43));
 
         adapter.setFee(fee);
         adapter.setMessageId(messageId);
