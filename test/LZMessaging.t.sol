@@ -867,12 +867,13 @@ contract LZMessagingTest is Test {
         receiver.sendCollateralReturned{value: 1}(1, address(token), 2e18, socketMessageId);
     }
 
-    function testHandleDepositRevertsWhenLoanIdTooLargeForNonce() public {
+    function testHandleDepositStillRecordsIntentWhenLoanIdTooLargeForNonce() public {
         bytes32 socketMessageId = bytes32(uint256(100));
         CollarLZMessages.Message memory message =
             _buildMessageWithLoanId(CollarLZMessages.Action.DepositIntent, socketMessageId, 1_000_000);
 
         socket.setExecuted(socketMessageId, true);
+        token.mint(address(receiver), message.amount);
 
         bytes32 guid = messenger.sendDepositIntentAutoFee{value: 1}(
             message.loanId,
@@ -890,7 +891,7 @@ contract LZMessagingTest is Test {
         assertEq(receiver.depositIntentGuidByLoanId(message.loanId), guid);
     }
 
-    function testHandleReturnRequestRevertsWhenLoanIdTooLargeForNonce() public {
+    function testHandleReturnRequestStillRecordsIntentWhenLoanIdTooLargeForNonce() public {
         CollarLZMessages.Message memory message =
             _buildMessageWithLoanId(CollarLZMessages.Action.ReturnRequest, bytes32(0), 1_000_000);
 
