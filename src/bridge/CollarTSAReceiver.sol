@@ -593,12 +593,15 @@ contract CollarTSAReceiver is AccessControl, OApp {
         return _send(message, defaultOptions, nativeFee, refundTo);
     }
 
-    function _sendAck(CollarLZMessages.Message memory origin, CollarLZMessages.Action action, uint256 nativeFee, address refundTo)
-        internal
-        returns (MessagingReceipt memory)
-    {
-        uint256 subaccountId =
-            action == CollarLZMessages.Action.DepositConfirmed ? origin.subaccountId : tsa.subAccount();
+    function _sendAck(
+        CollarLZMessages.Message memory origin,
+        CollarLZMessages.Action action,
+        uint256 nativeFee,
+        address refundTo
+    ) internal returns (MessagingReceipt memory) {
+        uint256 subaccountId = action == CollarLZMessages.Action.DepositConfirmed
+            ? origin.subaccountId
+            : tsa.subAccount();
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
             action: action,
             loanId: origin.loanId,
