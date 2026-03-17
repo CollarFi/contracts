@@ -20,11 +20,16 @@ interface ICollarTSA {
     }
 
     function signActionData(IActionVerifier.Action memory action, bytes memory extraData) external;
+    function signActionViaPermit(IActionVerifier.Action memory action, bytes memory extraData, bytes memory signerSig)
+        external;
     function getCollarTSAParams() external view returns (CollarTSAParams memory);
     function getCollarTSAAddresses() external view returns (address, address, address, address, address, address);
     function getBaseTSAAddresses() external view returns (address, address, address, address, address, address, address);
     function subAccount() external view returns (uint256);
     function estimateBridgeFees(address asset, address receiver, uint256 amount) external view returns (uint256);
+    function depositExecutionNonce(uint256 loanId) external view returns (uint256);
+    function depositExecuted(uint256 loanId) external view returns (bool);
+    function withdrawExecutionNonce(uint256 loanId) external view returns (uint256);
     function withdrawExecuted(uint256 loanId) external view returns (bool);
     function bridgeToL1(address asset, uint256 amount, address receiver)
         external

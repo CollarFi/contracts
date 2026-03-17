@@ -38,6 +38,10 @@ contract CollarTSAMock {
         emit SignedAction(keccak256(abi.encode(action, extraData)));
     }
 
+    function signActionViaPermit(bytes memory action, bytes memory extraData, bytes memory signerSig) external {
+        emit SignedAction(keccak256(abi.encode(action, extraData, signerSig)));
+    }
+
     function getCollarTSAParams() external view returns (CollarTSAParams memory) {
         return params;
     }
@@ -54,5 +58,21 @@ contract CollarTSAMock {
     {
         // wrappedDepositAsset must be non-zero; the rest is unused by the receiver.
         return (address(0), address(0), address(0x6666), address(0), address(0), address(0), address(0));
+    }
+
+    function depositExecutionNonce(uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function depositExecuted(uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function withdrawExecutionNonce(uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function withdrawExecuted(uint256) external pure returns (bool) {
+        return false;
     }
 }

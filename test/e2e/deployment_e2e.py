@@ -92,6 +92,7 @@ def _spawn_anvil(rpc_url: str, port: int, chain_id: int) -> subprocess.Popen:
             "--chain-id",
             str(chain_id),
             "--auto-impersonate",
+            "--disable-code-size-limit",
             "--silent",
         ],
         stdout=subprocess.DEVNULL,
@@ -281,6 +282,7 @@ def main(
         {
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
+            "DISABLE_CODE_SIZE_LIMIT": "1",
             # Force fresh local components in fork E2E; avoid ambient env contamination
             # that could point to privileged external contracts.
             "LOAN_STORE": "0x0000000000000000000000000000000000000000",

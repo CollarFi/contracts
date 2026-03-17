@@ -101,6 +101,7 @@ def deployment_artifact_issues(
     required_l2 = {
         "l2Receiver": "L2 receiver",
         "l2Tsa": "L2 TSA",
+        "l2AtomicExecutor": "L2 atomic executor",
     }
 
     if l1 is not None:
@@ -323,9 +324,26 @@ def seed_l1_liquidity_vault(rpc: str, usdc: str, liquidity_vault: str, amount: i
     if amount <= 0:
         return
     if force_set_erc20_balance_on_anvil(rpc, usdc, ANVIL_ADDR0, amount):
-        cast_send_pk(rpc, usdc, "approve(address,uint256)", liquidity_vault, str(amount), private_key=ANVIL_PK0)
-        cast_send_pk(rpc, liquidity_vault, "deposit(uint256,address)", str(amount), ANVIL_ADDR0, private_key=ANVIL_PK0)
-        return
+        try:
+            cast_send_pk(rpc, usdc, "approve(address,uint256)", liquidity_vault, str(amount), private_key=ANVIL_PK0)
+            allowance = int(
+                cast_call(rpc, usdc, "allowance(address,address)(uint256)", ANVIL_ADDR0, liquidity_vault).split()[0]
+            )
+            if allowance < amount:
+                force_set_erc20_allowance_on_anvil(rpc, usdc, ANVIL_ADDR0, liquidity_vault, amount)
+            cast_send_pk(
+                rpc,
+                liquidity_vault,
+                "deposit(uint256,address)",
+                str(amount),
+                ANVIL_ADDR0,
+                private_key=ANVIL_PK0,
+            )
+            return
+        except Exception:
+            # Some fork/token states do not cooperate with the locally-forced balance path.
+            # Fall back to the live-holder route below instead of failing the entire scenario.
+            pass
 
     set_eth_balance(rpc, SEED_USDC_HOLDER)
     cast_send_from(rpc, SEED_USDC_HOLDER, usdc, "approve(address,uint256)", liquidity_vault, str(amount))

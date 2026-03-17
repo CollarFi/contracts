@@ -74,10 +74,10 @@ def _parse_l2_store_rollover(raw: str) -> tuple[bool, str]:
     if cleaned.startswith("(") and cleaned.endswith(")"):
         cleaned = cleaned[1:-1]
     parts = [part.strip() for part in cleaned.split(",")]
-    if len(parts) < 14:
+    if len(parts) < 17:
         raise RuntimeError(f"unexpected loan-store tuple output: {raw}")
-    pending = parts[12].lower() == "true"
-    mandate_hash = parts[13]
+    pending = parts[15].lower() == "true"
+    mandate_hash = parts[16]
     return pending, mandate_hash
 
 
@@ -221,7 +221,7 @@ def main(
     store_raw = cast_call(
         l2_rpc,
         loan_store,
-        "getLoan(uint256)((address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64,address,uint256,bool,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64,bool))",
+        "getLoan(uint256)((address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64,address,uint256,bool,bool,bool,bool,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint64,uint64,bool))",
         str(loan_id),
     )
     rollover_pending, stored_hash = _parse_l2_store_rollover(store_raw)

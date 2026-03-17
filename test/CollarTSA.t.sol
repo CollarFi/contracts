@@ -47,7 +47,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -57,8 +57,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testAllowsCashWithdrawal() public {
@@ -69,7 +68,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: withdrawalModule,
             data: _encodeWithdrawData(500e6, address(cash)),
             expiry: block.timestamp + 8 minutes,
@@ -77,8 +76,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, "");
+        _signTsaAction(action, "");
     }
 
     function testSignActionViaPermitRecordsWithdrawNonceByLoanId() public {
@@ -218,7 +216,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: withdrawalModule,
             data: _encodeWithdrawData(200e6, address(cash)),
             expiry: block.timestamp + 8 minutes,
@@ -226,9 +224,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_WithdrawalNegativeCash.selector);
-        collarTsa.signActionData(action, "");
+        _expectRevertingTsaAction(abi.encodeWithSelector(CollarTSA.CTSA_WithdrawalNegativeCash.selector), action, "");
     }
 
     function testRejectsLongCall() public {
@@ -258,7 +254,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -268,9 +264,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_CanOnlyOpenShortCalls.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_CanOnlyOpenShortCalls.selector),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsShortPut() public {
@@ -301,7 +299,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -311,9 +309,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_OnlyLongPutsAllowed.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_OnlyLongPutsAllowed.selector),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testPutPriceTooHigh() public {
@@ -347,7 +347,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -357,9 +357,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_PutPriceTooHigh.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_PutPriceTooHigh.selector),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsTakerOrderHashMismatch() public {
@@ -385,7 +387,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -395,9 +397,56 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_TradeDataDoesNotMatchOrderHash.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_TradeDataDoesNotMatchOrderHash.selector),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
+    }
+
+    function testRejectsRfqAfterReturnRequested() public {
+        _depositToTSA(1e18);
+        _executeDeposit(1e18);
+
+        uint64 expiry = uint64(block.timestamp + 7 days);
+        _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, expiry);
+
+        IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](2);
+        trades[0] = IRfqModule.TradeData({
+            asset: address(markets[MARKET].option),
+            subId: OptionEncoding.toSubId(expiry, 2200e18, true),
+            price: 100e18,
+            amount: 1e18
+        });
+        trades[1] = IRfqModule.TradeData({
+            asset: address(markets[MARKET].option),
+            subId: OptionEncoding.toSubId(expiry, 2000e18, false),
+            price: 100e18,
+            amount: -1e18
+        });
+
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
+
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsaSubacc,
+            nonce: _loanTaggedNonce(1),
+            module: rfqModule,
+            data: abi.encode(order),
+            expiry: block.timestamp + 8 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        _seedLoan(1, expiry);
+        loanStore.setReturnRequested(1, true);
+
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function _prepareRollover(uint256 loanId, uint64 oldExpiry, uint64 newExpiry, uint256 minNetInterest) internal {
@@ -457,22 +506,26 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         }
     }
 
-    function _signRolloverRfq(uint256 loanId, IRfqModule.TradeData[] memory trades) internal {
+    function _buildRolloverRfqAction(uint256 loanId, IRfqModule.TradeData[] memory trades)
+        internal
+        returns (IActionVerifier.Action memory action)
+    {
         IRfqModule.TakerOrder memory order =
             IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
-        IActionVerifier.Action memory action = IActionVerifier.Action({
+        action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(loanId),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
             owner: address(tsa),
             signer: address(tsa)
         });
+    }
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(loanId, abi.encode(trades)));
+    function _signRolloverRfq(uint256 loanId, IRfqModule.TradeData[] memory trades) internal {
+        _signTsaAction(_buildRolloverRfqAction(loanId, trades), abi.encode(loanId, abi.encode(trades)));
     }
 
     function testAllowsRolloverWithFourLegPortfolioTransition() public {
@@ -518,8 +571,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[1] = full[2];
         trades[2] = full[3];
 
-        vm.expectRevert(bytes4(keccak256("CTSA_InvalidRfqTradeLength()")));
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeLength()"))),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverWrongExpiryOnLeg() public {
@@ -541,8 +597,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setOptionAsset(trades);
         trades[0].subId = OptionEncoding.toSubId(newExpiry, 2200e18, true);
 
-        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverWrongDirectionOnLeg() public {
@@ -564,8 +623,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setOptionAsset(trades);
         trades[3].amount = 1e18;
 
-        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverOnEconomicsGuardFailure() public {
@@ -586,8 +648,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
         _setOptionAsset(trades);
 
-        vm.expectRevert(CollarTSA.CTSA_InsufficientCash.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(CollarTSA.CTSA_InsufficientCash.selector),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function _openCollarPosition(int256 amount, uint64 expiry) internal {
@@ -628,7 +693,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         actions[1] = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(takerOrder),
             expiry: block.timestamp + 8 minutes,
@@ -638,14 +703,14 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        tsa.signActionData(actions[1], abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(actions[1], abi.encode(uint256(1), abi.encode(trades)));
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: nonVaultSubacc, takerAccount: tsaSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")
         });
 
         _verifyAndMatch(actions, signatures, abi.encode(fill));
+        loanStore.setTradeExecuted(1, false);
     }
 
     function testAllowsSpotRfqSellAsTaker() public {
@@ -672,8 +737,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, 0);
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testRejectsSpotRfqSellAsMaker() public {
@@ -697,8 +761,6 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_SpotRfqRequiresTaker.selector);
-        collarTsa.signActionData(action, "");
+        _expectRevertingTsaAction(abi.encodeWithSelector(CollarTSA.CTSA_SpotRfqRequiresTaker.selector), action, "");
     }
 }

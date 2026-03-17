@@ -19,6 +19,10 @@ interface ICollarLoanStore {
         // Set by DepositIntent/DepositConfirmed
         address collateralAsset;
         uint256 collateralAmount;
+        bool depositExecuted;
+        bool tradeExecuted;
+        // Set by ReturnRequest; once true the loan is no longer RFQ-tradeable on L2.
+        bool returnRequested;
 
         // Active rollover constraints (if rolloverPending=true)
         bool rolloverPending;
@@ -71,4 +75,10 @@ interface ICollarLoanStore {
     function clearRollover(uint256 loanId) external;
 
     function markConsumed(uint256 loanId) external;
+
+    function setReturnRequested(uint256 loanId, bool requested) external;
+
+    function setDepositExecuted(uint256 loanId, bool executed) external;
+
+    function setTradeExecuted(uint256 loanId, bool executed) external;
 }

@@ -23,6 +23,7 @@ import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IRfqVerifier} from "./interfaces/IRfqVerifier.sol";
 import {ICollarTsaRfqDelegateModule} from "./interfaces/ICollarTsaRfqDelegateModule.sol";
 import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
+import {ICollarLoanStore} from "./interfaces/ICollarLoanStore.sol";
 import {ICollarTSA} from "./interfaces/ICollarTSA.sol";
 import {CollarTSABridgeHelper} from "./bridge/CollarTSABridgeHelper.sol";
 import {CollarTSABridgeLib} from "./libraries/CollarTSABridgeLib.sol";
@@ -31,6 +32,10 @@ import {CollarTSAStorageLib} from "./libraries/CollarTSAStorageLib.sol";
 import {IOptionRiskVerifier} from "./interfaces/IOptionRiskVerifier.sol";
 
 interface IWithdrawalNonceTracker {
+    function usedNonces(address owner, uint256 nonce) external view returns (bool);
+}
+
+interface IDepositNonceTracker {
     function usedNonces(address owner, uint256 nonce) external view returns (bool);
 }
 
@@ -183,6 +188,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
         CollarTSABridgeLib.setBridgeCoordinator(_getCollarTSAStorage().bridge, coordinator);
     }
 
+    function signActionData(IMatching.Action memory, bytes memory) external pure override {
+        revert CTSA_DirectSigningDisabled();
+    }
+
     function signActionViaPermit(IMatching.Action memory action, bytes memory extraData, bytes memory signerSig)
         external
         override
@@ -197,10 +206,17 @@ contract CollarTSA is BaseOnChainSigningTSA {
         _signActionData(action, extraData);
 
         CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
-        if (address(action.module) == address($.withdrawalModule)) {
-            uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
+        uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
+        if (address(action.module) == address($.depositModule)) {
+            $.depositExecutionNonce[loanId] = action.nonce;
+            ICollarLoanStore($.loanStore).setDepositExecuted(loanId, true);
+            emit DepositNonceRecorded(loanId, action.nonce, hash);
+        } else if (address(action.module) == address($.withdrawalModule)) {
             $.withdrawExecutionNonce[loanId] = action.nonce;
             emit WithdrawNonceRecorded(loanId, action.nonce, hash);
+        } else if (address(action.module) == address($.rfqModule) && extraData.length != 0) {
+            ICollarLoanStore($.loanStore).setTradeExecuted(loanId, true);
+            emit TradeExecutedRecorded(loanId, action.nonce, hash);
         }
     }
 
@@ -499,6 +515,19 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return _getCollarTSAStorage().withdrawExecutionNonce[loanId];
     }
 
+    function depositExecutionNonce(uint256 loanId) external view returns (uint256) {
+        return _getCollarTSAStorage().depositExecutionNonce[loanId];
+    }
+
+    function depositExecuted(uint256 loanId) external view returns (bool) {
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
+        uint256 nonce = $.depositExecutionNonce[loanId];
+        if (nonce == 0 || address($.depositModule) == address(0)) {
+            return false;
+        }
+        return IDepositNonceTracker(address($.depositModule)).usedNonces(address(this), nonce);
+    }
+
     function withdrawExecuted(uint256 loanId) external view returns (bool) {
         CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
         uint256 nonce = $.withdrawExecutionNonce[loanId];
@@ -515,8 +544,11 @@ contract CollarTSA is BaseOnChainSigningTSA {
     event CollarTSAParamsSet(ICollarTSA.CollarTSAParams params);
     event CollarCollateralManagementParamsSet(ICollarTSA.CollateralManagementParams collateralManagementParams);
     event CollarTsaRfqDelegateModuleSet(address module);
+    event DepositNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
+    event TradeExecutedRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
     event WithdrawNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
 
+    error CTSA_DirectSigningDisabled();
     error CTSA_InvalidParams();
     error CTSA_InvalidConfig();
     error CTSA_InvalidSignature();
