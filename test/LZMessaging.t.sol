@@ -170,7 +170,11 @@ contract MockCollarTSA is ICollarTSA {
         return bridgeFee;
     }
 
-    function bridgeToL1(address asset, uint256 amount, address receiver) external payable returns (bytes32 socketMessageId) {
+    function bridgeToL1(address asset, uint256 amount, address receiver)
+        external
+        payable
+        returns (bytes32 socketMessageId)
+    {
         lastBridgeAsset = asset;
         lastBridgeAmount = amount;
         lastBridgeReceiver = receiver;

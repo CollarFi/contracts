@@ -138,7 +138,9 @@ contract CollarTSA is BaseOnChainSigningTSA {
         _setCollateralManagementParams(newCollateralMgmtParams);
     }
 
-    function _setCollateralManagementParams(ICollarTSA.CollateralManagementParams memory newCollateralMgmtParams) internal {
+    function _setCollateralManagementParams(ICollarTSA.CollateralManagementParams memory newCollateralMgmtParams)
+        internal
+    {
         if (newCollateralMgmtParams.worstSpotSellPrice > 1e18 || newCollateralMgmtParams.worstSpotSellPrice < 0.8e18) {
             revert CTSA_InvalidParams();
         }

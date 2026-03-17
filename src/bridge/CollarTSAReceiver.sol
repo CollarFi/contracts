@@ -272,7 +272,9 @@ contract CollarTSAReceiver is AccessControl, OApp {
         uint256 collateralSold,
         bytes32 socketMessageId
     ) external payable onlyRole(KEEPER_ROLE) returns (MessagingReceipt memory) {
-        return _sendSettlementReportMessage(loanId, asset, settlementAmount, collateralSold, socketMessageId, msg.value, msg.sender);
+        return _sendSettlementReportMessage(
+            loanId, asset, settlementAmount, collateralSold, socketMessageId, msg.value, msg.sender
+        );
     }
 
     function bridgePendingReturnAndNotify(uint256 loanId, address asset, uint256 amount)
@@ -283,8 +285,9 @@ contract CollarTSAReceiver is AccessControl, OApp {
     {
         uint256 bridgeFee;
         (socketMessageId, bridgeFee) = _bridgeToVault(_collateralBridgeAsset(), amount);
-        MessagingReceipt memory receipt =
-            _sendCollateralReturnedMessage(loanId, asset, amount, socketMessageId, true, msg.value - bridgeFee, msg.sender);
+        MessagingReceipt memory receipt = _sendCollateralReturnedMessage(
+            loanId, asset, amount, socketMessageId, true, msg.value - bridgeFee, msg.sender
+        );
         return (socketMessageId, receipt.guid);
     }
 
@@ -489,7 +492,10 @@ contract CollarTSAReceiver is AccessControl, OApp {
         tsa.signActionData(action, bytes(""));
     }
 
-    function _bridgeToVault(address bridgeAsset, uint256 amount) internal returns (bytes32 socketMessageId, uint256 bridgeFee) {
+    function _bridgeToVault(address bridgeAsset, uint256 amount)
+        internal
+        returns (bytes32 socketMessageId, uint256 bridgeFee)
+    {
         if (vaultRecipient == address(0)) {
             revert CTR_InvalidRecipient();
         }
