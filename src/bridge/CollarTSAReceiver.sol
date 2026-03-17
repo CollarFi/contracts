@@ -78,6 +78,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_ReturnAlreadyCompleted();
     error CTR_ReturnNotRequested();
     error CTR_ReturnRequestAfterTrade();
+    error CTR_WithdrawalNotExecuted();
     error CTR_CollateralReturnedAfterTrade();
     error CTR_SettlementAlreadyReported();
     error CTR_TradeConfirmedAfterReturn();
@@ -242,7 +243,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
 
             loanStore.recordCollateral(message.loanId, message.asset, message.amount);
 
-            _signDeposit(message, guid);
+            _signDeposit(message);
             _sendAck(message, CollarLZMessages.Action.DepositConfirmed);
         } else if (message.action == CollarLZMessages.Action.ReturnRequest) {
             if (message.subaccountId != tsa.subAccount()) {
@@ -257,7 +258,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
             if (returnRequested[message.loanId]) {
                 revert CTR_ReturnAlreadyRequested();
             }
-            _signWithdrawal(message, guid);
+            _signWithdrawal(message);
             returnRequested[message.loanId] = true;
         }
 
@@ -283,6 +284,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         onlyRole(KEEPER_ROLE)
         returns (bytes32 socketMessageId, bytes32 lzGuid)
     {
+        _requireWithdrawalExecuted(loanId);
         uint256 bridgeFee;
         (socketMessageId, bridgeFee) = _bridgeToVault(_collateralBridgeAsset(), amount);
         MessagingReceipt memory receipt = _sendCollateralReturnedMessage(
@@ -297,6 +299,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         onlyRole(KEEPER_ROLE)
         returns (bytes32 socketMessageId, bytes32 lzGuid)
     {
+        _requireWithdrawalExecuted(loanId);
         uint256 bridgeFee;
         (socketMessageId, bridgeFee) = _bridgeToVault(_collateralBridgeAsset(), amount);
         MessagingReceipt memory receipt = _sendCollateralReturnedMessage(
@@ -437,7 +440,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         return (timestampSec * 1_000_000) + loanId;
     }
 
-    function _signDeposit(CollarLZMessages.Message memory message, bytes32 guid) internal {
+    function _signDeposit(CollarLZMessages.Message memory message) internal {
         ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
         (, address depositModule,,,,) = tsa.getCollarTSAAddresses();
         (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
@@ -452,7 +455,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
             amount: message.amount, asset: wrappedDepositAsset, managerForNewAccount: address(0)
         });
 
-        guid;
         uint256 nonce = _deriveActionNonce(message.loanId);
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
@@ -468,7 +470,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         tsa.signActionData(action, bytes(""));
     }
 
-    function _signWithdrawal(CollarLZMessages.Message memory message, bytes32 guid) internal {
+    function _signWithdrawal(CollarLZMessages.Message memory message) internal {
         ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
         (,, address withdrawalModule,,,) = tsa.getCollarTSAAddresses();
         (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
@@ -476,7 +478,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
         IWithdrawalModule.WithdrawalData memory withdrawalData =
             IWithdrawalModule.WithdrawalData({asset: wrappedDepositAsset, assetAmount: message.amount});
 
-        guid;
         uint256 nonce = _deriveActionNonce(message.loanId);
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
@@ -490,6 +491,12 @@ contract CollarTSAReceiver is AccessControl, OApp {
         });
 
         tsa.signActionData(action, bytes(""));
+    }
+
+    function _requireWithdrawalExecuted(uint256 loanId) internal view {
+        if (!tsa.withdrawExecuted(loanId)) {
+            revert CTR_WithdrawalNotExecuted();
+        }
     }
 
     function _bridgeToVault(address bridgeAsset, uint256 amount)

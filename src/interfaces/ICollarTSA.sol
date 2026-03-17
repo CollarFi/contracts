@@ -25,6 +25,7 @@ interface ICollarTSA {
     function getBaseTSAAddresses() external view returns (address, address, address, address, address, address, address);
     function subAccount() external view returns (uint256);
     function estimateBridgeFees(address asset, address receiver, uint256 amount) external view returns (uint256);
+    function withdrawExecuted(uint256 loanId) external view returns (bool);
     function bridgeToL1(address asset, uint256 amount, address receiver)
         external
         payable

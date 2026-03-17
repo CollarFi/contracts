@@ -117,6 +117,7 @@ contract MockCollarTSA is ICollarTSA {
     address public lastBridgeReceiver;
     uint256 public lastBridgeValue;
     uint256 public bridgeCallCount;
+    mapping(uint256 => bool) public withdrawExecutedByLoanId;
     CollarTSAParams private params;
 
     constructor(address wrappedDepositAsset_, address cashAsset_, address rfqModule_) {
@@ -166,8 +167,16 @@ contract MockCollarTSA is ICollarTSA {
         bridgeMessageId = messageId_;
     }
 
+    function setWithdrawExecuted(uint256 loanId, bool executed) external {
+        withdrawExecutedByLoanId[loanId] = executed;
+    }
+
     function estimateBridgeFees(address, address, uint256) external view returns (uint256) {
         return bridgeFee;
+    }
+
+    function withdrawExecuted(uint256 loanId) external view returns (bool) {
+        return withdrawExecutedByLoanId[loanId];
     }
 
     function bridgeToL1(address asset, uint256 amount, address receiver)
@@ -634,6 +643,7 @@ contract LZMessagingTest is Test {
         );
         _deliverToReceiver(guid, message);
         receiver.handleMessage(guid);
+        tsa.setWithdrawExecuted(1, true);
 
         (bytes32 bridgedMessageId, bytes32 lzGuid) =
             receiver.bridgePendingReturnAndNotify{value: bridgeFee + 1}(1, address(token), 2e18);
@@ -675,6 +685,7 @@ contract LZMessagingTest is Test {
                 realizedC: 0
             })
         );
+        tsa.setWithdrawExecuted(1, true);
 
         (bytes32 bridgedMessageId, bytes32 lzGuid) =
             receiver.bridgeNeutralCollateralAndNotify{value: bridgeFee + 1}(1, address(0xCAFE), 2e18);
@@ -743,9 +754,24 @@ contract LZMessagingTest is Test {
         );
         _deliverToReceiver(guid, message);
         receiver.handleMessage(guid);
+        tsa.setWithdrawExecuted(1, true);
 
         vm.expectRevert(CollarTSAReceiver.CTR_InsufficientValue.selector);
         receiver.bridgePendingReturnAndNotify{value: 2}(1, address(token), 2e18);
+    }
+
+    function testBridgePendingReturnAndNotifyRevertsIfWithdrawalNotExecuted() public {
+        tsa.setBridgeFee(3);
+
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_WithdrawalNotExecuted.selector);
+        receiver.bridgePendingReturnAndNotify{value: 4}(1, address(token), 2e18);
     }
 
     function testBridgeSettlementAndNotifyRevertsIfAlreadyReported() public {
