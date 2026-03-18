@@ -17,11 +17,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
 from l2_common import (  # noqa: E402
-    MAX_LOAN_ID_FOR_NONCE_SUFFIX,
     assert_tsa_signer,
     derive_reissue_nonce,
     extract_tx_hash,
-    get_receipt,
     http_post_json,
     is_retryable_signature_sync_error_text,
     latest_block_timestamp,
@@ -42,8 +40,6 @@ ACTION_DEPOSIT_CONFIRMED = 3
 ACTION_COLLATERAL_RETURNED = 4
 ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
-ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
-MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
@@ -118,9 +114,6 @@ def _action_name(action: int) -> str:
         5: "TradeConfirmed",
         6: "MandateCreated",
     }.get(action, f"Unknown({action})")
-
-
-
 
 def _parse_uint(raw: str) -> int:
     token = raw.strip().split()[0]
@@ -267,40 +260,6 @@ def _build_pending_action(
     return action
 
 
-def _get_block_timestamp(rpc_url: str, block_number: int) -> int:
-    out = run(["cast", "block", str(block_number), "--rpc-url", rpc_url, "--json"])
-    payload = json.loads(out)
-    ts = payload.get("timestamp", 0)
-    if isinstance(ts, str):
-        return int(ts, 16) if ts.startswith("0x") else int(ts)
-    return int(ts)
-
-
-def _find_message_handled_log_for_guid(rpc_url: str, receiver_addr: str, guid: str) -> dict[str, Any]:
-    out = run(
-        [
-            "cast",
-            "logs",
-            "MessageHandled(bytes32,uint8,uint256)",
-            "--address",
-            receiver_addr,
-            "--from-block",
-            "0",
-            "--to-block",
-            "latest",
-            "--rpc-url",
-            rpc_url,
-            "--json",
-        ]
-    )
-    logs = json.loads(out)
-    target = guid.lower()
-    matched = [l for l in logs if (l.get("topics") or [None, None])[1].lower() == target]
-    if not matched:
-        raise RuntimeError(f"MessageHandled log not found for guid={guid}")
-    return matched[-1]
-
-
 def _format_action_tuple(action: dict[str, Any]) -> str:
     return (
         "("
@@ -313,94 +272,6 @@ def _format_action_tuple(action: dict[str, Any]) -> str:
         f"{action['signer']}"
         ")"
     )
-
-
-def _reissue_action_signature(
-    *,
-    rpc_url: str,
-    tsa_addr: str,
-    action: dict[str, Any],
-    loan_id: int,
-    account: str,
-    private_key: str,
-    from_addr: str,
-    unlocked: bool,
-) -> tuple[str, dict[str, Any], int]:
-    min_sig, max_sig = tsa_signature_expiry_window(rpc_url, tsa_addr)
-    chain_now = latest_block_timestamp(rpc_url)
-    # Keep enough freshness margin beyond API window while respecting TSA bounds.
-    cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
-    target_expiry = chain_now + min_sig + cushion
-    upper_bound = chain_now + max_sig - 1
-    if target_expiry > upper_bound:
-        target_expiry = upper_bound
-    if target_expiry <= chain_now + min_sig:
-        raise RuntimeError(
-            "cannot reissue action with valid expiry window: "
-            f"chain_now={chain_now} min={min_sig} max={max_sig}"
-        )
-
-    refreshed = dict(action)
-    refreshed["nonce"] = derive_reissue_nonce(chain_now, loan_id)
-    refreshed["expiry"] = target_expiry
-
-    tx_out = cast_send(
-        rpc_url,
-        account or None,
-        tsa_addr,
-        "signActionData((uint256,uint256,address,bytes,uint256,address,address),bytes)",
-        _format_action_tuple(refreshed),
-        "0x",
-        private_key=private_key or None,
-        from_addr=from_addr or None,
-        unlocked=unlocked,
-    )
-    tx_hash = extract_tx_hash(tx_out)
-    receipt = get_receipt(rpc_url, tx_hash)
-    signed = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    block_no_raw = receipt.get("blockNumber", "0x0")
-    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
-    signed_at = _get_block_timestamp(rpc_url, block_no)
-    return tx_hash, signed, signed_at
-
-
-def _decode_action_signed_from_receipt(receipt: dict[str, Any], tsa_addr: str) -> dict[str, Any]:
-    tsa = tsa_addr.lower()
-    for log in receipt.get("logs", []):
-        topics = log.get("topics") or []
-        if len(topics) < 3:
-            continue
-        if str(log.get("address", "")).lower() != tsa:
-            continue
-        if str(topics[0]).lower() != ACTION_SIGNED_TOPIC0:
-            continue
-
-        data_hex = str(log.get("data", "0x"))
-        if not data_hex.startswith("0x"):
-            continue
-        decoded_raw = run(
-            [
-                "cast",
-                "decode-abi",
-                "--json",
-                "f()((uint256,uint256,address,bytes,uint256,address,address))",
-                data_hex,
-            ]
-        )
-        decoded = json.loads(decoded_raw)[0]
-        return {
-            "eventSigner": "0x" + str(topics[1])[-40:],
-            "typedDataHash": str(topics[2]),
-            "subaccountId": int(decoded[0]),
-            "nonce": int(decoded[1]),
-            "module": str(decoded[2]),
-            "data": str(decoded[3]),
-            "expiry": int(decoded[4]),
-            "owner": str(decoded[5]),
-            "signer": str(decoded[6]),
-        }
-
-    raise RuntimeError("ActionSigned event not found in handleMessage receipt")
 
 
 def _decode_deposit_module_data(data_hex: str) -> dict[str, Any]:
@@ -511,42 +382,6 @@ def _ensure_local_trade_executor(rpc_url: str, matching_addr: str, executor_addr
     )
 
 
-def _submit_action_to_local_matching(
-    *,
-    rpc_url: str,
-    matching_addr: str,
-    action: dict[str, Any],
-    account: str,
-    private_key: str,
-    from_addr: str,
-    unlocked: bool,
-) -> dict[str, Any]:
-    sender_addr = wallet_address(account=account, private_key=private_key) if (account or private_key) else from_addr
-    _ensure_local_trade_executor(rpc_url, matching_addr, sender_addr)
-
-    tx_out = cast_send(
-        rpc_url,
-        account or None,
-        matching_addr,
-        "verifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes)",
-        f"[{_format_action_tuple(action)}]",
-        "[0x]",
-        "0x",
-        private_key=private_key or None,
-        from_addr=from_addr or None,
-        unlocked=unlocked,
-    )
-    tx_hash = extract_tx_hash(tx_out)
-    return {
-        "mode": "localMatching",
-        "matchingTx": tx_hash,
-        "typedDataHash": str(action["typedDataHash"]),
-        "subaccountId": str(action["subaccountId"]),
-        "nonce": str(action["nonce"]),
-        "expiry": str(action["expiry"]),
-    }
-
-
 def _submit_action_to_local_atomic(
     *,
     rpc_url: str,
@@ -624,13 +459,9 @@ def _submit_deposit_to_derive_api_from_action(
     typed_hash = debug_json["result"]["typed_data_hash"]
     if typed_hash.lower() != str(action["typedDataHash"]).lower():
         raise RuntimeError(
-            "typed hash mismatch between ActionSigned and deposit_debug "
+            "typed hash mismatch between local action and deposit_debug "
             f"(onchain={action['typedDataHash']}, debug={typed_hash})"
         )
-
-    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
-    if signed_raw.strip().lower() != "true":
-        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
 
     ts_ms = str(int(time.time() * 1000))
     auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
@@ -666,31 +497,6 @@ def _submit_deposit_to_derive_api_from_action(
         "apiResult": private_resp.get("result"),
         "apiId": private_resp.get("id"),
     }
-
-
-def _submit_deposit_to_derive_api(
-    *,
-    rpc_url: str,
-    receipt_tx_hash: str,
-    tsa_addr: str,
-    account: str,
-    private_key: str,
-    api_url: str,
-    x_lyra_wallet: str,
-    fallback_asset_name: str,
-) -> dict[str, Any]:
-    receipt = get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    return _submit_deposit_to_derive_api_from_action(
-        rpc_url=rpc_url,
-        action=action,
-        tsa_addr=tsa_addr,
-        account=account,
-        private_key=private_key,
-        api_url=api_url,
-        x_lyra_wallet=x_lyra_wallet,
-        fallback_asset_name=fallback_asset_name,
-    )
 
 
 def _decode_withdraw_module_data(data_hex: str) -> dict[str, Any]:
@@ -760,13 +566,9 @@ def _submit_withdraw_to_derive_api_from_action(
     typed_hash = debug_json["result"]["typed_data_hash"]
     if typed_hash.lower() != str(action["typedDataHash"]).lower():
         raise RuntimeError(
-            "typed hash mismatch between ActionSigned and withdraw_debug "
+            "typed hash mismatch between local action and withdraw_debug "
             f"(onchain={action['typedDataHash']}, debug={typed_hash})"
         )
-
-    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
-    if signed_raw.strip().lower() != "true":
-        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
 
     ts_ms = str(int(time.time() * 1000))
     auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
@@ -804,106 +606,9 @@ def _submit_withdraw_to_derive_api_from_action(
     }
 
 
-def _submit_withdraw_to_derive_api(
-    *,
-    rpc_url: str,
-    receipt_tx_hash: str,
-    tsa_addr: str,
-    account: str,
-    private_key: str,
-    api_url: str,
-    x_lyra_wallet: str,
-    fallback_asset_name: str,
-) -> dict[str, Any]:
-    receipt = get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    return _submit_withdraw_to_derive_api_from_action(
-        rpc_url=rpc_url,
-        action=action,
-        tsa_addr=tsa_addr,
-        account=account,
-        private_key=private_key,
-        api_url=api_url,
-        x_lyra_wallet=x_lyra_wallet,
-        fallback_asset_name=fallback_asset_name,
-    )
-
-
 def _ensure_api_state(state: dict[str, Any]) -> None:
     if "apiSubmitted" not in state or not isinstance(state.get("apiSubmitted"), dict):
         state["apiSubmitted"] = {}
-
-
-def _action_meta_from_chain(
-    *,
-    rpc_url: str,
-    receiver_addr: str,
-    tsa_addr: str,
-    guid: str,
-) -> tuple[dict[str, Any], int, str]:
-    handled_log = _find_message_handled_log_for_guid(rpc_url, receiver_addr, guid)
-    tx_hash = str(handled_log.get("transactionHash"))
-    if not tx_hash:
-        raise RuntimeError(f"missing tx hash for MessageHandled guid={guid}")
-
-    receipt = get_receipt(rpc_url, tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-
-    block_no_raw = receipt.get("blockNumber", "0x0")
-    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
-    signed_at = _get_block_timestamp(rpc_url, block_no)
-    return action, signed_at, tx_hash
-
-
-def _submit_api_for_action(
-    *,
-    action_type: int,
-    rpc_url: str,
-    action: dict[str, Any],
-    tsa_addr: str,
-    matching_addr: str,
-    account: str,
-    private_key: str,
-    from_addr: str,
-    unlocked: bool,
-    api_url: str,
-    x_lyra_wallet: str,
-    fallback_asset_name: str,
-) -> dict[str, Any]:
-    if _is_local_rpc(rpc_url):
-        return _submit_action_to_local_matching(
-            rpc_url=rpc_url,
-            matching_addr=matching_addr,
-            action=action,
-            account=account,
-            private_key=private_key,
-            from_addr=from_addr,
-            unlocked=unlocked,
-        )
-
-    if action_type == ACTION_DEPOSIT_INTENT:
-        return _submit_deposit_to_derive_api_from_action(
-            rpc_url=rpc_url,
-            action=action,
-            tsa_addr=tsa_addr,
-            account=account,
-            private_key=private_key,
-            api_url=api_url,
-            x_lyra_wallet=x_lyra_wallet,
-            fallback_asset_name=fallback_asset_name,
-        )
-    if action_type == ACTION_RETURN_REQUEST:
-        return _submit_withdraw_to_derive_api_from_action(
-            rpc_url=rpc_url,
-            action=action,
-            tsa_addr=tsa_addr,
-            account=account,
-            private_key=private_key,
-            api_url=api_url,
-            x_lyra_wallet=x_lyra_wallet,
-            fallback_asset_name=fallback_asset_name,
-        )
-    raise RuntimeError(f"API submit unsupported for action type {action_type}")
 
 
 def _submit_api_for_pending_message(
@@ -1005,6 +710,7 @@ def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdr
         action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
     )
 
+
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -1052,29 +758,23 @@ def main(
         "--no-submit-withdraw-api",
         help="Disable Derive private/withdraw submission after handling ReturnRequest.",
     ),
-    api_signature_max_age_seconds: int = typer.Option(
-        300,
-        "--api-signature-max-age-seconds",
-        min=1,
-        help="If signed action is older than this, re-sign action before submitting Derive API request.",
-    ),
-    post_reissue_api_retry_attempts: int = typer.Option(
+    api_retry_attempts: int = typer.Option(
         6,
-        "--post-reissue-api-retry-attempts",
+        "--api-retry-attempts",
         min=1,
-        help="Retries for Derive API submit after onchain reissue when signature invalid is returned.",
+        help="Retries for Derive API submit when signature propagation errors are returned.",
     ),
-    post_reissue_api_retry_initial_delay_seconds: float = typer.Option(
+    api_retry_initial_delay_seconds: float = typer.Option(
         2.0,
-        "--post-reissue-api-retry-initial-delay-seconds",
+        "--api-retry-initial-delay-seconds",
         min=0.0,
-        help="Initial retry delay (seconds) for post-reissue Derive API retries.",
+        help="Initial retry delay in seconds for Derive API retries.",
     ),
-    post_reissue_api_retry_max_delay_seconds: float = typer.Option(
+    api_retry_max_delay_seconds: float = typer.Option(
         20.0,
-        "--post-reissue-api-retry-max-delay-seconds",
+        "--api-retry-max-delay-seconds",
         min=0.0,
-        help="Maximum retry delay (seconds) for post-reissue Derive API retries.",
+        help="Maximum retry delay in seconds for Derive API retries.",
     ),
     derive_api_url: str = typer.Option(
         "",
@@ -1114,7 +814,7 @@ def main(
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
     eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
-    local_matching_submit = _is_local_rpc(rpc_url)
+    local_atomic_submit = _is_local_rpc(rpc_url)
     deposit_intents = not no_deposit_intents
     return_requests = not no_return_requests
     submit_deposit_api = broadcast and (not no_submit_deposit_api)
@@ -1125,12 +825,12 @@ def main(
             "API submission requires ACCOUNT or --private-key "
             "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
         )
-    if broadcast and local_matching_submit and not (account or pk):
+    if broadcast and local_atomic_submit and not (account or pk):
         raise ValueError("local atomic submission requires ACCOUNT or --private-key for typed-data signing")
-    if (submit_deposit_api or submit_withdraw_api) and not local_matching_submit:
+    if (submit_deposit_api or submit_withdraw_api) and not local_atomic_submit:
         signer_wallet = wallet_address(account=account, private_key=pk)
         assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
-    if broadcast and local_matching_submit:
+    if broadcast and local_atomic_submit:
         if not atomic_executor_addr:
             raise ValueError("local atomic submission requires ATOMIC_EXECUTOR in env")
         for key, value in (
@@ -1230,7 +930,7 @@ def main(
                     item["tx"] = tx_hash
 
                     if action in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
-                        if local_matching_submit:
+                        if local_atomic_submit:
                             action_data = _build_pending_action(
                                 action_type=action,
                                 pending_message=pending_message,
@@ -1274,9 +974,9 @@ def main(
                                 )
                                 item["depositConfirmedTx"] = extract_tx_hash(ack_tx)
                         elif _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
-                            retry_delay = post_reissue_api_retry_initial_delay_seconds
+                            retry_delay = api_retry_initial_delay_seconds
                             api_meta: dict[str, Any] | None = None
-                            for api_attempt in range(1, post_reissue_api_retry_attempts + 1):
+                            for api_attempt in range(1, api_retry_attempts + 1):
                                 try:
                                     api_meta = _submit_api_for_pending_message(
                                         action_type=action,
@@ -1293,7 +993,7 @@ def main(
                                     break
                                 except Exception as exc:
                                     if (
-                                        api_attempt >= post_reissue_api_retry_attempts
+                                        api_attempt >= api_retry_attempts
                                         or not is_retryable_signature_sync_error_text(str(exc))
                                     ):
                                         raise
@@ -1301,7 +1001,7 @@ def main(
                                     time.sleep(retry_delay)
                                     retry_delay = min(
                                         max(retry_delay * 1.7, 0.0),
-                                        post_reissue_api_retry_max_delay_seconds,
+                                        api_retry_max_delay_seconds,
                                     )
                             if api_meta is None:
                                 raise RuntimeError("derive API submit failed after retries")
