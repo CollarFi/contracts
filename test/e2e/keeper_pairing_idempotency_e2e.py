@@ -35,7 +35,9 @@ from common import (
     ensure_live_deployments as _ensure_live_deployments,
     print_step as _print_step,
     require_code as _require_code,
+    resolve_l2_runtime_env as _resolve_l2_runtime_env,
     run,
+    write_env_with_updates as _write_env_with_updates,
 )
 from loan_flow_helpers import (
     accept_mandate_for_pending,
@@ -126,7 +128,7 @@ def main(
 
     l1_path = ROOT / l1_json
     l2_path = ROOT / l2_json
-    l1, _, redeployed = _ensure_live_deployments(
+    l1, l2, redeployed = _ensure_live_deployments(
         l1_path,
         l2_path,
         l1_rpc,
@@ -171,7 +173,11 @@ def main(
     l2_state = tmpdir / "l2_state.json"
 
     l1_env.write_text((ROOT / ".env.l1.testnet").read_text() + f"\nRPC_URL={l1_rpc}\nL1_VAULT={vault}\nL1_MESSENGER={messenger}\n")
-    l2_env.write_text((ROOT / ".env.l2.testnet").read_text() + f"\nRPC_URL={l2_rpc}\n")
+    _write_env_with_updates(
+        ROOT / ".env.l2.testnet",
+        l2_env,
+        _resolve_l2_runtime_env(l2_rpc, l2),
+    )
 
     l2_idempotent = _run_keeper(
         [

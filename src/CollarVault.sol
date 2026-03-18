@@ -96,11 +96,21 @@ contract CollarVault is
     event LendingAdapterUpdated(address indexed adapter);
     event VariableLoanPositionImplementationUpdated(address indexed implementation);
     event SubaccountUpdated(uint256 subaccountId);
-    event RfqSignerUpdated(address indexed signer, bool allowed);
     event LZMessengerUpdated(address indexed messenger);
     event FinalizeModuleUpdated(address indexed module);
     event SettleModuleUpdated(address indexed module);
     event RolloverModuleUpdated(address indexed module);
+    event MandateAccepted(
+        uint256 indexed loanId,
+        address indexed borrower,
+        uint64 maturity,
+        uint256 borrowAmount,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint64 deadline,
+        bytes32 lzGuid
+    );
     event CollateralDepositRequested(
         uint256 indexed loanId,
         address indexed borrower,
@@ -120,7 +130,18 @@ contract CollarVault is
     event CollateralDepositReturned(
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
-    // LoanRolledOver is emitted by CollarVaultRolloverModule.
+    event RolloverRequested(
+        uint256 indexed loanId,
+        address indexed borrower,
+        uint64 newMaturity,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint64 deadline,
+        bytes32 mandateHash,
+        bytes32 lzGuid
+    );
+    // RolloverRequested and LoanRolledOver are emitted by CollarVaultRolloverModule.
 
     constructor() {
         _disableInitializers();
@@ -911,19 +932,6 @@ contract CollarVault is
         CollarVaultShared.CollarVaultStorage storage $ = _getCollarVaultStorage();
         $.readyLoanCloseGracePeriod = gracePeriod;
         $.readyLoanKeeperPenaltyBps = keeperPenaltyBps;
-    }
-
-    /// @notice Allow or revoke an RFQ signer.
-    function setRfqSigner(address signer, bool allowed) external onlyRole(PARAMETER_ROLE) {
-        if (signer == address(0)) {
-            revert CV_InvalidConfig();
-        }
-        if (allowed) {
-            _grantRole(RFQ_SIGNER_ROLE, signer);
-        } else {
-            _revokeRole(RFQ_SIGNER_ROLE, signer);
-        }
-        emit RfqSignerUpdated(signer, allowed);
     }
 
     /// @notice Update the LayerZero messenger used to validate L2 acknowledgements.

@@ -4,12 +4,14 @@ pragma solidity ^0.8.20;
 import {TSATestUtils} from "./TSATestUtils.sol";
 import {CollarTSA} from "../../src/CollarTSA.sol";
 import {CollarLoanStore} from "../../src/CollarLoanStore.sol";
+import {ICollarTSA} from "../../src/interfaces/ICollarTSA.sol";
 import {OptionRiskVerifier} from "../../src/verifiers/OptionRiskVerifier.sol";
 import {RfqVerifier} from "../../src/verifiers/RfqVerifier.sol";
 import {CollarTsaRfqDelegateModule} from "../../src/modules/CollarTsaRfqDelegateModule.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
+import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 import {
     TransparentUpgradeableProxy,
     ITransparentUpgradeableProxy
@@ -21,7 +23,7 @@ contract CollarTSATestUtils is TSATestUtils {
     CollarTSA internal collarTsa;
     CollarLoanStore internal loanStore;
 
-    CollarTSA.CollarTSAParams public defaultCollarParams = CollarTSA.CollarTSAParams({
+    ICollarTSA.CollarTSAParams public defaultCollarParams = ICollarTSA.CollarTSAParams({
         minSignatureExpiry: 5 minutes,
         maxSignatureExpiry: 30 minutes,
         optionVolSlippageFactor: 0.9e18,
@@ -32,8 +34,8 @@ contract CollarTSATestUtils is TSATestUtils {
         putMaxPriceFactor: 1.1e18
     });
 
-    CollarTSA.CollateralManagementParams public defaultCollateralManagementParams =
-        CollarTSA.CollateralManagementParams({worstSpotSellPrice: 0.99e18});
+    ICollarTSA.CollateralManagementParams public defaultCollateralManagementParams =
+        ICollarTSA.CollateralManagementParams({worstSpotSellPrice: 0.99e18});
 
     function upgradeToCollarTSA(string memory market) internal {
         IWrappedERC20Asset wrappedDepositAsset;
@@ -83,7 +85,9 @@ contract CollarTSATestUtils is TSATestUtils {
                     optionRiskVerifier: optionRiskVerifier,
                     rfqVerifier: rfqVerifier,
                     rfqDelegateModule: rfqDelegateModule,
-                    loanStore: address(loanStore)
+                    loanStore: address(loanStore),
+                    tsaParams: defaultCollarParams,
+                    collateralManagementParams: defaultCollateralManagementParams
                 })
             )
         );
@@ -105,9 +109,6 @@ contract CollarTSATestUtils is TSATestUtils {
             })
         );
 
-        CollarTSA(address(tsa)).setCollarTSAParams(defaultCollarParams);
-        CollarTSA(address(tsa)).setCollateralManagementParams(defaultCollateralManagementParams);
-
         // loanStore is now required in initialize()
 
         tsa.setShareKeeper(address(this), true);
@@ -116,6 +117,8 @@ contract CollarTSATestUtils is TSATestUtils {
         signer = vm.addr(signerPk);
 
         tsa.setSigner(signer, true);
+        tsa.setSubmitter(address(this), true);
+        loanStore.grantRole(loanStore.WRITER_ROLE(), address(collarTsa));
     }
 
     function _seedLoan(uint256 loanId, uint64 maturity) internal {
@@ -135,5 +138,30 @@ contract CollarTSATestUtils is TSATestUtils {
             maturity,
             uint64(block.timestamp + 1 days)
         );
+    }
+
+    function _loanTaggedNonce(uint256 loanId) internal returns (uint256) {
+        tsaNonce += 1;
+        return (block.timestamp + tsaNonce) * 1_000_000 + loanId;
+    }
+
+    function _signerSigForAction(IActionVerifier.Action memory action) internal returns (bytes memory) {
+        bytes32 typedHash = collarTsa.getActionTypedDataHash(action);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, typedHash);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signTsaAction(IActionVerifier.Action memory action, bytes memory extraData) internal override {
+        collarTsa.signActionViaPermit(action, extraData, _signerSigForAction(action));
+    }
+
+    function _expectRevertingTsaAction(
+        bytes memory revertData,
+        IActionVerifier.Action memory action,
+        bytes memory extraData
+    ) internal {
+        bytes memory signerSig = _signerSigForAction(action);
+        vm.expectRevert(revertData);
+        collarTsa.signActionViaPermit(action, extraData, signerSig);
     }
 }

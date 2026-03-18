@@ -14,7 +14,10 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
 
     event MandateRecorded(uint256 indexed loanId, address borrower, uint256 borrowAmount);
     event CollateralRecorded(uint256 indexed loanId, address collateralAsset, uint256 collateralAmount);
+    event LoanDepositExecutedSet(uint256 indexed loanId, bool executed);
     event LoanConsumed(uint256 indexed loanId);
+    event LoanReturnRequestedSet(uint256 indexed loanId, bool requested);
+    event LoanTradeExecutedSet(uint256 indexed loanId, bool executed);
     event RolloverMandateRecorded(uint256 indexed loanId, bytes32 indexed mandateHash, uint64 maturity);
     event RolloverCleared(uint256 indexed loanId);
 
@@ -204,5 +207,47 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         }
         loan.consumed = true;
         emit LoanConsumed(loanId);
+    }
+
+    function setReturnRequested(uint256 loanId, bool requested) external onlyRole(WRITER_ROLE) {
+        if (loanId == 0) {
+            revert CLS_InvalidLoanId();
+        }
+
+        Loan storage loan = _loans[loanId];
+        if (loan.consumed) {
+            revert CLS_AlreadyConsumed();
+        }
+
+        loan.returnRequested = requested;
+        emit LoanReturnRequestedSet(loanId, requested);
+    }
+
+    function setDepositExecuted(uint256 loanId, bool executed) external onlyRole(WRITER_ROLE) {
+        if (loanId == 0) {
+            revert CLS_InvalidLoanId();
+        }
+
+        Loan storage loan = _loans[loanId];
+        if (loan.consumed) {
+            revert CLS_AlreadyConsumed();
+        }
+
+        loan.depositExecuted = executed;
+        emit LoanDepositExecutedSet(loanId, executed);
+    }
+
+    function setTradeExecuted(uint256 loanId, bool executed) external onlyRole(WRITER_ROLE) {
+        if (loanId == 0) {
+            revert CLS_InvalidLoanId();
+        }
+
+        Loan storage loan = _loans[loanId];
+        if (loan.consumed) {
+            revert CLS_AlreadyConsumed();
+        }
+
+        loan.tradeExecuted = executed;
+        emit LoanTradeExecutedSet(loanId, executed);
     }
 }

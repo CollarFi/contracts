@@ -9,8 +9,10 @@ import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarLoanStore} from "../src/CollarLoanStore.sol";
 import {CollarTSAReceiver} from "../src/bridge/CollarTSAReceiver.sol";
 import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {ICollarLoanStore} from "../src/interfaces/ICollarLoanStore.sol";
 import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol";
+import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
 import {BaseTSA} from "v2-matching/src/tokenizedSubaccounts/BaseTSA.sol";
@@ -20,12 +22,14 @@ import {CashAsset} from "v2-core/src/assets/CashAsset.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ILiquidatableManager} from "v2-core/src/interfaces/ILiquidatableManager.sol";
 import {IMatching} from "v2-matching/src/interfaces/IMatching.sol";
+import {Matching} from "v2-matching/src/Matching.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
 import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
 import {ITradeModule} from "v2-matching/src/interfaces/ITradeModule.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {IOptionAsset} from "v2-core/src/interfaces/IOptionAsset.sol";
+import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 import {IOptionRiskVerifier} from "../src/interfaces/IOptionRiskVerifier.sol";
 import {OptionRiskVerifier} from "../src/verifiers/OptionRiskVerifier.sol";
 import {IRfqVerifier} from "../src/interfaces/IRfqVerifier.sol";
@@ -58,10 +62,34 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// Auto-init env vars (used when TSA_INIT_DATA is omitted and TSA_PROXY is not provided):
 /// - SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING
 /// - BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET
+/// - ATOMIC_EXECUTOR
 /// - OPTION_RISK_VERIFIER (optional; if omitted, deploys OptionRiskVerifier)
 /// - RFQ_VERIFIER (optional; if omitted, deploys RfqVerifier)
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
 /// - TSA_SYMBOL (optional, default "cTSA"), TSA_NAME (optional, default "Collar TSA")
+///
+/// Optional CollarTSA risk/signer windows (applied automatically when a new TSA proxy is deployed):
+/// - TSA_MIN_SIGNATURE_EXPIRY (default: 1800 = 30 minutes)
+/// - TSA_MAX_SIGNATURE_EXPIRY (default: 21600 = 6 hours)
+/// - TSA_OPTION_VOL_SLIPPAGE_FACTOR (default: 0.9e18)
+/// - TSA_CALL_MAX_DELTA (default: 0.4e18)
+/// - TSA_MAX_NEG_CASH (default: -100e18)
+/// - TSA_OPTION_MIN_TIME_TO_EXPIRY (default: 1 days)
+/// - TSA_OPTION_MAX_TIME_TO_EXPIRY (default: 365 days)
+/// - TSA_PUT_MAX_PRICE_FACTOR (default: 1.1e18)
+/// - TSA_WORST_SPOT_SELL_PRICE (default: 0.99e18)
+///
+/// Optional L2->L1 WETH Socket bridge config:
+/// - WETH_ASSET                  (optional; defaults to WRAPPED_DEPOSIT_ASSET.wrappedAsset())
+/// - WETH_SOCKET_BRIDGE          (new Socket controller on L2)
+/// - WETH_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
+/// - WETH_MSG_GAS_LIMIT          (default: 100000)
+/// - WETH_PAYLOAD_SIZE           (default: 161)
+/// - USDC_ASSET                  (optional; defaults to CASH.wrappedAsset())
+/// - USDC_SOCKET_BRIDGE          (new Socket controller on L2)
+/// - USDC_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
+/// - USDC_MSG_GAS_LIMIT          (default: 100000)
+/// - USDC_PAYLOAD_SIZE           (default: 161)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
@@ -93,6 +121,9 @@ contract DeployL2 is Script {
             name: name
         });
 
+        (ICollarTSA.CollarTSAParams memory tsaParams, ICollarTSA.CollateralManagementParams memory collateral) =
+            _buildDefaultCollarTsaParams();
+
         CollarTSA.CollarTSAInitParams memory collarInitParams = CollarTSA.CollarTSAInitParams({
             baseFeed: ISpotFeed(vm.envAddress("BASE_FEED")),
             depositModule: IDepositModule(vm.envAddress("DEPOSIT_MODULE")),
@@ -103,10 +134,33 @@ contract DeployL2 is Script {
             optionRiskVerifier: IOptionRiskVerifier(optionRiskVerifierAddr),
             rfqVerifier: IRfqVerifier(rfqVerifierAddr),
             rfqDelegateModule: ICollarTsaRfqDelegateModule(rfqDelegateModuleAddr),
-            loanStore: loanStoreAddr
+            loanStore: loanStoreAddr,
+            tsaParams: tsaParams,
+            collateralManagementParams: collateral
         });
 
         return abi.encodeCall(CollarTSA.initialize, (initialOwner, baseInitParams, collarInitParams));
+    }
+
+    function _buildDefaultCollarTsaParams()
+        internal
+        view
+        returns (ICollarTSA.CollarTSAParams memory tsaParams, ICollarTSA.CollateralManagementParams memory collateral)
+    {
+        tsaParams = ICollarTSA.CollarTSAParams({
+            minSignatureExpiry: vm.envOr("TSA_MIN_SIGNATURE_EXPIRY", uint256(30 minutes)),
+            maxSignatureExpiry: vm.envOr("TSA_MAX_SIGNATURE_EXPIRY", uint256(6 hours)),
+            optionVolSlippageFactor: vm.envOr("TSA_OPTION_VOL_SLIPPAGE_FACTOR", uint256(0.9e18)),
+            callMaxDelta: vm.envOr("TSA_CALL_MAX_DELTA", uint256(0.4e18)),
+            maxNegCash: vm.envOr("TSA_MAX_NEG_CASH", int256(-100e18)),
+            optionMinTimeToExpiry: vm.envOr("TSA_OPTION_MIN_TIME_TO_EXPIRY", uint256(1 days)),
+            optionMaxTimeToExpiry: vm.envOr("TSA_OPTION_MAX_TIME_TO_EXPIRY", uint256(365 days)),
+            putMaxPriceFactor: vm.envOr("TSA_PUT_MAX_PRICE_FACTOR", uint256(1.1e18))
+        });
+
+        collateral = ICollarTSA.CollateralManagementParams({
+            worstSpotSellPrice: vm.envOr("TSA_WORST_SPOT_SELL_PRICE", uint256(0.99e18))
+        });
     }
 
     function run() external {
@@ -126,8 +180,22 @@ contract DeployL2 is Script {
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
         address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
+        address atomicExecutor = vm.envOr("ATOMIC_EXECUTOR", address(0));
+        address wethAsset = vm.envOr("WETH_ASSET", address(0));
+        address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
+        address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
+        uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
+        uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
+        address usdcAsset = vm.envOr("USDC_ASSET", address(0));
+        address usdcSocketBridge = vm.envOr("USDC_SOCKET_BRIDGE", address(0));
+        address usdcSocketConnector = vm.envOr("USDC_SOCKET_CONNECTOR", address(0));
+        uint256 usdcMsgGasLimit = vm.envOr("USDC_MSG_GAS_LIMIT", uint256(100_000));
+        uint256 usdcPayloadSize = vm.envOr("USDC_PAYLOAD_SIZE", uint256(161));
 
         uint32 l1Eid = uint32(vm.envOr("L1_EID", uint256(0)));
+        address wethAdapter = address(0);
+        address usdcAdapter = address(0);
+        bool bridgeConfigured = false;
 
         vm.startBroadcast();
 
@@ -178,6 +246,15 @@ contract DeployL2 is Script {
         // Receiver writes mandate/collateral/consumed state into loan store.
         bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
         CollarLoanStore(loanStoreAddr).grantRole(writerRole, address(receiver));
+        CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
+
+        if (atomicExecutor != address(0)) {
+            CollarTSA(tsaProxyAddr).setSubmitter(atomicExecutor, true);
+            Matching matching = Matching(vm.envAddress("MATCHING"));
+            if (matching.owner() == admin) {
+                matching.setTradeExecutor(atomicExecutor, true);
+            }
+        }
 
         if (l1Vault != address(0)) {
             receiver.setVaultRecipient(l1Vault);
@@ -185,6 +262,52 @@ contract DeployL2 is Script {
         if (l1Messenger != address(0)) {
             // Allow messages from the L1 messenger (right-aligned bytes32 encoding).
             receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
+        }
+
+        if (wethSocketBridge != address(0) || wethSocketConnector != address(0)) {
+            if (wethSocketBridge == address(0) || wethSocketConnector == address(0)) {
+                revert("WETH_SOCKET_BRIDGE and WETH_SOCKET_CONNECTOR required together");
+            }
+
+            if (wethAsset == address(0)) {
+                wethAsset = address(IWrappedERC20Asset(vm.envAddress("WRAPPED_DEPOSIT_ASSET")).wrappedAsset());
+            }
+            if (wethAsset == address(0)) {
+                revert("WETH_ASSET required");
+            }
+
+            wethAdapter = address(
+                new SocketBridgeAdapterNew(
+                    wethAsset, wethSocketBridge, wethSocketConnector, wethMsgGasLimit, wethPayloadSize, "", ""
+                )
+            );
+            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
+            bridgeConfigured = true;
+        }
+
+        if (usdcSocketBridge != address(0) || usdcSocketConnector != address(0)) {
+            if (usdcSocketBridge == address(0) || usdcSocketConnector == address(0)) {
+                revert("USDC_SOCKET_BRIDGE and USDC_SOCKET_CONNECTOR required together");
+            }
+
+            if (usdcAsset == address(0)) {
+                usdcAsset = address(IERC20BasedAsset(vm.envAddress("CASH")).wrappedAsset());
+            }
+            if (usdcAsset == address(0)) {
+                revert("USDC_ASSET required");
+            }
+
+            usdcAdapter = address(
+                new SocketBridgeAdapterNew(
+                    usdcAsset, usdcSocketBridge, usdcSocketConnector, usdcMsgGasLimit, usdcPayloadSize, "", ""
+                )
+            );
+            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(usdcAsset, IBridgeAdapter(usdcAdapter));
+            bridgeConfigured = true;
+        }
+
+        if (bridgeConfigured) {
+            CollarTSA(tsaProxyAddr).setBridgeCoordinator(address(receiver));
         }
 
         vm.stopBroadcast();
@@ -201,7 +324,10 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
+        json = vm.serializeAddress("addrs", "l2AtomicExecutor", atomicExecutor);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
+        json = vm.serializeAddress("addrs", "l2WethAdapter", wethAdapter);
+        json = vm.serializeAddress("addrs", "l2UsdcAdapter", usdcAdapter);
         vm.writeJson(json, outPath);
 
         console2.log("L2 receiver", address(receiver));
@@ -213,6 +339,18 @@ contract DeployL2 is Script {
         console2.log("L2 optionRiskVerifier", optionRiskVerifierAddr);
         console2.log("L2 rfqVerifier", rfqVerifierAddr);
         console2.log("L2 lzEndpoint", lzEndpoint);
+        if (wethAdapter != address(0)) {
+            console2.log("L2 WETH adapter", wethAdapter);
+            console2.log("L2 WETH bridge asset", wethAsset);
+            console2.log("L2 WETH socket bridge", wethSocketBridge);
+            console2.log("L2 WETH socket connector", wethSocketConnector);
+        }
+        if (usdcAdapter != address(0)) {
+            console2.log("L2 USDC adapter", usdcAdapter);
+            console2.log("L2 USDC bridge asset", usdcAsset);
+            console2.log("L2 USDC socket bridge", usdcSocketBridge);
+            console2.log("L2 USDC socket connector", usdcSocketConnector);
+        }
         console2.log("Wrote", outPath);
     }
 }

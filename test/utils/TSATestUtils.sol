@@ -301,8 +301,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             nonVaultPk
         );
 
-        vm.prank(signer);
-        tsa.signActionData(actions[0], "");
+        _signTsaAction(actions[0], "");
 
         _verifyAndMatch(
             actions,
@@ -371,8 +370,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             nonVaultPk
         );
 
-        vm.prank(signer);
-        tsa.signActionData(actions[0], "");
+        _signTsaAction(actions[0], "");
 
         _verifyAndMatch(
             actions,
@@ -464,8 +462,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             nonVaultPk
         );
 
-        vm.prank(signer);
-        tsa.signActionData(actions[0], "");
+        _signTsaAction(actions[0], "");
 
         _verifyAndMatch(
             // forge-lint: disable-next-line(unsafe-typecast)
@@ -494,8 +491,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
 
     function _executeDeposit(uint256 amount) internal {
         IActionVerifier.Action memory action = _createDepositAction(amount);
-        vm.prank(signer);
-        tsa.signActionData(action, "");
+        _signTsaAction(action, "");
 
         _submitToMatching(action);
     }
@@ -518,8 +514,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
 
     function _executeWithdrawal(uint256 amount) internal {
         IActionVerifier.Action memory action = _createWithdrawalAction(amount);
-        vm.prank(signer);
-        tsa.signActionData(action, "");
+        _signTsaAction(action, "");
 
         _submitToMatching(action);
     }
@@ -530,6 +525,11 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
         bytes[] memory signatures = new bytes[](1);
         actions[0] = action;
         _verifyAndMatch(actions, signatures, encodedAction);
+    }
+
+    function _signTsaAction(IActionVerifier.Action memory action, bytes memory extraData) internal virtual {
+        vm.prank(signer);
+        tsa.signActionData(action, extraData);
     }
 
     function _depositToTSA(uint256 amount) internal {
@@ -642,8 +642,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             owner: address(tsa),
             signer: address(tsa)
         });
-        vm.prank(signer);
-        tsa.signActionData(actions[1], abi.encode(uint256(1), abi.encode(order.trades)));
+        _signTsaAction(actions[1], abi.encode(uint256(1), abi.encode(order.trades)));
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: nonVaultSubacc, takerAccount: tsaSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")
@@ -686,8 +685,7 @@ contract TSATestUtils is IntegrationTestBase, MatchingHelpers {
             nonVaultAddr,
             nonVaultPk
         );
-        vm.prank(signer);
-        tsa.signActionData(actions[0], "");
+        _signTsaAction(actions[0], "");
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: tsaSubacc, takerAccount: nonVaultSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")

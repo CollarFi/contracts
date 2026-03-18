@@ -39,8 +39,10 @@ from common import (
     ensure_live_deployments as _ensure_live_deployments,
     print_step as _print_step,
     require_code as _require_code,
+    resolve_l2_runtime_env as _resolve_l2_runtime_env,
     run,
     set_eth_balance as _set_eth_balance,
+    write_env_with_updates as _write_env_with_updates,
 )
 from loan_flow_helpers import extract_tx_hash, parse_json_or_fallback
 
@@ -107,10 +109,11 @@ def _ensure_l2_keeper_role(l2_rpc: str, receiver: str) -> None:
 
 
 def _ensure_tsa_signer(l2_rpc: str, tsa: str, receiver: str) -> None:
-    is_signer = cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() == "true"
-    if is_signer:
-        return
-    cast_send_pk(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")
+    if cast_call(l2_rpc, tsa, "isSigner(address)(bool)", receiver).strip().lower() != "true":
+        cast_send_pk(l2_rpc, tsa, "setSigner(address,bool)", receiver, "true")
+
+    if cast_call(l2_rpc, tsa, "isSigner(address)(bool)", ANVIL_ADDR0).strip().lower() != "true":
+        cast_send_pk(l2_rpc, tsa, "setSigner(address,bool)", ANVIL_ADDR0, "true")
 
 
 def _inject_return_request(l2_rpc: str, receiver: str, guid: str, loan_id: int, asset: str, recipient: str, subaccount_id: int) -> str:
@@ -183,7 +186,7 @@ def main(
 
     subaccount_id = int(cast_call(l2_rpc, tsa, "subAccount()(uint256)").split()[0])
     block_now = int(run(["cast", "block-number", "--rpc-url", l2_rpc]).split()[0])
-    loan_id = 9_000_000 + block_now
+    loan_id = 900_000 + (block_now % 90_000)
     request_guid = "0x" + format(90_000_000 + loan_id, "064x")
 
     relay_tx = _inject_return_request(l2_rpc, receiver, request_guid, loan_id, sepolia_weth, vault, subaccount_id)
@@ -192,7 +195,11 @@ def main(
 
     tmpdir = Path(tempfile.mkdtemp(prefix="l2-keeper-return-request-"))
     l2_env = tmpdir / ".env.l2.fork"
-    l2_env.write_text((ROOT / ".env.l2.testnet").read_text() + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
+    _write_env_with_updates(
+        ROOT / ".env.l2.testnet",
+        l2_env,
+        _resolve_l2_runtime_env(l2_rpc, l2, receiver),
+    )
 
     dry_state = tmpdir / "keeper_l2_dry_state.json"
     dry_cmd = [
@@ -206,7 +213,6 @@ def main(
         "--start-block",
         str(l2_start_block),
         "--once",
-        "--include-return-requests",
         "--json",
     ]
     dry_first = _run_keeper_command(dry_cmd)
@@ -233,7 +239,6 @@ def main(
         "--start-block",
         str(l2_start_block),
         "--once",
-        "--include-return-requests",
         "--broadcast",
         "--private-key",
         ANVIL_PK0,
@@ -267,7 +272,6 @@ def main(
         "--start-block",
         str(l2_start_block),
         "--once",
-        "--include-return-requests",
         "--broadcast",
         "--private-key",
         ANVIL_PK0,

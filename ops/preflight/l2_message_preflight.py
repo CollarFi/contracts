@@ -63,22 +63,38 @@ def _parse_pending_message(raw: str) -> dict[str, Any]:
         r"^\((\d+),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]*)\)$",
         s,
     )
-    if not m:
-        raise ValueError(f"failed to parse pendingMessages tuple: {raw}")
+    if m:
+        return {
+            "action": int(m.group(1)),
+            "loanId": int(m.group(2)),
+            "asset": m.group(3),
+            "amount": int(m.group(4)),
+            "recipient": m.group(5),
+            "subaccountId": int(m.group(6)),
+            "socketMessageId": m.group(7),
+            "secondaryAmount": int(m.group(8)),
+            "quoteHash": m.group(9),
+            "takerNonce": int(m.group(10)),
+            "data": m.group(11),
+        }
 
-    return {
-        "action": int(m.group(1)),
-        "loanId": int(m.group(2)),
-        "asset": m.group(3),
-        "amount": int(m.group(4)),
-        "recipient": m.group(5),
-        "subaccountId": int(m.group(6)),
-        "socketMessageId": m.group(7),
-        "secondaryAmount": int(m.group(8)),
-        "quoteHash": m.group(9),
-        "takerNonce": int(m.group(10)),
-        "data": m.group(11),
-    }
+    lines = [line.strip() for line in s.splitlines() if line.strip()]
+    if len(lines) == 11:
+        return {
+            "action": int(lines[0]),
+            "loanId": int(lines[1]),
+            "asset": lines[2],
+            "amount": int(lines[3]),
+            "recipient": lines[4],
+            "subaccountId": int(lines[5]),
+            "socketMessageId": lines[6],
+            "secondaryAmount": int(lines[7]),
+            "quoteHash": lines[8],
+            "takerNonce": int(lines[9]),
+            "data": lines[10],
+        }
+
+    raise ValueError(f"failed to parse pendingMessages tuple: {raw}")
 
 
 def _recent_message_guids(rpc_url: str, receiver: str, from_block: int, to_block: int) -> list[str]:
@@ -159,7 +175,7 @@ def main(
         pending_raw = cast_call(
             rpc_url,
             receiver_addr,
-            "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
+            "pendingMessages(bytes32)(uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes)",
             g,
             allow_fail=True,
         )

@@ -4,9 +4,12 @@ pragma solidity ^0.8.20;
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 import {IRfqModule} from "v2-matching/src/interfaces/IRfqModule.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
+import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
+import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
 
 import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarTSATestUtils} from "./utils/CollarTSATestUtils.sol";
+import {MockBridgeAdapter} from "./mocks/MockBridgeAdapter.sol";
 
 contract CollarTSA_ValidationTests is CollarTSATestUtils {
     function setUp() public override {
@@ -44,7 +47,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -54,8 +57,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testAllowsCashWithdrawal() public {
@@ -66,7 +68,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: withdrawalModule,
             data: _encodeWithdrawData(500e6, address(cash)),
             expiry: block.timestamp + 8 minutes,
@@ -74,8 +76,136 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, "");
+        _signTsaAction(action, "");
+    }
+
+    function testSignActionViaPermitRecordsWithdrawNonceByLoanId() public {
+        uint256 usdcAmount = 1_000e6;
+        usdc.mint(address(this), usdcAmount);
+        usdc.approve(address(cash), usdcAmount);
+        cash.deposit(tsaSubacc, usdcAmount);
+
+        uint256 loanId = 42;
+        uint256 nonce = block.timestamp * 1_000_000 + loanId;
+
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsaSubacc,
+            nonce: nonce,
+            module: withdrawalModule,
+            data: _encodeWithdrawData(500e6, address(cash)),
+            expiry: block.timestamp + 8 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        bytes32 typedHash = collarTsa.getActionTypedDataHash(action);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, typedHash);
+        bytes memory signerSig = abi.encodePacked(r, s, v);
+
+        collarTsa.setSubmitter(address(this), true);
+
+        assertFalse(collarTsa.withdrawExecuted(loanId));
+        vm.expectEmit(true, false, true, true);
+        emit CollarTSA.WithdrawNonceRecorded(loanId, nonce, typedHash);
+        collarTsa.signActionViaPermit(action, "", signerSig);
+        // Direct signActionViaPermit call only records nonce; execution proof requires module nonce consumption.
+        assertFalse(collarTsa.withdrawExecuted(loanId));
+    }
+
+    function testEstimateBridgeFeesUsesConfiguredAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        adapter.setFee(123);
+
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+
+        assertEq(collarTsa.estimateBridgeFees(bridgeAsset, address(0xCAFE), 1e18), 123);
+    }
+
+    function testEstimateBridgeFeesUsesConfiguredCashAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address cashBridgeAsset = address(cash.wrappedAsset());
+        adapter.setFee(456);
+
+        collarTsa.setSocketBridgeConfig(cashBridgeAsset, adapter);
+
+        assertEq(collarTsa.estimateBridgeFees(cashBridgeAsset, address(0xCAFE), 1_000e6), 456);
+    }
+
+    function testEstimateBridgeFeesRevertsWithoutConfig() public {
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.estimateBridgeFees(address(0xBEEF), address(0xCAFE), 1e18);
+    }
+
+    function testSetSocketBridgeConfigAllowsClearingAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, IBridgeAdapter(address(0)));
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.estimateBridgeFees(bridgeAsset, address(0xCAFE), 1e18);
+    }
+
+    function testBridgeToL1RequiresCoordinator() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        adapter.setFee(5);
+        adapter.setMessageId(bytes32(uint256(11)));
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(address(0xBEEF));
+
+        vm.expectRevert(CollarTSA.CTSA_InvalidConfig.selector);
+        collarTsa.bridgeToL1{value: 5}(bridgeAsset, 1e18, address(0xCAFE));
+    }
+
+    function testBridgeToL1UsesConfiguredAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(markets[MARKET].base.wrappedAsset());
+        address coordinator = address(0xBEEF);
+        uint256 amount = 3e18;
+        uint256 fee = 5;
+        bytes32 messageId = bytes32(uint256(42));
+
+        adapter.setFee(fee);
+        adapter.setMessageId(messageId);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(coordinator);
+
+        vm.deal(coordinator, fee);
+        vm.prank(coordinator);
+        bytes32 returnedMessageId = collarTsa.bridgeToL1{value: fee}(bridgeAsset, amount, address(0xCAFE));
+
+        assertEq(returnedMessageId, messageId);
+        assertEq(adapter.lastReceiver(), address(0xCAFE));
+        assertEq(adapter.lastAmount(), amount);
+        assertEq(adapter.lastValue(), fee);
+        assertEq(adapter.bridgeCallCount(), 1);
+    }
+
+    function testBridgeToL1UsesConfiguredCashAdapter() public {
+        MockBridgeAdapter adapter = new MockBridgeAdapter();
+        address bridgeAsset = address(cash.wrappedAsset());
+        address coordinator = address(0xBEEF);
+        uint256 amount = 1_000e6;
+        uint256 fee = 7;
+        bytes32 messageId = bytes32(uint256(43));
+
+        adapter.setFee(fee);
+        adapter.setMessageId(messageId);
+        collarTsa.setSocketBridgeConfig(bridgeAsset, adapter);
+        collarTsa.setBridgeCoordinator(coordinator);
+
+        vm.deal(coordinator, fee);
+        vm.prank(coordinator);
+        bytes32 returnedMessageId = collarTsa.bridgeToL1{value: fee}(bridgeAsset, amount, address(0xCAFE));
+
+        assertEq(returnedMessageId, messageId);
+        assertEq(adapter.lastReceiver(), address(0xCAFE));
+        assertEq(adapter.lastAmount(), amount);
+        assertEq(adapter.lastValue(), fee);
+        assertEq(adapter.bridgeCallCount(), 1);
     }
 
     function testRejectsCashWithdrawalWhenInsufficient() public {
@@ -86,7 +216,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: withdrawalModule,
             data: _encodeWithdrawData(200e6, address(cash)),
             expiry: block.timestamp + 8 minutes,
@@ -94,9 +224,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_WithdrawalNegativeCash.selector);
-        collarTsa.signActionData(action, "");
+        _expectRevertingTsaAction(abi.encodeWithSelector(CollarTSA.CTSA_WithdrawalNegativeCash.selector), action, "");
     }
 
     function testRejectsLongCall() public {
@@ -126,7 +254,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -136,9 +264,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_CanOnlyOpenShortCalls.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_CanOnlyOpenShortCalls()"))),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsShortPut() public {
@@ -169,7 +299,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -179,9 +309,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_OnlyLongPutsAllowed.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_OnlyLongPutsAllowed()"))),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testPutPriceTooHigh() public {
@@ -192,7 +324,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
         _setFixedSVIDataForExpiry(MARKET, expiry);
 
-        CollarTSA.CollarTSAParams memory params = collarTsa.getCollarTSAParams();
+        ICollarTSA.CollarTSAParams memory params = collarTsa.getCollarTSAParams();
         params.putMaxPriceFactor = 1e18;
         collarTsa.setCollarTSAParams(params);
 
@@ -215,7 +347,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -225,9 +357,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_PutPriceTooHigh.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_PutPriceTooHigh()"))),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsTakerOrderHashMismatch() public {
@@ -253,7 +387,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         IActionVerifier.Action memory action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
@@ -263,9 +397,56 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_TradeDataDoesNotMatchOrderHash.selector);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_TradeDataDoesNotMatchOrderHash()"))),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
+    }
+
+    function testRejectsRfqAfterReturnRequested() public {
+        _depositToTSA(1e18);
+        _executeDeposit(1e18);
+
+        uint64 expiry = uint64(block.timestamp + 7 days);
+        _setForwardPrice(MARKET, expiry, 2000e18, 1e18);
+        _setFixedSVIDataForExpiry(MARKET, expiry);
+
+        IRfqModule.TradeData[] memory trades = new IRfqModule.TradeData[](2);
+        trades[0] = IRfqModule.TradeData({
+            asset: address(markets[MARKET].option),
+            subId: OptionEncoding.toSubId(expiry, 2200e18, true),
+            price: 100e18,
+            amount: 1e18
+        });
+        trades[1] = IRfqModule.TradeData({
+            asset: address(markets[MARKET].option),
+            subId: OptionEncoding.toSubId(expiry, 2000e18, false),
+            price: 100e18,
+            amount: -1e18
+        });
+
+        IRfqModule.TakerOrder memory order =
+            IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
+
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsaSubacc,
+            nonce: _loanTaggedNonce(1),
+            module: rfqModule,
+            data: abi.encode(order),
+            expiry: block.timestamp + 8 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        _seedLoan(1, expiry);
+        loanStore.setReturnRequested(1, true);
+
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
+            action,
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function _prepareRollover(uint256 loanId, uint64 oldExpiry, uint64 newExpiry, uint256 minNetInterest) internal {
@@ -325,22 +506,26 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         }
     }
 
-    function _signRolloverRfq(uint256 loanId, IRfqModule.TradeData[] memory trades) internal {
+    function _buildRolloverRfqAction(uint256 loanId, IRfqModule.TradeData[] memory trades)
+        internal
+        returns (IActionVerifier.Action memory action)
+    {
         IRfqModule.TakerOrder memory order =
             IRfqModule.TakerOrder({orderHash: keccak256(abi.encode(trades)), maxFee: 0});
 
-        IActionVerifier.Action memory action = IActionVerifier.Action({
+        action = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(loanId),
             module: rfqModule,
             data: abi.encode(order),
             expiry: block.timestamp + 8 minutes,
             owner: address(tsa),
             signer: address(tsa)
         });
+    }
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(loanId, abi.encode(trades)));
+    function _signRolloverRfq(uint256 loanId, IRfqModule.TradeData[] memory trades) internal {
+        _signTsaAction(_buildRolloverRfqAction(loanId, trades), abi.encode(loanId, abi.encode(trades)));
     }
 
     function testAllowsRolloverWithFourLegPortfolioTransition() public {
@@ -386,8 +571,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[1] = full[2];
         trades[2] = full[3];
 
-        vm.expectRevert(bytes4(keccak256("CTSA_InvalidRfqTradeLength()")));
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeLength()"))),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverWrongExpiryOnLeg() public {
@@ -409,8 +597,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setOptionAsset(trades);
         trades[0].subId = OptionEncoding.toSubId(newExpiry, 2200e18, true);
 
-        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverWrongDirectionOnLeg() public {
@@ -432,8 +623,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setOptionAsset(trades);
         trades[3].amount = 1e18;
 
-        vm.expectRevert(CollarTSA.CTSA_InvalidRfqTradeDetails.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function testRejectsRolloverOnEconomicsGuardFailure() public {
@@ -454,8 +648,11 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         IRfqModule.TradeData[] memory trades = _rolloverTrades(oldExpiry, newExpiry);
         _setOptionAsset(trades);
 
-        vm.expectRevert(CollarTSA.CTSA_InsufficientCash.selector);
-        _signRolloverRfq(1, trades);
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InsufficientCash()"))),
+            _buildRolloverRfqAction(1, trades),
+            abi.encode(uint256(1), abi.encode(trades))
+        );
     }
 
     function _openCollarPosition(int256 amount, uint64 expiry) internal {
@@ -496,7 +693,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         actions[1] = IActionVerifier.Action({
             subaccountId: tsaSubacc,
-            nonce: ++tsaNonce,
+            nonce: _loanTaggedNonce(1),
             module: rfqModule,
             data: abi.encode(takerOrder),
             expiry: block.timestamp + 8 minutes,
@@ -506,14 +703,14 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, expiry);
 
-        vm.prank(signer);
-        tsa.signActionData(actions[1], abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(actions[1], abi.encode(uint256(1), abi.encode(trades)));
 
         IRfqModule.FillData memory fill = IRfqModule.FillData({
             makerAccount: nonVaultSubacc, takerAccount: tsaSubacc, makerFee: 0, takerFee: 0, managerData: bytes("")
         });
 
         _verifyAndMatch(actions, signatures, abi.encode(fill));
+        loanStore.setTradeExecuted(1, false);
     }
 
     function testAllowsSpotRfqSellAsTaker() public {
@@ -540,8 +737,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
 
         _seedLoan(1, 0);
 
-        vm.prank(signer);
-        collarTsa.signActionData(action, abi.encode(uint256(1), abi.encode(trades)));
+        _signTsaAction(action, abi.encode(uint256(1), abi.encode(trades)));
     }
 
     function testRejectsSpotRfqSellAsMaker() public {
@@ -565,8 +761,6 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        vm.prank(signer);
-        vm.expectRevert(CollarTSA.CTSA_SpotRfqRequiresTaker.selector);
-        collarTsa.signActionData(action, "");
+        _expectRevertingTsaAction(abi.encodeWithSelector(bytes4(keccak256("CTSA_SpotRfqRequiresTaker()"))), action, "");
     }
 }

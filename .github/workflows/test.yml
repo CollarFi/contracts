@@ -53,6 +53,10 @@ jobs:
           forge build --skip script
         id: build
 
+      - name: Check contract sizes
+        run: |
+          python3 ops/check_contract_sizes.py
+
       - name: Run Forge tests
         run: |
           forge test -vvv --skip script
@@ -123,6 +127,11 @@ jobs:
           SOCKET_TRACKER=0xFDC28fA368c33DEC7853d63B65FC5Cfe01B212fc
           DERIVE_MARKET=ETH
           EOF
+
+      - name: Check contract sizes for e2e
+        run: |
+          forge build --skip script
+          python3 ops/check_contract_sizes.py
 
       - name: Run deployment e2e
         run: |

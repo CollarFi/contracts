@@ -42,7 +42,7 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
     if not path.is_file():
         raise FileNotFoundError(f"matching registry file not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
-    needed = ["matching", "deposit", "withdrawal", "trade", "rfq"]
+    needed = ["matching", "deposit", "withdrawal", "trade", "rfq", "atomicExecutor"]
     missing = [k for k in needed if not data.get(k)]
     if missing:
         raise ValueError(f"registry missing keys {missing} in {path}")
@@ -52,6 +52,7 @@ def _load_matching_registry(chain_id: str) -> dict[str, str]:
         "WITHDRAWAL_MODULE": str(data["withdrawal"]),
         "TRADE_MODULE": str(data["trade"]),
         "RFQ_MODULE": str(data["rfq"]),
+        "ATOMIC_EXECUTOR": str(data["atomicExecutor"]),
     }
 
 
@@ -243,6 +244,7 @@ def main(
         "TSA_INIT_DATA",
         "L1_EID",
         "MATCHING",
+        "ATOMIC_EXECUTOR",
         "DEPOSIT_MODULE",
         "WITHDRAWAL_MODULE",
         "TRADE_MODULE",
@@ -256,9 +258,29 @@ def main(
         "OPTION_ASSET",
         "OPTION_RISK_VERIFIER",
         "RFQ_VERIFIER",
+        "WETH_ASSET",
+        "WETH_SOCKET_BRIDGE",
+        "WETH_SOCKET_CONNECTOR",
+        "WETH_MSG_GAS_LIMIT",
+        "WETH_PAYLOAD_SIZE",
+        "USDC_ASSET",
+        "USDC_SOCKET_BRIDGE",
+        "USDC_SOCKET_CONNECTOR",
+        "USDC_MSG_GAS_LIMIT",
+        "USDC_PAYLOAD_SIZE",
         "TSA_INITIAL_OWNER",
         "TSA_SYMBOL",
         "TSA_NAME",
+        "TSA_MIN_SIGNATURE_EXPIRY",
+        "TSA_MAX_SIGNATURE_EXPIRY",
+        "TSA_OPTION_VOL_SLIPPAGE_FACTOR",
+        "TSA_CALL_MAX_DELTA",
+        "TSA_MAX_NEG_CASH",
+        "TSA_OPTION_MIN_TIME_TO_EXPIRY",
+        "TSA_OPTION_MAX_TIME_TO_EXPIRY",
+        "TSA_PUT_MAX_PRICE_FACTOR",
+        "TSA_WORST_SPOT_SELL_PRICE",
+        "DISABLE_CODE_SIZE_LIMIT",
     ):
         if l2.get(opt):
             env_overrides[opt] = l2[opt]
