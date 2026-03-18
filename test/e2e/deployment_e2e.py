@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -389,10 +390,60 @@ def main(
         {
             "L2_RECEIVER": l2a.get("l2Receiver", ""),
             "L2_TSA": l2a.get("l2Tsa", ""),
+            "ATOMIC_EXECUTOR": l2a.get("l2AtomicExecutor", ""),
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
             "ACCOUNT": "CDPDeployer",
         },
     )
+
+    tsa_addr = l2a["l2Tsa"]
+    collar_addrs_raw = run(
+        [
+            "cast",
+            "call",
+            tsa_addr,
+            "getCollarTSAAddresses()(address,address,address,address,address,address)",
+            "--rpc-url",
+            l2_rpc,
+        ]
+    )
+    collar_addrs = re.findall(r"0x[a-fA-F0-9]{40}", collar_addrs_raw)
+    if len(collar_addrs) >= 6:
+        _write_env(
+            load_env(l2_fork_env),
+            l2_fork_env,
+            l2_rpc,
+            {
+                "BASE_FEED": collar_addrs[0],
+                "DEPOSIT_MODULE": collar_addrs[1],
+                "WITHDRAWAL_MODULE": collar_addrs[2],
+                "TRADE_MODULE": collar_addrs[3],
+                "RFQ_MODULE": collar_addrs[4],
+                "OPTION_ASSET": collar_addrs[5],
+            },
+        )
+
+    base_addrs_raw = run(
+        [
+            "cast",
+            "call",
+            tsa_addr,
+            "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+            "--rpc-url",
+            l2_rpc,
+        ]
+    )
+    base_addrs = re.findall(r"0x[a-fA-F0-9]{40}", base_addrs_raw)
+    if len(base_addrs) >= 7:
+        _write_env(
+            load_env(l2_fork_env),
+            l2_fork_env,
+            l2_rpc,
+            {
+                "WRAPPED_DEPOSIT_ASSET": base_addrs[2],
+                "MATCHING": base_addrs[6],
+            },
+        )
 
     l1_vault = l1a["l1Vault"]
     l2_receiver = l2a["l2Receiver"]

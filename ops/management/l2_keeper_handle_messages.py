@@ -65,6 +65,13 @@ def _read_addr_from_output(path_value: str, key: str) -> str:
     return str(val)
 
 
+def _extract_addresses(raw: str, expected: int, label: str) -> list[str]:
+    addrs = re.findall(r"0x[a-fA-F0-9]{40}", raw)
+    if len(addrs) < expected:
+        raise RuntimeError(f"failed to parse {label}: {raw}")
+    return addrs[:expected]
+
+
 def _default_output_json(rpc_url: str, side: str) -> str:
     chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
     return str(ROOT_DIR / "deployments" / chain_id / f"{side}.json")
@@ -75,6 +82,58 @@ def _resolve_receiver_addr(env: dict[str, str]) -> str:
         return str(env["L2_RECEIVER"])
     output_json = env.get("OUTPUT_JSON") or _default_output_json(must(env, "RPC_URL"), "l2")
     return _read_addr_from_output(output_json, "l2Receiver")
+
+
+def _resolve_atomic_executor_addr(env: dict[str, str], rpc_url: str) -> str:
+    configured = (env.get("ATOMIC_EXECUTOR") or "").strip()
+    if configured:
+        return configured
+    output_json = env.get("OUTPUT_JSON") or _default_output_json(rpc_url, "l2")
+    try:
+        return _read_addr_from_output(output_json, "l2AtomicExecutor")
+    except Exception:
+        return ""
+
+
+def _resolve_local_atomic_config(
+    rpc_url: str,
+    tsa_addr: str,
+    deposit_module: str,
+    withdrawal_module: str,
+    wrapped_deposit_asset: str,
+) -> tuple[str, str, str]:
+    resolved_deposit = deposit_module.strip()
+    resolved_withdrawal = withdrawal_module.strip()
+    resolved_wrapped = wrapped_deposit_asset.strip()
+
+    if not (resolved_deposit and resolved_withdrawal):
+        collar_addrs = _extract_addresses(
+            cast_call(
+                rpc_url,
+                tsa_addr,
+                "getCollarTSAAddresses()(address,address,address,address,address,address)",
+            ),
+            6,
+            "getCollarTSAAddresses",
+        )
+        if not resolved_deposit:
+            resolved_deposit = collar_addrs[1]
+        if not resolved_withdrawal:
+            resolved_withdrawal = collar_addrs[2]
+
+    if not resolved_wrapped:
+        base_addrs = _extract_addresses(
+            cast_call(
+                rpc_url,
+                tsa_addr,
+                "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+            ),
+            7,
+            "getBaseTSAAddresses",
+        )
+        resolved_wrapped = base_addrs[2]
+
+    return resolved_deposit, resolved_withdrawal, resolved_wrapped
 
 
 def _block_number(rpc_url: str) -> int:
@@ -806,7 +865,7 @@ def main(
 
     tsa_addr = cast_call(rpc_url, receiver_addr, "tsa()(address)").strip()
     matching_addr = _matching_addr(rpc_url, tsa_addr, env.get("MATCHING", "").strip())
-    atomic_executor_addr = (env.get("ATOMIC_EXECUTOR") or "").strip()
+    atomic_executor_addr = _resolve_atomic_executor_addr(env, rpc_url)
     deposit_module = (env.get("DEPOSIT_MODULE") or "").strip()
     withdrawal_module = (env.get("WITHDRAWAL_MODULE") or "").strip()
     wrapped_deposit_asset = (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip()
@@ -831,6 +890,13 @@ def main(
         signer_wallet = wallet_address(account=account, private_key=pk)
         assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
     if broadcast and local_atomic_submit:
+        deposit_module, withdrawal_module, wrapped_deposit_asset = _resolve_local_atomic_config(
+            rpc_url,
+            tsa_addr,
+            deposit_module,
+            withdrawal_module,
+            wrapped_deposit_asset,
+        )
         if not atomic_executor_addr:
             raise ValueError("local atomic submission requires ATOMIC_EXECUTOR in env")
         for key, value in (

@@ -54,6 +54,61 @@ def load_addrs(path: Path) -> dict:
     return data.get("addrs", data)
 
 
+def _extract_addresses(raw: str, expected: int, label: str) -> list[str]:
+    addrs = re.findall(r"0x[a-fA-F0-9]{40}", raw)
+    if len(addrs) < expected:
+        raise RuntimeError(f"failed to parse {label}: {raw}")
+    return addrs[:expected]
+
+
+def resolve_l2_runtime_env(l2_rpc: str, l2_addrs: dict, receiver: str | None = None) -> dict[str, str]:
+    tsa = str(l2_addrs["l2Tsa"])
+    receiver_addr = receiver or str(l2_addrs["l2Receiver"])
+    atomic_executor = str(l2_addrs["l2AtomicExecutor"])
+
+    collar_addrs = _extract_addresses(
+        cast_call(
+            l2_rpc,
+            tsa,
+            "getCollarTSAAddresses()(address,address,address,address,address,address)",
+        ),
+        6,
+        "getCollarTSAAddresses",
+    )
+    base_addrs = _extract_addresses(
+        cast_call(
+            l2_rpc,
+            tsa,
+            "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+        ),
+        7,
+        "getBaseTSAAddresses",
+    )
+
+    return {
+        "RPC_URL": l2_rpc,
+        "L2_RECEIVER": receiver_addr,
+        "L2_TSA": tsa,
+        "ATOMIC_EXECUTOR": atomic_executor,
+        "BASE_FEED": collar_addrs[0],
+        "DEPOSIT_MODULE": collar_addrs[1],
+        "WITHDRAWAL_MODULE": collar_addrs[2],
+        "TRADE_MODULE": collar_addrs[3],
+        "RFQ_MODULE": collar_addrs[4],
+        "OPTION_ASSET": collar_addrs[5],
+        "WRAPPED_DEPOSIT_ASSET": base_addrs[2],
+        "MATCHING": base_addrs[6],
+    }
+
+
+def write_env_with_updates(base_env_path: Path, out_path: Path, updates: dict[str, str]) -> Path:
+    lines = [base_env_path.read_text().rstrip("\n")]
+    for key, value in updates.items():
+        lines.append(f"{key}={value}")
+    out_path.write_text("\n".join(lines) + "\n")
+    return out_path
+
+
 def extract_local_port(rpc: str) -> int | None:
     try:
         parsed = urlparse(rpc)

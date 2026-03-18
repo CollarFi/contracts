@@ -16,6 +16,8 @@ import sys
 sys.path.insert(0, str(THIS_DIR))
 from common import ensure_liquidity_vault_role as _ensure_liquidity_vault_role
 from common import seed_l1_liquidity_vault as _seed_l1_liquidity_vault
+from common import resolve_l2_runtime_env as _resolve_l2_runtime_env
+from common import write_env_with_updates as _write_env_with_updates
 from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_COLLATERAL_ASSET, L2_ANVIL_PORT, L2_ARTIFACT_JSON
 from loan_flow_helpers import resolve_mandate_ttl
 
@@ -558,11 +560,14 @@ def main(
     step("grant_tsa_signer", lambda: _ensure_tsa_signer(l2_rpc, l2a["l2Tsa"], receiver))
 
     def run_l2_keeper_once():
-        base = (ROOT / ".env.l2.testnet").read_text()
         tmpdir = Path(tempfile.mkdtemp(prefix="e2e-l2-"))
         tmp = tmpdir / ".env.l2.fork"
         state = tmpdir / "keeper_l2_state.json"
-        tmp.write_text(base + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
+        _write_env_with_updates(
+            ROOT / ".env.l2.testnet",
+            tmp,
+            _resolve_l2_runtime_env(l2_rpc, l2a, receiver),
+        )
         start_block = _tx_block(l2_rpc, out["steps"][2]["result"]["relayTx"])
 
         env = dict(os.environ)
