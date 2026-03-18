@@ -226,9 +226,6 @@ def main(
     elif verify and not has_verify_params:
         print("[yellow][warn][/yellow] verify requested but verifier params not set; skipping forge --verify flags")
 
-    if str(l2.get("DISABLE_CODE_SIZE_LIMIT", "")).lower() in {"1", "true", "yes"}:
-        extra_args.append("--disable-code-size-limit")
-
     env_overrides = {
         "ADMIN": l2["ADMIN"],
         "OUTPUT_JSON": l2["OUTPUT_JSON"],

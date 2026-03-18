@@ -128,6 +128,11 @@ jobs:
           DERIVE_MARKET=ETH
           EOF
 
+      - name: Check contract sizes for e2e
+        run: |
+          forge build --skip script
+          python3 ops/check_contract_sizes.py
+
       - name: Run deployment e2e
         run: |
           set -euo pipefail
