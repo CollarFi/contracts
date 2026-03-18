@@ -16,6 +16,8 @@ import sys
 sys.path.insert(0, str(THIS_DIR))
 from common import ensure_liquidity_vault_role as _ensure_liquidity_vault_role
 from common import seed_l1_liquidity_vault as _seed_l1_liquidity_vault
+from common import resolve_l2_runtime_env as _resolve_l2_runtime_env
+from common import write_env_with_updates as _write_env_with_updates
 from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_COLLATERAL_ASSET, L2_ANVIL_PORT, L2_ARTIFACT_JSON
 from loan_flow_helpers import resolve_mandate_ttl
 
@@ -83,6 +85,12 @@ def extract_tx_hash(raw: str) -> str:
     if hashes:
         return hashes[-1]
     raise RuntimeError(f"could not extract tx hash: {raw[:240]}")
+
+
+def _tx_block(rpc: str, tx_hash: str) -> int:
+    receipt = json.loads(run(["cast", "receipt", tx_hash, "--rpc-url", rpc, "--json"]))
+    block_raw = receipt.get("blockNumber", "0x0")
+    return int(block_raw, 0) if isinstance(block_raw, str) else int(block_raw)
 
 
 def cast_call(rpc: str, to: str, sig: str, *args: str) -> str:
@@ -243,15 +251,45 @@ def _deploy_bridge_mock(l1_rpc: str) -> str:
 
 
 def _pending_message_raw(l2_rpc: str, receiver: str, guid: str) -> str:
-    return cast_call(l2_rpc, receiver, "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))", guid)
+    return cast_call(
+        l2_rpc,
+        receiver,
+        "pendingMessages(bytes32)(uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes)",
+        guid,
+    )
+
+
+def _parse_pending_message(raw: str) -> dict[str, str | int]:
+    cleaned = re.sub(r"\s*\[[^\]]+\]", "", raw.strip())
+    tuple_match = re.match(
+        r"^\((\d+),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]*)\)$",
+        cleaned,
+    )
+    if tuple_match:
+        parts = [tuple_match.group(i) for i in range(1, 12)]
+    else:
+        parts = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if len(parts) != 11:
+            raise RuntimeError(f"failed parse pending message: {raw}")
+
+    return {
+        "action": int(parts[0]),
+        "loanId": int(parts[1]),
+        "asset": parts[2],
+        "amount": int(parts[3]),
+        "recipient": parts[4],
+        "subaccountId": int(parts[5]),
+        "socketMessageId": parts[6],
+        "secondaryAmount": int(parts[7]),
+        "quoteHash": parts[8],
+        "takerNonce": int(parts[9]),
+        "data": parts[10],
+    }
 
 
 def _ensure_socket_finalized_for_guid(l2_rpc: str, receiver: str, guid: str) -> dict:
-    raw = _pending_message_raw(l2_rpc, receiver, guid)
-    m = re.search(r",\s*(0x[a-fA-F0-9]{64}),\s*\d+\s*,\s*0x[a-fA-F0-9]{64},", raw)
-    if not m:
-        raise RuntimeError(f"failed parsing socketMessageId: {raw}")
-    socket_message_id = m.group(1)
+    msg = _parse_pending_message(_pending_message_raw(l2_rpc, receiver, guid))
+    socket_message_id = str(msg["socketMessageId"])
     if socket_message_id == "0x" + "00" * 32:
         return {"socketMessageId": socket_message_id, "updated": False}
     mock = _deploy_socket_mock(l2_rpc)
@@ -261,12 +299,10 @@ def _ensure_socket_finalized_for_guid(l2_rpc: str, receiver: str, guid: str) -> 
 
 
 def _ensure_receiver_asset_balance_for_guid(l2_rpc: str, receiver: str, guid: str) -> dict:
-    raw = _pending_message_raw(l2_rpc, receiver, guid)
-    m = re.match(r"\(\d+,\s*\d+(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,", raw)
-    if not m:
-        raise RuntimeError(f"failed parse pending asset/amount: {raw}")
-    asset, amount_s = m.groups()
-    amount = int(amount_s)
+    msg = _parse_pending_message(_pending_message_raw(l2_rpc, receiver, guid))
+    asset = str(msg["asset"])
+    amount = int(msg["amount"])
+    amount_s = str(amount)
     bal_before = int(cast_call(l2_rpc, asset, "balanceOf(address)(uint256)", receiver).split()[0])
     if bal_before >= amount:
         return {"asset": asset, "amount": amount_s, "balanceBefore": str(bal_before), "funded": False}
@@ -524,16 +560,35 @@ def main(
     step("grant_tsa_signer", lambda: _ensure_tsa_signer(l2_rpc, l2a["l2Tsa"], receiver))
 
     def run_l2_keeper_once():
-        base = (ROOT / ".env.l2.testnet").read_text()
         tmpdir = Path(tempfile.mkdtemp(prefix="e2e-l2-"))
         tmp = tmpdir / ".env.l2.fork"
         state = tmpdir / "keeper_l2_state.json"
-        tmp.write_text(base + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
+        _write_env_with_updates(
+            ROOT / ".env.l2.testnet",
+            tmp,
+            _resolve_l2_runtime_env(l2_rpc, l2a, receiver),
+        )
+        start_block = _tx_block(l2_rpc, out["steps"][2]["result"]["relayTx"])
 
         env = dict(os.environ)
         env.update({"NO_COLOR": "1", "CLICOLOR": "0", "TERM": "dumb"})
         p = subprocess.run(
-            ["uv", "run", "python", str(ROOT / "ops/management/l2_keeper_handle_messages.py"), str(tmp), "--state-file", str(state), "--once", "--broadcast", "--private-key", ANVIL_PK0, "--json"],
+            [
+                "uv",
+                "run",
+                "python",
+                str(ROOT / "ops/management/l2_keeper_handle_messages.py"),
+                str(tmp),
+                "--state-file",
+                str(state),
+                "--start-block",
+                str(start_block),
+                "--once",
+                "--broadcast",
+                "--private-key",
+                ANVIL_PK0,
+                "--json",
+            ],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -556,14 +611,28 @@ def main(
     def relay_l2_ack_to_l1():
         k = out["steps"][-1]["result"]
         handled = k.get("handled", []) if isinstance(k, dict) else []
-        sent = [h for h in handled if isinstance(h, dict) and h.get("status") == "sent" and h.get("tx")]
+        deposit_guid = out["steps"][2]["result"]["guid"]
+        sent = [
+            h
+            for h in handled
+            if isinstance(h, dict)
+            and h.get("status") == "sent"
+            and h.get("guid") == deposit_guid
+        ]
         if sent:
-            ack_tx = sent[0]["tx"]
+            ack_tx = (
+                sent[0].get("depositConfirmedTx")
+                or sent[0].get("collateralReturnedTx")
+                or sent[0].get("tradeConfirmedTx")
+                or sent[0].get("tx")
+            )
         else:
             hashes = k.get("txHashes", []) if isinstance(k, dict) else []
             if not hashes:
                 raise RuntimeError(f"no ack tx found in keeper output: {json.dumps(k)}")
             ack_tx = hashes[-1]
+        if not ack_tx:
+            raise RuntimeError(f"keeper handled message but produced no relayable tx: {json.dumps(sent[0])}")
         return relay_exact_lz_packet(l2_rpc, l1_rpc, ack_tx)
 
     step("relay_l2_to_l1_exact", relay_l2_ack_to_l1)

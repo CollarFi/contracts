@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -113,6 +114,10 @@ def _cast_send(rpc: str, frm: str, to: str, sig: str, *args: str) -> str:
 
 def _cast_send_pk(rpc: str, to: str, sig: str, *args: str, private_key: str = ANVIL_PK0) -> str:
     return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key])
+
+
+def _block_number(rpc_url: str) -> int:
+    return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
 
 
 def _loads_json_relaxed(raw: str) -> dict:
@@ -385,13 +390,65 @@ def main(
         {
             "L2_RECEIVER": l2a.get("l2Receiver", ""),
             "L2_TSA": l2a.get("l2Tsa", ""),
+            "ATOMIC_EXECUTOR": l2a.get("l2AtomicExecutor", ""),
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
             "ACCOUNT": "CDPDeployer",
         },
     )
 
+    tsa_addr = l2a["l2Tsa"]
+    collar_addrs_raw = run(
+        [
+            "cast",
+            "call",
+            tsa_addr,
+            "getCollarTSAAddresses()(address,address,address,address,address,address)",
+            "--rpc-url",
+            l2_rpc,
+        ]
+    )
+    collar_addrs = re.findall(r"0x[a-fA-F0-9]{40}", collar_addrs_raw)
+    if len(collar_addrs) >= 6:
+        _write_env(
+            load_env(l2_fork_env),
+            l2_fork_env,
+            l2_rpc,
+            {
+                "BASE_FEED": collar_addrs[0],
+                "DEPOSIT_MODULE": collar_addrs[1],
+                "WITHDRAWAL_MODULE": collar_addrs[2],
+                "TRADE_MODULE": collar_addrs[3],
+                "RFQ_MODULE": collar_addrs[4],
+                "OPTION_ASSET": collar_addrs[5],
+            },
+        )
+
+    base_addrs_raw = run(
+        [
+            "cast",
+            "call",
+            tsa_addr,
+            "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+            "--rpc-url",
+            l2_rpc,
+        ]
+    )
+    base_addrs = re.findall(r"0x[a-fA-F0-9]{40}", base_addrs_raw)
+    if len(base_addrs) >= 7:
+        _write_env(
+            load_env(l2_fork_env),
+            l2_fork_env,
+            l2_rpc,
+            {
+                "WRAPPED_DEPOSIT_ASSET": base_addrs[2],
+                "MATCHING": base_addrs[6],
+            },
+        )
+
     l1_vault = l1a["l1Vault"]
     l2_receiver = l2a["l2Receiver"]
+    l1_post_deploy_block = _block_number(l1_rpc)
+    l2_post_deploy_block = _block_number(l2_rpc)
 
     keeper_role = run(["cast", "keccak", "KEEPER_ROLE"]).strip()
     rfq_role = run(["cast", "keccak", "RFQ_SIGNER_ROLE"]).strip()
@@ -424,6 +481,8 @@ def main(
             str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
             str(l2_fork_env),
             "--once",
+            "--start-block",
+            str(l2_post_deploy_block),
             "--no-submit-deposit-api",
             "--no-submit-withdraw-api",
             "--broadcast",
@@ -439,6 +498,8 @@ def main(
             str(ROOT_DIR / "ops/management/l1_keeper_handle_messages.py"),
             str(l1_fork_env),
             "--once",
+            "--start-block",
+            str(l1_post_deploy_block),
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
@@ -450,7 +511,14 @@ def main(
 
     m2 = _run_cmd(
         "l2_message_preflight",
-        [sys.executable, str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"],
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"),
+            str(l2_fork_env),
+            "--lookback-blocks",
+            "100",
+            "--json",
+        ],
     )
     m1 = _run_cmd(
         "l1_message_preflight",
@@ -458,6 +526,8 @@ def main(
             sys.executable,
             str(ROOT_DIR / "ops/management/l1_message_preflight.py"),
             str(l1_fork_env),
+            "--lookback-blocks",
+            "100",
             "--json",
             "--logs-rpc-url",
             l1_rpc,

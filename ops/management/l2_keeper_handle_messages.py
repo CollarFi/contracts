@@ -17,11 +17,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
 from l2_common import (  # noqa: E402
-    MAX_LOAN_ID_FOR_NONCE_SUFFIX,
     assert_tsa_signer,
     derive_reissue_nonce,
     extract_tx_hash,
-    get_receipt,
     http_post_json,
     is_retryable_signature_sync_error_text,
     latest_block_timestamp,
@@ -42,8 +40,6 @@ ACTION_DEPOSIT_CONFIRMED = 3
 ACTION_COLLATERAL_RETURNED = 4
 ACTION_TRADE_CONFIRMED = 5
 ACTION_MANDATE_CREATED = 6
-ACTION_SIGNED_TOPIC0 = "0x41cf207ce16a9affd2802d7565d332072d6ac8caca70010be9203c8b0840e6fe"
-MESSAGE_HANDLED_TOPIC0 = "0x342468323d5aa8f601250bb7a841742c9e0d5c72a898da183e73a18803936428"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
@@ -69,6 +65,13 @@ def _read_addr_from_output(path_value: str, key: str) -> str:
     return str(val)
 
 
+def _extract_addresses(raw: str, expected: int, label: str) -> list[str]:
+    addrs = re.findall(r"0x[a-fA-F0-9]{40}", raw)
+    if len(addrs) < expected:
+        raise RuntimeError(f"failed to parse {label}: {raw}")
+    return addrs[:expected]
+
+
 def _default_output_json(rpc_url: str, side: str) -> str:
     chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
     return str(ROOT_DIR / "deployments" / chain_id / f"{side}.json")
@@ -79,6 +82,58 @@ def _resolve_receiver_addr(env: dict[str, str]) -> str:
         return str(env["L2_RECEIVER"])
     output_json = env.get("OUTPUT_JSON") or _default_output_json(must(env, "RPC_URL"), "l2")
     return _read_addr_from_output(output_json, "l2Receiver")
+
+
+def _resolve_atomic_executor_addr(env: dict[str, str], rpc_url: str) -> str:
+    configured = (env.get("ATOMIC_EXECUTOR") or "").strip()
+    if configured:
+        return configured
+    output_json = env.get("OUTPUT_JSON") or _default_output_json(rpc_url, "l2")
+    try:
+        return _read_addr_from_output(output_json, "l2AtomicExecutor")
+    except Exception:
+        return ""
+
+
+def _resolve_local_atomic_config(
+    rpc_url: str,
+    tsa_addr: str,
+    deposit_module: str,
+    withdrawal_module: str,
+    wrapped_deposit_asset: str,
+) -> tuple[str, str, str]:
+    resolved_deposit = deposit_module.strip()
+    resolved_withdrawal = withdrawal_module.strip()
+    resolved_wrapped = wrapped_deposit_asset.strip()
+
+    if not (resolved_deposit and resolved_withdrawal):
+        collar_addrs = _extract_addresses(
+            cast_call(
+                rpc_url,
+                tsa_addr,
+                "getCollarTSAAddresses()(address,address,address,address,address,address)",
+            ),
+            6,
+            "getCollarTSAAddresses",
+        )
+        if not resolved_deposit:
+            resolved_deposit = collar_addrs[1]
+        if not resolved_withdrawal:
+            resolved_withdrawal = collar_addrs[2]
+
+    if not resolved_wrapped:
+        base_addrs = _extract_addresses(
+            cast_call(
+                rpc_url,
+                tsa_addr,
+                "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+            ),
+            7,
+            "getBaseTSAAddresses",
+        )
+        resolved_wrapped = base_addrs[2]
+
+    return resolved_deposit, resolved_withdrawal, resolved_wrapped
 
 
 def _block_number(rpc_url: str) -> int:
@@ -118,9 +173,6 @@ def _action_name(action: int) -> str:
         5: "TradeConfirmed",
         6: "MandateCreated",
     }.get(action, f"Unknown({action})")
-
-
-
 
 def _parse_uint(raw: str) -> int:
     token = raw.strip().split()[0]
@@ -165,55 +217,106 @@ def _parse_pending_message(raw: str) -> dict[str, Any]:
         r"^\((\d+),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{40}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]{64}),\s*(\d+),\s*(0x[a-fA-F0-9]*)\)$",
         s,
     )
-    if not m:
-        raise ValueError(f"failed to parse pendingMessages tuple: {raw}")
-    return {
-        "action": int(m.group(1)),
-        "loanId": int(m.group(2)),
-        "asset": m.group(3),
-        "amount": int(m.group(4)),
-        "recipient": m.group(5),
-        "subaccountId": int(m.group(6)),
-        "socketMessageId": m.group(7),
-        "secondaryAmount": int(m.group(8)),
-        "quoteHash": m.group(9),
-        "takerNonce": int(m.group(10)),
-        "data": m.group(11),
+    if m:
+        return {
+            "action": int(m.group(1)),
+            "loanId": int(m.group(2)),
+            "asset": m.group(3),
+            "amount": int(m.group(4)),
+            "recipient": m.group(5),
+            "subaccountId": int(m.group(6)),
+            "socketMessageId": m.group(7),
+            "secondaryAmount": int(m.group(8)),
+            "quoteHash": m.group(9),
+            "takerNonce": int(m.group(10)),
+            "data": m.group(11),
+        }
+
+    lines = [line.strip() for line in s.splitlines() if line.strip()]
+    if len(lines) == 11:
+        return {
+            "action": int(lines[0]),
+            "loanId": int(lines[1]),
+            "asset": lines[2],
+            "amount": int(lines[3]),
+            "recipient": lines[4],
+            "subaccountId": int(lines[5]),
+            "socketMessageId": lines[6],
+            "secondaryAmount": int(lines[7]),
+            "quoteHash": lines[8],
+            "takerNonce": int(lines[9]),
+            "data": lines[10],
+        }
+
+    raise ValueError(f"failed to parse pendingMessages tuple: {raw}")
+
+
+def _abi_encode(signature: str, *args: Any) -> str:
+    return run(["cast", "abi-encode", signature, *[str(arg) for arg in args]]).strip()
+
+
+def _fresh_action_nonce_and_expiry(rpc_url: str, tsa_addr: str, loan_id: int) -> tuple[int, int]:
+    min_sig, max_sig = tsa_signature_expiry_window(rpc_url, tsa_addr)
+    chain_now = latest_block_timestamp(rpc_url)
+    cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
+    expiry = chain_now + min_sig + cushion
+    upper_bound = chain_now + max_sig - 1
+    if expiry > upper_bound:
+        expiry = upper_bound
+    if expiry <= chain_now + min_sig:
+        raise RuntimeError(
+            "cannot derive valid action expiry window: "
+            f"chain_now={chain_now} min={min_sig} max={max_sig}"
+        )
+    return derive_reissue_nonce(chain_now, loan_id), expiry
+
+
+def _build_pending_action(
+    *,
+    action_type: int,
+    pending_message: dict[str, Any],
+    tsa_addr: str,
+    deposit_module: str,
+    withdrawal_module: str,
+    wrapped_deposit_asset: str,
+    rpc_url: str,
+) -> dict[str, Any]:
+    nonce, expiry = _fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
+    if action_type == ACTION_DEPOSIT_INTENT:
+        data = _abi_encode(
+            "f(uint256,address,address)",
+            int(pending_message["amount"]),
+            wrapped_deposit_asset,
+            ZERO_ADDRESS,
+        )
+        module = deposit_module
+    elif action_type == ACTION_RETURN_REQUEST:
+        data = _abi_encode(
+            "f(address,uint256)",
+            wrapped_deposit_asset,
+            int(pending_message["amount"]),
+        )
+        module = withdrawal_module
+    else:
+        raise RuntimeError(f"unsupported pending action type {action_type}")
+
+    action = {
+        "subaccountId": int(pending_message["subaccountId"]),
+        "nonce": nonce,
+        "module": module,
+        "data": data,
+        "expiry": expiry,
+        "owner": tsa_addr,
+        "signer": tsa_addr,
     }
-
-
-def _get_block_timestamp(rpc_url: str, block_number: int) -> int:
-    out = run(["cast", "block", str(block_number), "--rpc-url", rpc_url, "--json"])
-    payload = json.loads(out)
-    ts = payload.get("timestamp", 0)
-    if isinstance(ts, str):
-        return int(ts, 16) if ts.startswith("0x") else int(ts)
-    return int(ts)
-
-
-def _find_message_handled_log_for_guid(rpc_url: str, receiver_addr: str, guid: str) -> dict[str, Any]:
-    out = run(
-        [
-            "cast",
-            "logs",
-            "MessageHandled(bytes32,uint8,uint256)",
-            "--address",
-            receiver_addr,
-            "--from-block",
-            "0",
-            "--to-block",
-            "latest",
-            "--rpc-url",
-            rpc_url,
-            "--json",
-        ]
-    )
-    logs = json.loads(out)
-    target = guid.lower()
-    matched = [l for l in logs if (l.get("topics") or [None, None])[1].lower() == target]
-    if not matched:
-        raise RuntimeError(f"MessageHandled log not found for guid={guid}")
-    return matched[-1]
+    typed_hash = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getActionTypedDataHash((uint256,uint256,address,bytes,uint256,address,address))(bytes32)",
+        _format_action_tuple(action),
+    ).strip()
+    action["typedDataHash"] = typed_hash
+    return action
 
 
 def _format_action_tuple(action: dict[str, Any]) -> str:
@@ -230,98 +333,10 @@ def _format_action_tuple(action: dict[str, Any]) -> str:
     )
 
 
-def _reissue_action_signature(
-    *,
-    rpc_url: str,
-    tsa_addr: str,
-    action: dict[str, Any],
-    loan_id: int,
-    account: str,
-    private_key: str,
-    from_addr: str,
-    unlocked: bool,
-) -> tuple[str, dict[str, Any], int]:
-    min_sig, max_sig = tsa_signature_expiry_window(rpc_url, tsa_addr)
-    chain_now = latest_block_timestamp(rpc_url)
-    # Keep enough freshness margin beyond API window while respecting TSA bounds.
-    cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
-    target_expiry = chain_now + min_sig + cushion
-    upper_bound = chain_now + max_sig - 1
-    if target_expiry > upper_bound:
-        target_expiry = upper_bound
-    if target_expiry <= chain_now + min_sig:
-        raise RuntimeError(
-            "cannot reissue action with valid expiry window: "
-            f"chain_now={chain_now} min={min_sig} max={max_sig}"
-        )
-
-    refreshed = dict(action)
-    refreshed["nonce"] = derive_reissue_nonce(chain_now, loan_id)
-    refreshed["expiry"] = target_expiry
-
-    tx_out = cast_send(
-        rpc_url,
-        account or None,
-        tsa_addr,
-        "signActionData((uint256,uint256,address,bytes,uint256,address,address),bytes)",
-        _format_action_tuple(refreshed),
-        "0x",
-        private_key=private_key or None,
-        from_addr=from_addr or None,
-        unlocked=unlocked,
-    )
-    tx_hash = extract_tx_hash(tx_out)
-    receipt = get_receipt(rpc_url, tx_hash)
-    signed = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    block_no_raw = receipt.get("blockNumber", "0x0")
-    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
-    signed_at = _get_block_timestamp(rpc_url, block_no)
-    return tx_hash, signed, signed_at
-
-
-def _decode_action_signed_from_receipt(receipt: dict[str, Any], tsa_addr: str) -> dict[str, Any]:
-    tsa = tsa_addr.lower()
-    for log in receipt.get("logs", []):
-        topics = log.get("topics") or []
-        if len(topics) < 3:
-            continue
-        if str(log.get("address", "")).lower() != tsa:
-            continue
-        if str(topics[0]).lower() != ACTION_SIGNED_TOPIC0:
-            continue
-
-        data_hex = str(log.get("data", "0x"))
-        if not data_hex.startswith("0x"):
-            continue
-        decoded_raw = run(
-            [
-                "cast",
-                "decode-abi",
-                "--json",
-                "f()((uint256,uint256,address,bytes,uint256,address,address))",
-                data_hex,
-            ]
-        )
-        decoded = json.loads(decoded_raw)[0]
-        return {
-            "eventSigner": "0x" + str(topics[1])[-40:],
-            "typedDataHash": str(topics[2]),
-            "subaccountId": int(decoded[0]),
-            "nonce": int(decoded[1]),
-            "module": str(decoded[2]),
-            "data": str(decoded[3]),
-            "expiry": int(decoded[4]),
-            "owner": str(decoded[5]),
-            "signer": str(decoded[6]),
-        }
-
-    raise RuntimeError("ActionSigned event not found in handleMessage receipt")
-
-
 def _decode_deposit_module_data(data_hex: str) -> dict[str, Any]:
     if not data_hex.startswith("0x"):
         raise ValueError(f"invalid data hex: {data_hex}")
-    decoded_raw = run(["cast", "decode-abi", "--json", "f()(uint256,address,address)", data_hex])
+    decoded_raw = run(["cast", "decode-abi", "--json", "f(uint256,address,address)", data_hex])
     amount, asset, manager = json.loads(decoded_raw)
     return {
         "amount": int(amount),
@@ -426,11 +441,13 @@ def _ensure_local_trade_executor(rpc_url: str, matching_addr: str, executor_addr
     )
 
 
-def _submit_action_to_local_matching(
+def _submit_action_to_local_atomic(
     *,
     rpc_url: str,
+    atomic_executor_addr: str,
     matching_addr: str,
     action: dict[str, Any],
+    signer_sig: str,
     account: str,
     private_key: str,
     from_addr: str,
@@ -438,22 +455,28 @@ def _submit_action_to_local_matching(
 ) -> dict[str, Any]:
     sender_addr = wallet_address(account=account, private_key=private_key) if (account or private_key) else from_addr
     _ensure_local_trade_executor(rpc_url, matching_addr, sender_addr)
+    _ensure_local_trade_executor(rpc_url, matching_addr, atomic_executor_addr)
 
+    action_data = _abi_encode(
+        "f((uint256,uint256,address,bytes,uint256,address,address))",
+        _format_action_tuple(action),
+    )
     tx_out = cast_send(
         rpc_url,
         account or None,
-        matching_addr,
-        "verifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes)",
+        atomic_executor_addr,
+        "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
         f"[{_format_action_tuple(action)}]",
-        "[0x]",
-        "0x",
+        f"[{signer_sig}]",
+        action_data,
+        "[(true,0x)]",
         private_key=private_key or None,
         from_addr=from_addr or None,
         unlocked=unlocked,
     )
     tx_hash = extract_tx_hash(tx_out)
     return {
-        "mode": "localMatching",
+        "mode": "localAtomic",
         "matchingTx": tx_hash,
         "typedDataHash": str(action["typedDataHash"]),
         "subaccountId": str(action["subaccountId"]),
@@ -495,13 +518,9 @@ def _submit_deposit_to_derive_api_from_action(
     typed_hash = debug_json["result"]["typed_data_hash"]
     if typed_hash.lower() != str(action["typedDataHash"]).lower():
         raise RuntimeError(
-            "typed hash mismatch between ActionSigned and deposit_debug "
+            "typed hash mismatch between local action and deposit_debug "
             f"(onchain={action['typedDataHash']}, debug={typed_hash})"
         )
-
-    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
-    if signed_raw.strip().lower() != "true":
-        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
 
     ts_ms = str(int(time.time() * 1000))
     auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
@@ -539,35 +558,10 @@ def _submit_deposit_to_derive_api_from_action(
     }
 
 
-def _submit_deposit_to_derive_api(
-    *,
-    rpc_url: str,
-    receipt_tx_hash: str,
-    tsa_addr: str,
-    account: str,
-    private_key: str,
-    api_url: str,
-    x_lyra_wallet: str,
-    fallback_asset_name: str,
-) -> dict[str, Any]:
-    receipt = get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    return _submit_deposit_to_derive_api_from_action(
-        rpc_url=rpc_url,
-        action=action,
-        tsa_addr=tsa_addr,
-        account=account,
-        private_key=private_key,
-        api_url=api_url,
-        x_lyra_wallet=x_lyra_wallet,
-        fallback_asset_name=fallback_asset_name,
-    )
-
-
 def _decode_withdraw_module_data(data_hex: str) -> dict[str, Any]:
     if not data_hex.startswith("0x"):
         raise ValueError(f"invalid data hex: {data_hex}")
-    decoded_raw = run(["cast", "decode-abi", "--json", "f()(address,uint256)", data_hex])
+    decoded_raw = run(["cast", "decode-abi", "--json", "f(address,uint256)", data_hex])
     asset, amount = json.loads(decoded_raw)
     return {
         "asset": str(asset),
@@ -631,13 +625,9 @@ def _submit_withdraw_to_derive_api_from_action(
     typed_hash = debug_json["result"]["typed_data_hash"]
     if typed_hash.lower() != str(action["typedDataHash"]).lower():
         raise RuntimeError(
-            "typed hash mismatch between ActionSigned and withdraw_debug "
+            "typed hash mismatch between local action and withdraw_debug "
             f"(onchain={action['typedDataHash']}, debug={typed_hash})"
         )
-
-    signed_raw = cast_call(rpc_url, tsa_addr, "signedData(bytes32)(bool)", typed_hash)
-    if signed_raw.strip().lower() != "true":
-        raise RuntimeError(f"TSA signedData({typed_hash}) returned false")
 
     ts_ms = str(int(time.time() * 1000))
     auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
@@ -675,105 +665,102 @@ def _submit_withdraw_to_derive_api_from_action(
     }
 
 
-def _submit_withdraw_to_derive_api(
-    *,
-    rpc_url: str,
-    receipt_tx_hash: str,
-    tsa_addr: str,
-    account: str,
-    private_key: str,
-    api_url: str,
-    x_lyra_wallet: str,
-    fallback_asset_name: str,
-) -> dict[str, Any]:
-    receipt = get_receipt(rpc_url, receipt_tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-    return _submit_withdraw_to_derive_api_from_action(
-        rpc_url=rpc_url,
-        action=action,
-        tsa_addr=tsa_addr,
-        account=account,
-        private_key=private_key,
-        api_url=api_url,
-        x_lyra_wallet=x_lyra_wallet,
-        fallback_asset_name=fallback_asset_name,
-    )
-
-
 def _ensure_api_state(state: dict[str, Any]) -> None:
     if "apiSubmitted" not in state or not isinstance(state.get("apiSubmitted"), dict):
         state["apiSubmitted"] = {}
 
 
-def _action_meta_from_chain(
-    *,
-    rpc_url: str,
-    receiver_addr: str,
-    tsa_addr: str,
-    guid: str,
-) -> tuple[dict[str, Any], int, str]:
-    handled_log = _find_message_handled_log_for_guid(rpc_url, receiver_addr, guid)
-    tx_hash = str(handled_log.get("transactionHash"))
-    if not tx_hash:
-        raise RuntimeError(f"missing tx hash for MessageHandled guid={guid}")
-
-    receipt = get_receipt(rpc_url, tx_hash)
-    action = _decode_action_signed_from_receipt(receipt, tsa_addr)
-
-    block_no_raw = receipt.get("blockNumber", "0x0")
-    block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
-    signed_at = _get_block_timestamp(rpc_url, block_no)
-    return action, signed_at, tx_hash
-
-
-def _submit_api_for_action(
+def _submit_api_for_pending_message(
     *,
     action_type: int,
-    rpc_url: str,
-    action: dict[str, Any],
+    pending_message: dict[str, Any],
     tsa_addr: str,
-    matching_addr: str,
     account: str,
     private_key: str,
-    from_addr: str,
-    unlocked: bool,
     api_url: str,
     x_lyra_wallet: str,
     fallback_asset_name: str,
+    rpc_url: str,
 ) -> dict[str, Any]:
-    if _is_local_rpc(rpc_url):
-        return _submit_action_to_local_matching(
-            rpc_url=rpc_url,
-            matching_addr=matching_addr,
-            action=action,
-            account=account,
-            private_key=private_key,
-            from_addr=from_addr,
-            unlocked=unlocked,
-        )
+    nonce, expiry = _fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
+    debug_payload = {
+        "amount": _to_decimal_str(int(pending_message["amount"]), _erc20_decimals(rpc_url, pending_message["asset"])),
+        "asset_name": _resolve_asset_name(fallback_asset_name, pending_message["asset"], rpc_url),
+        "is_atomic_signing": True,
+        "nonce": nonce,
+        "signature_expiry_sec": expiry,
+        "signer": tsa_addr,
+        "subaccount_id": int(pending_message["subaccountId"]),
+    }
 
     if action_type == ACTION_DEPOSIT_INTENT:
-        return _submit_deposit_to_derive_api_from_action(
-            rpc_url=rpc_url,
-            action=action,
-            tsa_addr=tsa_addr,
-            account=account,
-            private_key=private_key,
+        debug_status, debug_json = http_post_json(f"{api_url.rstrip('/')}/public/deposit_debug", debug_payload)
+        if debug_status >= 400 or debug_json.get("error"):
+            raise RuntimeError(f"public/deposit_debug failed ({debug_status}): {json.dumps(debug_json)}")
+        typed_hash = debug_json["result"]["typed_data_hash"]
+        action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
+        ts_ms = str(int(time.time() * 1000))
+        auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+        private_resp = _post_private_deposit(
             api_url=api_url,
             x_lyra_wallet=x_lyra_wallet,
-            fallback_asset_name=fallback_asset_name,
+            x_lyra_timestamp=ts_ms,
+            x_lyra_signature=auth_sig,
+            body={
+                "amount": debug_payload["amount"],
+                "asset_name": debug_payload["asset_name"],
+                "subaccount_id": debug_payload["subaccount_id"],
+                "nonce": nonce,
+                "signature_expiry_sec": expiry,
+                "signer": tsa_addr,
+                "signature": action_sig,
+            },
         )
+        return {
+            "typedDataHash": typed_hash,
+            "amount": debug_payload["amount"],
+            "assetName": debug_payload["asset_name"],
+            "subaccountId": str(debug_payload["subaccount_id"]),
+            "nonce": str(nonce),
+            "expiry": str(expiry),
+            "apiResult": private_resp.get("result"),
+            "apiId": private_resp.get("id"),
+        }
+
     if action_type == ACTION_RETURN_REQUEST:
-        return _submit_withdraw_to_derive_api_from_action(
-            rpc_url=rpc_url,
-            action=action,
-            tsa_addr=tsa_addr,
-            account=account,
-            private_key=private_key,
+        debug_status, debug_json = http_post_json(f"{api_url.rstrip('/')}/public/withdraw_debug", debug_payload)
+        if debug_status >= 400 or debug_json.get("error"):
+            raise RuntimeError(f"public/withdraw_debug failed ({debug_status}): {json.dumps(debug_json)}")
+        typed_hash = debug_json["result"]["typed_data_hash"]
+        action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
+        ts_ms = str(int(time.time() * 1000))
+        auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+        private_resp = _post_private_withdraw(
             api_url=api_url,
             x_lyra_wallet=x_lyra_wallet,
-            fallback_asset_name=fallback_asset_name,
+            x_lyra_timestamp=ts_ms,
+            x_lyra_signature=auth_sig,
+            body={
+                "amount": debug_payload["amount"],
+                "asset_name": debug_payload["asset_name"],
+                "subaccount_id": debug_payload["subaccount_id"],
+                "nonce": nonce,
+                "signature_expiry_sec": expiry,
+                "signer": tsa_addr,
+                "signature": action_sig,
+            },
         )
+        return {
+            "typedDataHash": typed_hash,
+            "amount": debug_payload["amount"],
+            "assetName": debug_payload["asset_name"],
+            "subaccountId": str(debug_payload["subaccount_id"]),
+            "nonce": str(nonce),
+            "expiry": str(expiry),
+            "apiResult": private_resp.get("result"),
+            "apiId": private_resp.get("id"),
+        }
+
     raise RuntimeError(f"API submit unsupported for action type {action_type}")
 
 
@@ -781,6 +768,7 @@ def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdr
     return (action_type == ACTION_DEPOSIT_INTENT and submit_deposit_api) or (
         action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
     )
+
 
 def _load_state(path: Path, start_block: int) -> dict[str, Any]:
     if path.is_file():
@@ -829,29 +817,23 @@ def main(
         "--no-submit-withdraw-api",
         help="Disable Derive private/withdraw submission after handling ReturnRequest.",
     ),
-    api_signature_max_age_seconds: int = typer.Option(
-        300,
-        "--api-signature-max-age-seconds",
-        min=1,
-        help="If signed action is older than this, re-sign action before submitting Derive API request.",
-    ),
-    post_reissue_api_retry_attempts: int = typer.Option(
+    api_retry_attempts: int = typer.Option(
         6,
-        "--post-reissue-api-retry-attempts",
+        "--api-retry-attempts",
         min=1,
-        help="Retries for Derive API submit after onchain reissue when signature invalid is returned.",
+        help="Retries for Derive API submit when signature propagation errors are returned.",
     ),
-    post_reissue_api_retry_initial_delay_seconds: float = typer.Option(
+    api_retry_initial_delay_seconds: float = typer.Option(
         2.0,
-        "--post-reissue-api-retry-initial-delay-seconds",
+        "--api-retry-initial-delay-seconds",
         min=0.0,
-        help="Initial retry delay (seconds) for post-reissue Derive API retries.",
+        help="Initial retry delay in seconds for Derive API retries.",
     ),
-    post_reissue_api_retry_max_delay_seconds: float = typer.Option(
+    api_retry_max_delay_seconds: float = typer.Option(
         20.0,
-        "--post-reissue-api-retry-max-delay-seconds",
+        "--api-retry-max-delay-seconds",
         min=0.0,
-        help="Maximum retry delay (seconds) for post-reissue Derive API retries.",
+        help="Maximum retry delay in seconds for Derive API retries.",
     ),
     derive_api_url: str = typer.Option(
         "",
@@ -883,11 +865,15 @@ def main(
 
     tsa_addr = cast_call(rpc_url, receiver_addr, "tsa()(address)").strip()
     matching_addr = _matching_addr(rpc_url, tsa_addr, env.get("MATCHING", "").strip())
+    atomic_executor_addr = _resolve_atomic_executor_addr(env, rpc_url)
+    deposit_module = (env.get("DEPOSIT_MODULE") or "").strip()
+    withdrawal_module = (env.get("WITHDRAWAL_MODULE") or "").strip()
+    wrapped_deposit_asset = (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip()
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     eff_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
     eff_derive_wallet = (derive_wallet or env.get("DERIVE_WALLET") or tsa_addr).strip()
-    local_matching_submit = _is_local_rpc(rpc_url)
+    local_atomic_submit = _is_local_rpc(rpc_url)
     deposit_intents = not no_deposit_intents
     return_requests = not no_return_requests
     submit_deposit_api = broadcast and (not no_submit_deposit_api)
@@ -898,9 +884,28 @@ def main(
             "API submission requires ACCOUNT or --private-key "
             "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
         )
-    if (submit_deposit_api or submit_withdraw_api) and not local_matching_submit:
+    if broadcast and local_atomic_submit and not (account or pk):
+        raise ValueError("local atomic submission requires ACCOUNT or --private-key for typed-data signing")
+    if (submit_deposit_api or submit_withdraw_api) and not local_atomic_submit:
         signer_wallet = wallet_address(account=account, private_key=pk)
         assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
+    if broadcast and local_atomic_submit:
+        deposit_module, withdrawal_module, wrapped_deposit_asset = _resolve_local_atomic_config(
+            rpc_url,
+            tsa_addr,
+            deposit_module,
+            withdrawal_module,
+            wrapped_deposit_asset,
+        )
+        if not atomic_executor_addr:
+            raise ValueError("local atomic submission requires ATOMIC_EXECUTOR in env")
+        for key, value in (
+            ("DEPOSIT_MODULE", deposit_module),
+            ("WITHDRAWAL_MODULE", withdrawal_module),
+            ("WRAPPED_DEPOSIT_ASSET", wrapped_deposit_asset),
+        ):
+            if not value:
+                raise ValueError(f"local atomic submission requires {key} in env")
 
     state = _load_state(state_file, start_block)
     _ensure_api_state(state)
@@ -966,113 +971,113 @@ def main(
 
             if broadcast:
                 try:
-                    # 1) Ensure action is signed onchain (either fresh handleMessage or already handled lookup/reissue)
-                    action_data: dict[str, Any] | None = None
-                    signed_at: int | None = None
+                    pending_raw = cast_call(
+                        rpc_url,
+                        receiver_addr,
+                        "pendingMessages(bytes32)(uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes)",
+                        guid,
+                        allow_fail=True,
+                    )
+                    if pending_raw == "N/A":
+                        raise RuntimeError("failed to read pending message")
+                    pending_message = _parse_pending_message(pending_raw)
 
-                    if not already_handled:
-                        value_wei = None
-                        pending_raw = cast_call(
-                            rpc_url,
-                            receiver_addr,
-                            "pendingMessages(bytes32)((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
-                            guid,
-                            allow_fail=True,
-                        )
-                        if action == ACTION_DEPOSIT_INTENT:
-                            if pending_raw == "N/A":
-                                raise RuntimeError("failed to read pendingMessages for fee quote")
-                            fee = _quote_ack_native_fee(rpc_url, receiver_addr, pending_raw)
-                            fee_with_buffer = fee + (fee * lz_fee_buffer_bps) // 10_000
-                            value_wei = str(fee_with_buffer)
-                            item["quotedAckNativeFee"] = str(fee)
-                            item["valueWei"] = value_wei
+                    tx = cast_send(
+                        rpc_url,
+                        account or None,
+                        receiver_addr,
+                        "handleMessage(bytes32)",
+                        guid,
+                        private_key=pk or None,
+                        from_addr=sender or None,
+                        unlocked=use_unlocked,
+                    )
+                    tx_hash = extract_tx_hash(tx)
+                    item["tx"] = tx_hash
 
-                        tx = cast_send(
-                            rpc_url,
-                            account or None,
-                            receiver_addr,
-                            "handleMessage(bytes32)",
-                            guid,
-                            value_wei=value_wei,
-                            private_key=pk or None,
-                            from_addr=sender or None,
-                            unlocked=use_unlocked,
-                        )
-                        tx_hash = extract_tx_hash(tx)
-                        item["tx"] = tx_hash
-
-                        if _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
-                            receipt = get_receipt(rpc_url, tx_hash)
-                            action_data = _decode_action_signed_from_receipt(receipt, tsa_addr)
-                            block_no_raw = receipt.get("blockNumber", "0x0")
-                            block_no = int(block_no_raw, 16) if isinstance(block_no_raw, str) else int(block_no_raw)
-                            signed_at = _get_block_timestamp(rpc_url, block_no)
-                    # 2) Optional API submit path for deposit/withdraw
-                    if _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
-                        if action_data is None or signed_at is None:
-                            raise RuntimeError("missing fresh ActionSigned metadata for API submission")
-
-                        age_sec = int(time.time()) - int(signed_at)
-                        item["signedAgeSec"] = str(age_sec)
-
-                        if age_sec > api_signature_max_age_seconds:
-                            reissue_tx, action_data, signed_at = _reissue_action_signature(
-                                rpc_url=rpc_url,
+                    if action in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
+                        if local_atomic_submit:
+                            action_data = _build_pending_action(
+                                action_type=action,
+                                pending_message=pending_message,
                                 tsa_addr=tsa_addr,
+                                deposit_module=deposit_module,
+                                withdrawal_module=withdrawal_module,
+                                wrapped_deposit_asset=wrapped_deposit_asset,
+                                rpc_url=rpc_url,
+                            )
+                            signer_sig = wallet_sign(
+                                str(action_data["typedDataHash"]),
+                                no_hash=True,
+                                account=account,
+                                private_key=pk,
+                            )
+                            api_meta = _submit_action_to_local_atomic(
+                                rpc_url=rpc_url,
+                                atomic_executor_addr=atomic_executor_addr,
+                                matching_addr=matching_addr,
                                 action=action_data,
-                                loan_id=loan_id,
+                                signer_sig=signer_sig,
                                 account=account,
                                 private_key=pk,
                                 from_addr=sender,
                                 unlocked=use_unlocked,
                             )
-                            item["reissuedTx"] = reissue_tx
-                            item["reissuedNonce"] = str(action_data["nonce"])
-                            item["signedAgeSec"] = "0"
-
-                        retry_attempts = post_reissue_api_retry_attempts if item.get("reissuedTx") else 1
-                        retry_delay = post_reissue_api_retry_initial_delay_seconds
-                        api_meta: dict[str, Any] | None = None
-                        for api_attempt in range(1, retry_attempts + 1):
-                            try:
-                                api_meta = _submit_api_for_action(
-                                    action_type=action,
-                                    rpc_url=rpc_url,
-                                    action=action_data,
-                                    tsa_addr=tsa_addr,
-                                    matching_addr=matching_addr,
-                                    account=account,
-                                    private_key=pk,
-                                    from_addr=sender,
+                            item["deriveApi"] = api_meta
+                            if action == ACTION_DEPOSIT_INTENT:
+                                fee = _quote_ack_native_fee(rpc_url, receiver_addr, pending_raw)
+                                fee_with_buffer = fee + (fee * lz_fee_buffer_bps) // 10_000
+                                ack_tx = cast_send(
+                                    rpc_url,
+                                    account or None,
+                                    receiver_addr,
+                                    "sendDepositConfirmedAfterExecution(uint256)",
+                                    str(loan_id),
+                                    value_wei=str(fee_with_buffer),
+                                    private_key=pk or None,
+                                    from_addr=sender or None,
                                     unlocked=use_unlocked,
-                                    api_url=eff_api_url,
-                                    x_lyra_wallet=eff_derive_wallet,
-                                    fallback_asset_name=eff_asset_name,
                                 )
-                                item["deriveApiAttempts"] = str(api_attempt)
-                                break
-                            except Exception as exc:
-                                if (
-                                    api_attempt >= retry_attempts
-                                    or not is_retryable_signature_sync_error_text(str(exc))
-                                ):
-                                    raise
-                                item["deriveApiAttempts"] = str(api_attempt)
-                                time.sleep(retry_delay)
-                                retry_delay = min(
-                                    max(retry_delay * 1.7, 0.0),
-                                    post_reissue_api_retry_max_delay_seconds,
-                                )
+                                item["depositConfirmedTx"] = extract_tx_hash(ack_tx)
+                        elif _should_submit_api(action, submit_deposit_api, submit_withdraw_api):
+                            retry_delay = api_retry_initial_delay_seconds
+                            api_meta: dict[str, Any] | None = None
+                            for api_attempt in range(1, api_retry_attempts + 1):
+                                try:
+                                    api_meta = _submit_api_for_pending_message(
+                                        action_type=action,
+                                        pending_message=pending_message,
+                                        tsa_addr=tsa_addr,
+                                        account=account,
+                                        private_key=pk,
+                                        api_url=eff_api_url,
+                                        x_lyra_wallet=eff_derive_wallet,
+                                        fallback_asset_name=eff_asset_name,
+                                        rpc_url=rpc_url,
+                                    )
+                                    item["deriveApiAttempts"] = str(api_attempt)
+                                    break
+                                except Exception as exc:
+                                    if (
+                                        api_attempt >= api_retry_attempts
+                                        or not is_retryable_signature_sync_error_text(str(exc))
+                                    ):
+                                        raise
+                                    item["deriveApiAttempts"] = str(api_attempt)
+                                    time.sleep(retry_delay)
+                                    retry_delay = min(
+                                        max(retry_delay * 1.7, 0.0),
+                                        api_retry_max_delay_seconds,
+                                    )
+                            if api_meta is None:
+                                raise RuntimeError("derive API submit failed after retries")
+                            item["deriveApi"] = api_meta
 
-                        if api_meta is None:
-                            raise RuntimeError("derive API submit failed after retries")
-
-                        item["deriveApi"] = api_meta
+                    if item.get("deriveApi") is not None:
                         state["apiSubmitted"][guid] = {
                             "action": _action_name(action),
                             "submittedAt": int(time.time()),
-                            "deriveApi": api_meta,
+                            "deriveApi": item["deriveApi"],
                         }
                         _save_state(state_file, state)
 

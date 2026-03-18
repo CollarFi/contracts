@@ -24,6 +24,8 @@ import {IOptionRiskVerifier} from "../interfaces/IOptionRiskVerifier.sol";
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
 
 contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
+    uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
+
     struct ActiveCollarPosition {
         uint96 callSubId;
         uint64 callExpiry;
@@ -96,9 +98,12 @@ contract CollarTsaRfqDelegateModule is ICollarTsaRfqDelegateModule {
         if (loanId == 0) {
             revert CTSA_InvalidRfqTradeDetails();
         }
+        if (action.nonce % LOAN_ID_NONCE_MODULUS != loanId) {
+            revert CTSA_InvalidRfqTradeDetails();
+        }
 
         ICollarLoanStore.Loan memory loan = ICollarLoanStore($.loanStore).getLoan(loanId);
-        if (loan.borrower == address(0) || loan.consumed) {
+        if (loan.borrower == address(0) || loan.consumed || loan.returnRequested || loan.tradeExecuted) {
             revert CTSA_InvalidRfqTradeDetails();
         }
         uint64 expectedDeadline = loan.rolloverPending ? loan.rolloverDeadline : loan.deadline;

@@ -12,11 +12,6 @@ import {
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {OApp} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
 
-import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
-// forge-lint: disable-next-line(unused-import)
-import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
-import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
-import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
 import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
@@ -45,6 +40,9 @@ contract CollarTSAReceiver is AccessControl, OApp {
 
     mapping(bytes32 => CollarLZMessages.Message) public pendingMessages;
     mapping(bytes32 => bool) public handledMessages;
+    mapping(uint256 => bytes32) public depositIntentGuidByLoanId;
+    mapping(uint256 => bytes32) public returnRequestGuidByLoanId;
+    mapping(uint256 => bool) public depositConfirmed;
     mapping(uint256 => bool) public returnRequested;
     mapping(uint256 => bool) public returnCompleted;
     mapping(uint256 => bool) public collateralReturnedSent;
@@ -77,12 +75,16 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_ReturnAlreadyRequested();
     error CTR_ReturnAlreadyCompleted();
     error CTR_ReturnNotRequested();
+    error CTR_DepositAlreadyConfirmed();
+    error CTR_DepositNotExecuted();
     error CTR_ReturnRequestAfterTrade();
+    error CTR_TradeNotExecuted();
     error CTR_WithdrawalNotExecuted();
     error CTR_CollateralReturnedAfterTrade();
     error CTR_SettlementAlreadyReported();
     error CTR_TradeConfirmedAfterReturn();
     error CTR_TradeAlreadyConfirmed();
+    error CTR_ReturnRequestBlocksTrade();
     error CTR_LoanIdTooLargeForNonce();
 
     constructor(
@@ -240,16 +242,21 @@ contract CollarTSAReceiver is AccessControl, OApp {
             if (message.subaccountId != tsa.subAccount()) {
                 revert CTR_InvalidSubaccount();
             }
+            (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
+            address underlyingDepositAsset = address(IERC20BasedAsset(wrappedDepositAsset).wrappedAsset());
+            if (message.asset != underlyingDepositAsset) {
+                revert CTR_InvalidAsset();
+            }
 
+            IERC20(underlyingDepositAsset).safeTransfer(address(tsa), message.amount);
             loanStore.recordCollateral(message.loanId, message.asset, message.amount);
-
-            _signDeposit(message);
-            _sendAck(message, CollarLZMessages.Action.DepositConfirmed);
+            depositIntentGuidByLoanId[message.loanId] = guid;
         } else if (message.action == CollarLZMessages.Action.ReturnRequest) {
             if (message.subaccountId != tsa.subAccount()) {
                 revert CTR_InvalidSubaccount();
             }
-            if (tradeConfirmed[message.loanId]) {
+            ICollarLoanStore.Loan memory loan = loanStore.getLoan(message.loanId);
+            if (tradeConfirmed[message.loanId] || loan.tradeExecuted) {
                 revert CTR_ReturnRequestAfterTrade();
             }
             if (returnCompleted[message.loanId]) {
@@ -258,12 +265,35 @@ contract CollarTSAReceiver is AccessControl, OApp {
             if (returnRequested[message.loanId]) {
                 revert CTR_ReturnAlreadyRequested();
             }
-            _signWithdrawal(message);
+            returnRequestGuidByLoanId[message.loanId] = guid;
             returnRequested[message.loanId] = true;
+            loanStore.setReturnRequested(message.loanId, true);
         }
 
         handledMessages[guid] = true;
         emit MessageHandled(guid, message.action, message.loanId);
+    }
+
+    function sendDepositConfirmedAfterExecution(uint256 loanId)
+        external
+        payable
+        onlyRole(KEEPER_ROLE)
+        returns (MessagingReceipt memory)
+    {
+        if (depositConfirmed[loanId]) {
+            revert CTR_DepositAlreadyConfirmed();
+        }
+        if (!tsa.depositExecuted(loanId)) {
+            revert CTR_DepositNotExecuted();
+        }
+
+        bytes32 guid = depositIntentGuidByLoanId[loanId];
+        if (guid == bytes32(0)) {
+            revert CTR_MessageNotFound();
+        }
+
+        depositConfirmed[loanId] = true;
+        return _sendAck(pendingMessages[guid], CollarLZMessages.Action.DepositConfirmed, msg.value, msg.sender);
     }
 
     function sendSettlementReport(
@@ -361,9 +391,15 @@ contract CollarTSAReceiver is AccessControl, OApp {
         if (tradeConfirmed[p.loanId]) {
             revert CTR_TradeAlreadyConfirmed();
         }
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(p.loanId);
+        if (!loan.tradeExecuted) {
+            revert CTR_TradeNotExecuted();
+        }
+        if (loan.returnRequested) {
+            revert CTR_ReturnRequestBlocksTrade();
+        }
         _validateTradeConfirmedPreconditions(p.amount, p.socketMessageId, p.takerNonce);
 
-        ICollarLoanStore.Loan memory loan = loanStore.getLoan(p.loanId);
         bool isRollover = loan.rolloverPending;
         bytes memory payload = isRollover
             ? abi.encode(
@@ -392,6 +428,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
         });
 
         MessagingReceipt memory receipt = _send(message, defaultOptions, msg.value, msg.sender);
+        loanStore.setTradeExecuted(p.loanId, false);
 
         if (isRollover) {
             loanStore.clearRollover(p.loanId);
@@ -430,67 +467,6 @@ contract CollarTSAReceiver is AccessControl, OApp {
         returns (MessagingFee memory fee)
     {
         return _quote(remoteEid, abi.encode(message), options, false);
-    }
-
-    function _deriveActionNonce(uint256 loanId) internal view returns (uint256) {
-        if (loanId > 999_999) {
-            revert CTR_LoanIdTooLargeForNonce();
-        }
-        uint256 timestampSec = block.timestamp;
-        return (timestampSec * 1_000_000) + loanId;
-    }
-
-    function _signDeposit(CollarLZMessages.Message memory message) internal {
-        ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
-        (, address depositModule,,,,) = tsa.getCollarTSAAddresses();
-        (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
-        address underlyingDepositAsset = address(IERC20BasedAsset(wrappedDepositAsset).wrappedAsset());
-        if (message.asset != underlyingDepositAsset) {
-            revert CTR_InvalidAsset();
-        }
-
-        IERC20(underlyingDepositAsset).safeTransfer(address(tsa), message.amount);
-
-        IDepositModule.DepositData memory depositData = IDepositModule.DepositData({
-            amount: message.amount, asset: wrappedDepositAsset, managerForNewAccount: address(0)
-        });
-
-        uint256 nonce = _deriveActionNonce(message.loanId);
-
-        IActionVerifier.Action memory action = IActionVerifier.Action({
-            subaccountId: message.subaccountId,
-            nonce: nonce,
-            module: IMatchingModule(depositModule),
-            data: abi.encode(depositData),
-            expiry: block.timestamp + params.minSignatureExpiry,
-            owner: address(tsa),
-            signer: address(tsa)
-        });
-
-        tsa.signActionData(action, bytes(""));
-    }
-
-    function _signWithdrawal(CollarLZMessages.Message memory message) internal {
-        ICollarTSA.CollarTSAParams memory params = tsa.getCollarTSAParams();
-        (,, address withdrawalModule,,,) = tsa.getCollarTSAAddresses();
-        (,, address wrappedDepositAsset,,,,) = tsa.getBaseTSAAddresses();
-
-        IWithdrawalModule.WithdrawalData memory withdrawalData =
-            IWithdrawalModule.WithdrawalData({asset: wrappedDepositAsset, assetAmount: message.amount});
-
-        uint256 nonce = _deriveActionNonce(message.loanId);
-
-        IActionVerifier.Action memory action = IActionVerifier.Action({
-            subaccountId: message.subaccountId,
-            nonce: nonce,
-            module: IMatchingModule(withdrawalModule),
-            data: abi.encode(withdrawalData),
-            expiry: block.timestamp + params.minSignatureExpiry,
-            owner: address(tsa),
-            signer: address(tsa)
-        });
-
-        tsa.signActionData(action, bytes(""));
     }
 
     function _requireWithdrawalExecuted(uint256 loanId) internal view {
@@ -617,9 +593,15 @@ contract CollarTSAReceiver is AccessControl, OApp {
         return _send(message, defaultOptions, nativeFee, refundTo);
     }
 
-    function _sendAck(CollarLZMessages.Message memory origin, CollarLZMessages.Action action) internal {
-        uint256 subaccountId =
-            action == CollarLZMessages.Action.DepositConfirmed ? origin.subaccountId : tsa.subAccount();
+    function _sendAck(
+        CollarLZMessages.Message memory origin,
+        CollarLZMessages.Action action,
+        uint256 nativeFee,
+        address refundTo
+    ) internal returns (MessagingReceipt memory) {
+        uint256 subaccountId = action == CollarLZMessages.Action.DepositConfirmed
+            ? origin.subaccountId
+            : tsa.subAccount();
         CollarLZMessages.Message memory message = CollarLZMessages.Message({
             action: action,
             loanId: origin.loanId,
@@ -634,7 +616,7 @@ contract CollarTSAReceiver is AccessControl, OApp {
             data: bytes("")
         });
 
-        _send(message, defaultOptions, msg.value, msg.sender);
+        return _send(message, defaultOptions, nativeFee, refundTo);
     }
 
     function _send(CollarLZMessages.Message memory message, bytes memory options, uint256 nativeFee, address refundTo)

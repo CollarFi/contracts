@@ -31,6 +31,7 @@ library CollarTSAStorageLib {
         address loanStore;
         IOptionRiskVerifier optionRiskVerifier;
         CollarTSABridgeLib.BridgeConfigStorage bridge;
+        mapping(uint256 => uint256) depositExecutionNonce;
         mapping(uint256 => uint256) withdrawExecutionNonce;
     }
 

@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import {IntLib} from "lyra-utils/math/IntLib.sol";
 import {OptionEncoding} from "lyra-utils/encoding/OptionEncoding.sol";
 import {SafeCast} from "openzeppelin/utils/math/SafeCast.sol";
-import {ECDSA} from "openzeppelin/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DecimalMath} from "lyra-utils/decimals/DecimalMath.sol";
 import {SignedDecimalMath} from "lyra-utils/decimals/SignedDecimalMath.sol";
@@ -29,10 +28,6 @@ import {CollarTSABridgeLib} from "./libraries/CollarTSABridgeLib.sol";
 import {CollarTSAStorageLib} from "./libraries/CollarTSAStorageLib.sol";
 
 import {IOptionRiskVerifier} from "./interfaces/IOptionRiskVerifier.sol";
-
-interface IWithdrawalNonceTracker {
-    function usedNonces(address owner, uint256 nonce) external view returns (bool);
-}
 
 /// @title CollarTSA
 /// @notice TSA that allows selling covered calls and buying long puts for collar construction.
@@ -59,8 +54,6 @@ contract CollarTSA is BaseOnChainSigningTSA {
         ICollarTSA.CollarTSAParams tsaParams;
         ICollarTSA.CollateralManagementParams collateralManagementParams;
     }
-
-    uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
 
     function _getCollarTSAStorage() private pure returns (CollarTSAStorageLib.CollarTSAStorage storage $) {
         return CollarTSAStorageLib.get();
@@ -153,6 +146,20 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return _getCollarTSAStorage().loanStore;
     }
 
+    function _delegate(address target, bytes memory payload) private returns (bytes memory ret) {
+        assembly {
+            let success := delegatecall(gas(), target, add(payload, 0x20), mload(payload), 0, 0)
+            let size := returndatasize()
+            ret := mload(0x40)
+            mstore(ret, size)
+            returndatacopy(add(ret, 0x20), 0, size)
+            mstore(0x40, add(add(ret, 0x20), size))
+            if iszero(success) {
+                revert(add(ret, 0x20), size)
+            }
+        }
+    }
+
     function setOptionRiskVerifier(IOptionRiskVerifier newVerifier) external onlyOwner {
         if (address(newVerifier) == address(0)) {
             revert CTSA_InvalidParams();
@@ -183,25 +190,25 @@ contract CollarTSA is BaseOnChainSigningTSA {
         CollarTSABridgeLib.setBridgeCoordinator(_getCollarTSAStorage().bridge, coordinator);
     }
 
+    function signActionData(IMatching.Action memory, bytes memory) external pure override {
+        revert CTSA_DirectSigningDisabled();
+    }
+
     function signActionViaPermit(IMatching.Action memory action, bytes memory extraData, bytes memory signerSig)
         external
         override
         onlySubmitters
     {
         bytes32 hash = getActionTypedDataHash(action);
-        (address recovered, ECDSA.RecoverError error,) = ECDSA.tryRecover(hash, signerSig);
-        if (error != ECDSA.RecoverError.NoError || !this.isSigner(recovered)) {
-            revert CTSA_InvalidSignature();
-        }
-
+        CollarTSABridgeHelper(bridgeHelper).validateSigner(hash, signerSig);
         _signActionData(action, extraData);
-
-        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
-        if (address(action.module) == address($.withdrawalModule)) {
-            uint256 loanId = action.nonce % LOAN_ID_NONCE_MODULUS;
-            $.withdrawExecutionNonce[loanId] = action.nonce;
-            emit WithdrawNonceRecorded(loanId, action.nonce, hash);
-        }
+        _delegate(
+            bridgeHelper,
+            abi.encodeCall(
+                CollarTSABridgeHelper.recordExecution,
+                (address(action.module), action.nonce, hash, extraData.length != 0)
+            )
+        );
     }
 
     ///////////////////////
@@ -313,54 +320,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
     /// @dev If extraData is 0, the action is a maker action; otherwise, it is a taker action.
     function _verifyRfqActionViaDelegate(IMatching.Action memory action, bytes memory extraData) internal {
-        bytes memory payload = abi.encodeCall(ICollarTsaRfqDelegateModule.verifyRfqAction, (action, extraData));
-        (bool success, bytes memory returnData) =
-            address(_getCollarTSAStorage().rfqDelegateModule).delegatecall(payload);
-        if (!success) {
-            assembly {
-                revert(add(returnData, 32), mload(returnData))
-            }
-        }
-    }
-
-    /////////////////
-    // Option Math //
-    /////////////////
-
-    function _validateCallDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
-        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
-        IOptionRiskVerifier($.optionRiskVerifier)
-            .validateCall(
-                IOptionRiskVerifier.ValidateCallParams({
-                    manager: address(getBaseTSAAddresses().manager),
-                    optionAsset: address($.optionAsset),
-                    expiry: expiry,
-                    strike: strike,
-                    limitPrice: limitPrice,
-                    optionVolSlippageFactor: $.params.optionVolSlippageFactor,
-                    callMaxDelta: $.params.callMaxDelta,
-                    optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
-                    optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
-                })
-            );
-    }
-
-    function _validatePutDetails(uint256 expiry, uint256 strike, uint256 limitPrice) internal view {
-        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
-        IOptionRiskVerifier($.optionRiskVerifier)
-            .validatePut(
-                IOptionRiskVerifier.ValidatePutParams({
-                    manager: address(getBaseTSAAddresses().manager),
-                    optionAsset: address($.optionAsset),
-                    expiry: expiry,
-                    strike: strike,
-                    limitPrice: limitPrice,
-                    optionVolSlippageFactor: $.params.optionVolSlippageFactor,
-                    putMaxPriceFactor: $.params.putMaxPriceFactor,
-                    optionMinTimeToExpiry: $.params.optionMinTimeToExpiry,
-                    optionMaxTimeToExpiry: $.params.optionMaxTimeToExpiry
-                })
-            );
+        _delegate(
+            address(_getCollarTSAStorage().rfqDelegateModule),
+            abi.encodeCall(ICollarTsaRfqDelegateModule.verifyRfqAction, (action, extraData))
+        );
     }
 
     function _verifyDepositAction(IMatching.Action memory action, BaseTSAAddresses memory tsaAddresses) internal view {
@@ -463,16 +426,12 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     function estimateBridgeFees(address asset, address, uint256) external view returns (uint256) {
-        return CollarTSABridgeLib.estimateBridgeFees(_getCollarTSAStorage().bridge, asset);
+        return CollarTSABridgeHelper(bridgeHelper)
+            .estimateAdapterFee(address(_getCollarTSAStorage().bridge.socketBridgeConfigs[asset]));
     }
 
     function bridgeToL1(address, uint256, address) external payable returns (bytes32 socketMessageId) {
-        (bool ok, bytes memory ret) = bridgeHelper.delegatecall(msg.data);
-        if (!ok) {
-            assembly {
-                revert(add(ret, 0x20), mload(ret))
-            }
-        }
+        bytes memory ret = _delegate(bridgeHelper, msg.data);
         assembly {
             socketMessageId := mload(add(ret, 0x20))
         }
@@ -495,8 +454,13 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return ($.baseFeed, $.depositModule, $.withdrawalModule, $.tradeModule, $.rfqModule, $.optionAsset);
     }
 
-    function withdrawExecutionNonce(uint256 loanId) external view returns (uint256) {
-        return _getCollarTSAStorage().withdrawExecutionNonce[loanId];
+    function depositExecuted(uint256 loanId) external view returns (bool) {
+        CollarTSAStorageLib.CollarTSAStorage storage $ = _getCollarTSAStorage();
+        uint256 nonce = $.depositExecutionNonce[loanId];
+        if (nonce == 0 || address($.depositModule) == address(0)) {
+            return false;
+        }
+        return CollarTSABridgeHelper(bridgeHelper).usedNonce(address($.depositModule), nonce);
     }
 
     function withdrawExecuted(uint256 loanId) external view returns (bool) {
@@ -505,7 +469,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
         if (nonce == 0 || address($.withdrawalModule) == address(0)) {
             return false;
         }
-        return IWithdrawalNonceTracker(address($.withdrawalModule)).usedNonces(address(this), nonce);
+        return CollarTSABridgeHelper(bridgeHelper).usedNonce(address($.withdrawalModule), nonce);
     }
 
     ///////////////////
@@ -515,8 +479,11 @@ contract CollarTSA is BaseOnChainSigningTSA {
     event CollarTSAParamsSet(ICollarTSA.CollarTSAParams params);
     event CollarCollateralManagementParamsSet(ICollarTSA.CollateralManagementParams collateralManagementParams);
     event CollarTsaRfqDelegateModuleSet(address module);
+    event DepositNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
+    event TradeExecutedRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
     event WithdrawNonceRecorded(uint256 indexed loanId, uint256 nonce, bytes32 indexed actionHash);
 
+    error CTSA_DirectSigningDisabled();
     error CTSA_InvalidParams();
     error CTSA_InvalidConfig();
     error CTSA_InvalidSignature();
@@ -528,23 +495,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     error CTSA_SpotTradesDisabled();
     error CTSA_WithdrawingUtilisedCollateral();
     error CTSA_WithdrawalNegativeCash();
-    error CTSA_SellingTooManyCalls();
-    error CTSA_CanOnlyOpenShortCalls();
-    error CTSA_OnlyLongPutsAllowed();
     error CTSA_InvalidOptionBalance();
-    error CTSA_OptionExpiryOutOfBounds();
-    error CTSA_InsufficientCash();
-    error CTSA_OptionExpired();
-    error CTSA_OptionDeltaTooHigh();
-    error CTSA_OptionPriceTooLow();
-    error CTSA_PutPriceTooHigh();
-    error CTSA_InvalidRfqTradeDetails();
-    error CTSA_InvalidTradeAmount();
-    error CTSA_TradeDataDoesNotMatchOrderHash();
-    error CTSA_SpotRfqRequiresTaker();
-    error CTSA_SpotRfqAmountInvalid();
-    error CTSA_SpotRfqPriceTooLow();
-    error CTSA_SpotRfqSellTooMuch();
     error CTSA_DepositingTooMuch();
     error CTSA_PositionInsolvent();
 }

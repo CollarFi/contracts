@@ -22,6 +22,7 @@ import {CashAsset} from "v2-core/src/assets/CashAsset.sol";
 import {IWrappedERC20Asset} from "v2-core/src/interfaces/IWrappedERC20Asset.sol";
 import {ILiquidatableManager} from "v2-core/src/interfaces/ILiquidatableManager.sol";
 import {IMatching} from "v2-matching/src/interfaces/IMatching.sol";
+import {Matching} from "v2-matching/src/Matching.sol";
 import {ISpotFeed} from "v2-core/src/interfaces/ISpotFeed.sol";
 import {IDepositModule} from "v2-matching/src/interfaces/IDepositModule.sol";
 import {IWithdrawalModule} from "v2-matching/src/interfaces/IWithdrawalModule.sol";
@@ -61,6 +62,7 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// Auto-init env vars (used when TSA_INIT_DATA is omitted and TSA_PROXY is not provided):
 /// - SUBACCOUNTS, AUCTION, CASH, WRAPPED_DEPOSIT_ASSET, MANAGER, MATCHING
 /// - BASE_FEED, DEPOSIT_MODULE, WITHDRAWAL_MODULE, TRADE_MODULE, RFQ_MODULE, OPTION_ASSET
+/// - ATOMIC_EXECUTOR
 /// - OPTION_RISK_VERIFIER (optional; if omitted, deploys OptionRiskVerifier)
 /// - RFQ_VERIFIER (optional; if omitted, deploys RfqVerifier)
 /// - TSA_INITIAL_OWNER (optional, default ADMIN)
@@ -178,6 +180,7 @@ contract DeployL2 is Script {
         address optionRiskVerifierAddr = vm.envOr("OPTION_RISK_VERIFIER", address(0));
         address rfqVerifierAddr = vm.envOr("RFQ_VERIFIER", address(0));
         address rfqDelegateModuleAddr = vm.envOr("RFQ_DELEGATE_MODULE", address(0));
+        address atomicExecutor = vm.envOr("ATOMIC_EXECUTOR", address(0));
         address wethAsset = vm.envOr("WETH_ASSET", address(0));
         address wethSocketBridge = vm.envOr("WETH_SOCKET_BRIDGE", address(0));
         address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
@@ -243,6 +246,15 @@ contract DeployL2 is Script {
         // Receiver writes mandate/collateral/consumed state into loan store.
         bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
         CollarLoanStore(loanStoreAddr).grantRole(writerRole, address(receiver));
+        CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
+
+        if (atomicExecutor != address(0)) {
+            CollarTSA(tsaProxyAddr).setSubmitter(atomicExecutor, true);
+            Matching matching = Matching(vm.envAddress("MATCHING"));
+            if (matching.owner() == admin) {
+                matching.setTradeExecutor(atomicExecutor, true);
+            }
+        }
 
         if (l1Vault != address(0)) {
             receiver.setVaultRecipient(l1Vault);
@@ -312,6 +324,7 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2OptionRiskVerifier", optionRiskVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqVerifier", rfqVerifierAddr);
         json = vm.serializeAddress("addrs", "l2RfqDelegateModule", rfqDelegateModuleAddr);
+        json = vm.serializeAddress("addrs", "l2AtomicExecutor", atomicExecutor);
         json = vm.serializeAddress("addrs", "l2LzEndpoint", lzEndpoint);
         json = vm.serializeAddress("addrs", "l2WethAdapter", wethAdapter);
         json = vm.serializeAddress("addrs", "l2UsdcAdapter", usdcAdapter);
