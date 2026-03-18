@@ -146,10 +146,9 @@ contract CollarTSA is BaseOnChainSigningTSA {
         return _getCollarTSAStorage().loanStore;
     }
 
-    function _delegateBridgeHelper(bytes memory payload) private returns (bytes memory ret) {
-        address helper = bridgeHelper;
+    function _delegate(address target, bytes memory payload) private returns (bytes memory ret) {
         assembly {
-            let success := delegatecall(gas(), helper, add(payload, 0x20), mload(payload), 0, 0)
+            let success := delegatecall(gas(), target, add(payload, 0x20), mload(payload), 0, 0)
             let size := returndatasize()
             ret := mload(0x40)
             mstore(ret, size)
@@ -203,7 +202,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
         bytes32 hash = getActionTypedDataHash(action);
         CollarTSABridgeHelper(bridgeHelper).validateSigner(hash, signerSig);
         _signActionData(action, extraData);
-        _delegateBridgeHelper(
+        _delegate(
+            bridgeHelper,
             abi.encodeCall(
                 CollarTSABridgeHelper.recordExecution, (address(action.module), action.nonce, hash, extraData.length != 0)
             )
@@ -319,14 +319,10 @@ contract CollarTSA is BaseOnChainSigningTSA {
 
     /// @dev If extraData is 0, the action is a maker action; otherwise, it is a taker action.
     function _verifyRfqActionViaDelegate(IMatching.Action memory action, bytes memory extraData) internal {
-        bytes memory payload = abi.encodeCall(ICollarTsaRfqDelegateModule.verifyRfqAction, (action, extraData));
-        (bool success, bytes memory returnData) =
-            address(_getCollarTSAStorage().rfqDelegateModule).delegatecall(payload);
-        if (!success) {
-            assembly {
-                revert(add(returnData, 32), mload(returnData))
-            }
-        }
+        _delegate(
+            address(_getCollarTSAStorage().rfqDelegateModule),
+            abi.encodeCall(ICollarTsaRfqDelegateModule.verifyRfqAction, (action, extraData))
+        );
     }
 
     function _verifyDepositAction(IMatching.Action memory action, BaseTSAAddresses memory tsaAddresses) internal view {
@@ -435,7 +431,7 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     function bridgeToL1(address, uint256, address) external payable returns (bytes32 socketMessageId) {
-        bytes memory ret = _delegateBridgeHelper(msg.data);
+        bytes memory ret = _delegate(bridgeHelper, msg.data);
         assembly {
             socketMessageId := mload(add(ret, 0x20))
         }
