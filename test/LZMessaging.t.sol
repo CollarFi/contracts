@@ -184,16 +184,8 @@ contract MockCollarTSA is ICollarTSA {
         return bridgeFee;
     }
 
-    function depositExecutionNonce(uint256) external pure returns (uint256) {
-        return 0;
-    }
-
     function depositExecuted(uint256 loanId) external view returns (bool) {
         return depositExecutedByLoanId[loanId];
-    }
-
-    function withdrawExecutionNonce(uint256) external pure returns (uint256) {
-        return 0;
     }
 
     function withdrawExecuted(uint256 loanId) external view returns (bool) {

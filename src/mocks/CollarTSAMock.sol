@@ -60,16 +60,8 @@ contract CollarTSAMock {
         return (address(0), address(0), address(0x6666), address(0), address(0), address(0), address(0));
     }
 
-    function depositExecutionNonce(uint256) external pure returns (uint256) {
-        return 0;
-    }
-
     function depositExecuted(uint256) external pure returns (bool) {
         return false;
-    }
-
-    function withdrawExecutionNonce(uint256) external pure returns (uint256) {
-        return 0;
     }
 
     function withdrawExecuted(uint256) external pure returns (bool) {

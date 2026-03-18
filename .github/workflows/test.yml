@@ -53,6 +53,10 @@ jobs:
           forge build --skip script
         id: build
 
+      - name: Check contract sizes
+        run: |
+          python3 ops/check_contract_sizes.py
+
       - name: Run Forge tests
         run: |
           forge test -vvv --skip script

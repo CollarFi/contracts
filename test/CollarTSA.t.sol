@@ -105,9 +105,9 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         collarTsa.setSubmitter(address(this), true);
 
         assertFalse(collarTsa.withdrawExecuted(loanId));
-        assertEq(collarTsa.withdrawExecutionNonce(loanId), 0);
+        vm.expectEmit(true, false, true, true);
+        emit CollarTSA.WithdrawNonceRecorded(loanId, nonce, typedHash);
         collarTsa.signActionViaPermit(action, "", signerSig);
-        assertEq(collarTsa.withdrawExecutionNonce(loanId), nonce);
         // Direct signActionViaPermit call only records nonce; execution proof requires module nonce consumption.
         assertFalse(collarTsa.withdrawExecuted(loanId));
     }
@@ -265,7 +265,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _seedLoan(1, expiry);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_CanOnlyOpenShortCalls.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_CanOnlyOpenShortCalls()"))),
             action,
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -310,7 +310,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _seedLoan(1, expiry);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_OnlyLongPutsAllowed.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_OnlyLongPutsAllowed()"))),
             action,
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -358,7 +358,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _seedLoan(1, expiry);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_PutPriceTooHigh.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_PutPriceTooHigh()"))),
             action,
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -398,7 +398,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _seedLoan(1, expiry);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_TradeDataDoesNotMatchOrderHash.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_TradeDataDoesNotMatchOrderHash()"))),
             action,
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -443,7 +443,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         loanStore.setReturnRequested(1, true);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
             action,
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -598,7 +598,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[0].subId = OptionEncoding.toSubId(newExpiry, 2200e18, true);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
             _buildRolloverRfqAction(1, trades),
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -624,7 +624,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         trades[3].amount = 1e18;
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_InvalidRfqTradeDetails.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InvalidRfqTradeDetails()"))),
             _buildRolloverRfqAction(1, trades),
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -649,7 +649,7 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
         _setOptionAsset(trades);
 
         _expectRevertingTsaAction(
-            abi.encodeWithSelector(CollarTSA.CTSA_InsufficientCash.selector),
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_InsufficientCash()"))),
             _buildRolloverRfqAction(1, trades),
             abi.encode(uint256(1), abi.encode(trades))
         );
@@ -761,6 +761,8 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        _expectRevertingTsaAction(abi.encodeWithSelector(CollarTSA.CTSA_SpotRfqRequiresTaker.selector), action, "");
+        _expectRevertingTsaAction(
+            abi.encodeWithSelector(bytes4(keccak256("CTSA_SpotRfqRequiresTaker()"))), action, ""
+        );
     }
 }
