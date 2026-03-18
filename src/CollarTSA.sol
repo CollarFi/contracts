@@ -205,7 +205,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
         _delegate(
             bridgeHelper,
             abi.encodeCall(
-                CollarTSABridgeHelper.recordExecution, (address(action.module), action.nonce, hash, extraData.length != 0)
+                CollarTSABridgeHelper.recordExecution,
+                (address(action.module), action.nonce, hash, extraData.length != 0)
             )
         );
     }
@@ -425,9 +426,8 @@ contract CollarTSA is BaseOnChainSigningTSA {
     }
 
     function estimateBridgeFees(address asset, address, uint256) external view returns (uint256) {
-        return CollarTSABridgeHelper(bridgeHelper).estimateAdapterFee(
-            address(_getCollarTSAStorage().bridge.socketBridgeConfigs[asset])
-        );
+        return CollarTSABridgeHelper(bridgeHelper)
+            .estimateAdapterFee(address(_getCollarTSAStorage().bridge.socketBridgeConfigs[asset]));
     }
 
     function bridgeToL1(address, uint256, address) external payable returns (bytes32 socketMessageId) {

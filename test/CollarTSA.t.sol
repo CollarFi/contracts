@@ -761,8 +761,6 @@ contract CollarTSA_ValidationTests is CollarTSATestUtils {
             signer: address(tsa)
         });
 
-        _expectRevertingTsaAction(
-            abi.encodeWithSelector(bytes4(keccak256("CTSA_SpotRfqRequiresTaker()"))), action, ""
-        );
+        _expectRevertingTsaAction(abi.encodeWithSelector(bytes4(keccak256("CTSA_SpotRfqRequiresTaker()"))), action, "");
     }
 }
