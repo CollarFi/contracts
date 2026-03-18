@@ -85,6 +85,12 @@ def extract_tx_hash(raw: str) -> str:
     raise RuntimeError(f"could not extract tx hash: {raw[:240]}")
 
 
+def _tx_block(rpc: str, tx_hash: str) -> int:
+    receipt = json.loads(run(["cast", "receipt", tx_hash, "--rpc-url", rpc, "--json"]))
+    block_raw = receipt.get("blockNumber", "0x0")
+    return int(block_raw, 0) if isinstance(block_raw, str) else int(block_raw)
+
+
 def cast_call(rpc: str, to: str, sig: str, *args: str) -> str:
     return run(["cast", "call", to, sig, *args, "--rpc-url", rpc])
 
@@ -557,11 +563,27 @@ def main(
         tmp = tmpdir / ".env.l2.fork"
         state = tmpdir / "keeper_l2_state.json"
         tmp.write_text(base + f"\nRPC_URL={l2_rpc}\nL2_RECEIVER={receiver}\n")
+        start_block = _tx_block(l2_rpc, out["steps"][2]["result"]["relayTx"])
 
         env = dict(os.environ)
         env.update({"NO_COLOR": "1", "CLICOLOR": "0", "TERM": "dumb"})
         p = subprocess.run(
-            ["uv", "run", "python", str(ROOT / "ops/management/l2_keeper_handle_messages.py"), str(tmp), "--state-file", str(state), "--once", "--broadcast", "--private-key", ANVIL_PK0, "--json"],
+            [
+                "uv",
+                "run",
+                "python",
+                str(ROOT / "ops/management/l2_keeper_handle_messages.py"),
+                str(tmp),
+                "--state-file",
+                str(state),
+                "--start-block",
+                str(start_block),
+                "--once",
+                "--broadcast",
+                "--private-key",
+                ANVIL_PK0,
+                "--json",
+            ],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

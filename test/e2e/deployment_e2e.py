@@ -116,6 +116,10 @@ def _cast_send_pk(rpc: str, to: str, sig: str, *args: str, private_key: str = AN
     return run(["cast", "send", to, sig, *args, "--rpc-url", rpc, "--private-key", private_key])
 
 
+def _block_number(rpc_url: str) -> int:
+    return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
+
+
 def _loads_json_relaxed(raw: str) -> dict:
     return json.loads(raw, strict=False)
 
@@ -394,6 +398,8 @@ def main(
 
     l1_vault = l1a["l1Vault"]
     l2_receiver = l2a["l2Receiver"]
+    l1_post_deploy_block = _block_number(l1_rpc)
+    l2_post_deploy_block = _block_number(l2_rpc)
 
     keeper_role = run(["cast", "keccak", "KEEPER_ROLE"]).strip()
     rfq_role = run(["cast", "keccak", "RFQ_SIGNER_ROLE"]).strip()
@@ -426,6 +432,8 @@ def main(
             str(ROOT_DIR / "ops/management/l2_keeper_handle_messages.py"),
             str(l2_fork_env),
             "--once",
+            "--start-block",
+            str(l2_post_deploy_block),
             "--no-submit-deposit-api",
             "--no-submit-withdraw-api",
             "--broadcast",
@@ -441,6 +449,8 @@ def main(
             str(ROOT_DIR / "ops/management/l1_keeper_handle_messages.py"),
             str(l1_fork_env),
             "--once",
+            "--start-block",
+            str(l1_post_deploy_block),
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
@@ -452,7 +462,14 @@ def main(
 
     m2 = _run_cmd(
         "l2_message_preflight",
-        [sys.executable, str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"), str(l2_fork_env), "--json"],
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/preflight/l2_message_preflight.py"),
+            str(l2_fork_env),
+            "--lookback-blocks",
+            "100",
+            "--json",
+        ],
     )
     m1 = _run_cmd(
         "l1_message_preflight",
@@ -460,6 +477,8 @@ def main(
             sys.executable,
             str(ROOT_DIR / "ops/management/l1_message_preflight.py"),
             str(l1_fork_env),
+            "--lookback-blocks",
+            "100",
             "--json",
             "--logs-rpc-url",
             l1_rpc,
