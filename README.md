@@ -163,7 +163,7 @@ uv run python ops/management/l2_keeper_handle_messages.py --env testnet --broadc
 # - DeployL1 ensures CollarVault has VAULT_ROLE on the configured liquidity vault (critical for reserve/borrow paths).
 # - BRIDGE_CONFIG_ADMIN was removed; ADMIN/VAULT_OWNER is the PARAMETER_ROLE holder at init.
 # - If WETH_ASSET is set, deploy enables it as allowed collateral via setCollateralConfig(WETH_ASSET, true, WETH_STRIKE_SCALE).
-# - Set RFQ_SIGNER in .env.l1.<env> to auto-allowlist a keeper signer via setRfqSigner(..., true).
+# - Set RFQ_SIGNER in .env.l1.<env> to auto-allowlist a keeper signer via grantRole(RFQ_SIGNER_ROLE, ...).
 
 # Check harness wiring/state
 uv run python ops/lz_harness/status.py
