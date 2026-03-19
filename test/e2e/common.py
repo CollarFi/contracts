@@ -268,6 +268,92 @@ def extract_address_from_forge_create(out: str) -> str:
     raise RuntimeError(f"failed to parse deployed address: {out[:300]}")
 
 
+def extract_tx_hash(raw: str) -> str:
+    s = raw.strip()
+    if re.fullmatch(r"0x[a-fA-F0-9]{64}", s):
+        return s
+    m = re.search(r"transactionHash\s+(0x[a-fA-F0-9]{64})", s)
+    if m:
+        return m.group(1)
+    hashes = re.findall(r"0x[a-fA-F0-9]{64}", s)
+    if hashes:
+        return hashes[-1]
+    raise RuntimeError(f"could not extract tx hash: {raw[:240]}")
+
+
+def _iter_calls(node: dict):
+    yield node
+    for c in node.get("calls", []) or []:
+        yield from _iter_calls(c)
+
+
+def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
+    trace = json.loads(
+        run([
+            "cast",
+            "rpc",
+            "debug_traceTransaction",
+            tx_hash,
+            json.dumps({"tracer": "callTracer", "tracerConfig": {"withLog": False}}),
+            "--rpc-url",
+            src_rpc,
+        ])
+    )
+    for call in _iter_calls(trace):
+        data = (call.get("input") or "").lower()
+        if not data.startswith("0x4389e58f"):
+            continue
+        decoded = run(["cast", "calldata-decode", "send((uint64,uint32,address,uint32,bytes32,bytes32,bytes),bytes,bool)", data])
+        first = decoded.splitlines()[0].strip()
+        m = re.match(
+            r"\((\d+),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]*)\)",
+            first,
+        )
+        if not m:
+            raise RuntimeError(f"parse failed for decoded send packet: {first}")
+        nonce, src_eid, sender, dst_eid, receiver_b32, guid, message = m.groups()
+        return {
+            "nonce": int(nonce),
+            "srcEid": int(src_eid),
+            "dstEid": int(dst_eid),
+            "sender": sender.lower(),
+            "senderB32": "0x" + ("00" * 12) + sender.lower().removeprefix("0x"),
+            "receiver": "0x" + receiver_b32[-40:],
+            "guid": guid,
+            "message": message,
+        }
+    raise RuntimeError(f"send((...),bytes,bool) not found in trace: {tx_hash}")
+
+
+def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str) -> dict:
+    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash)
+    endpoint = cast_call(dst_rpc, pkt["receiver"], "endpoint()(address)").splitlines()[0].strip()
+    run(["cast", "rpc", "anvil_setBalance", endpoint, "0x3635C9ADC5DEA00000", "--rpc-url", dst_rpc])
+    relay_tx = extract_tx_hash(
+        run([
+            "cast",
+            "send",
+            pkt["receiver"],
+            "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
+            f"({pkt['srcEid']},{pkt['senderB32']},{pkt['nonce']})",
+            pkt["guid"],
+            pkt["message"],
+            "0x0000000000000000000000000000000000000000",
+            "0x",
+            "--rpc-url",
+            dst_rpc,
+            "--unlocked",
+            "--from",
+            endpoint,
+            "--gas-limit",
+            "1500000",
+        ])
+    )
+    pkt["relayTx"] = relay_tx
+    pkt["endpoint"] = endpoint
+    return pkt
+
+
 def ensure_l1_sepolia_rpc(rpc: str) -> None:
     got = int(run(["cast", "chain-id", "--rpc-url", rpc]).strip())
     if got != 11155111:
@@ -421,6 +507,7 @@ def run_fresh_loan_flow(
     collateral_asset: str,
     *,
     relay_l2_ack_to_l1: bool = True,
+    strict_bridge_paths: bool = False,
 ) -> dict:
     cmd = [
         "uv", "run", "python", str(ROOT / "test/e2e/fresh_loan_flow.py"),
@@ -433,6 +520,8 @@ def run_fresh_loan_flow(
     ]
     if not relay_l2_ack_to_l1:
         cmd.append("--no-relay-l2-ack-to-l1")
+    if strict_bridge_paths:
+        cmd.append("--strict-bridge-paths")
     out = run(cmd)
     return json.loads(out)
 

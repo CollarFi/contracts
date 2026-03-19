@@ -17,6 +17,7 @@ sys.path.insert(0, str(THIS_DIR))
 from common import ensure_liquidity_vault_role as _ensure_liquidity_vault_role
 from common import seed_l1_liquidity_vault as _seed_l1_liquidity_vault
 from common import resolve_l2_runtime_env as _resolve_l2_runtime_env
+from common import relay_exact_lz_packet as _relay_exact_lz_packet
 from common import write_env_with_updates as _write_env_with_updates
 from defaults import L1_ANVIL_PORT, L1_ARTIFACT_JSON, L1_COLLATERAL_ASSET, L2_ANVIL_PORT, L2_ARTIFACT_JSON
 from loan_flow_helpers import resolve_mandate_ttl
@@ -175,59 +176,6 @@ def ensure_token_balance_via_faucet(rpc: str, faucet: str, token: str, to: str, 
     raise RuntimeError("faucet funding failed")
 
 
-def _iter_calls(node: dict):
-    yield node
-    for c in node.get("calls", []) or []:
-        yield from _iter_calls(c)
-
-
-def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
-    trace = json.loads(
-        run([
-            "cast", "rpc", "debug_traceTransaction", tx_hash,
-            json.dumps({"tracer": "callTracer", "tracerConfig": {"withLog": False}}),
-            "--rpc-url", src_rpc,
-        ])
-    )
-    for call in _iter_calls(trace):
-        data = (call.get("input") or "").lower()
-        if not data.startswith("0x4389e58f"):
-            continue
-        decoded = run(["cast", "calldata-decode", "send((uint64,uint32,address,uint32,bytes32,bytes32,bytes),bytes,bool)", data])
-        first = decoded.splitlines()[0].strip()
-        m = re.match(r"\((\d+),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{40}),\s*(\d+)(?:\s*\[[^\]]+\])?,\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]{64}),\s*(0x[a-fA-F0-9]*)\)", first)
-        if not m:
-            raise RuntimeError(f"parse failed for decoded send packet: {first}")
-        nonce, src_eid, sender, dst_eid, receiver_b32, guid, message = m.groups()
-        return {
-            "nonce": int(nonce),
-            "srcEid": int(src_eid),
-            "dstEid": int(dst_eid),
-            "sender": sender.lower(),
-            "senderB32": "0x" + ("00" * 12) + sender.lower().removeprefix("0x"),
-            "receiver": "0x" + receiver_b32[-40:],
-            "guid": guid,
-            "message": message,
-        }
-    raise RuntimeError(f"send((...),bytes,bool) not found in trace: {tx_hash}")
-
-
-def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str) -> dict:
-    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash)
-    endpoint = cast_call(dst_rpc, pkt["receiver"], "endpoint()(address)").splitlines()[0].strip()
-    run(["cast", "rpc", "anvil_setBalance", endpoint, "0x3635C9ADC5DEA00000", "--rpc-url", dst_rpc])
-    relay_tx = extract_tx_hash(run([
-        "cast", "send", pkt["receiver"],
-        "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
-        f"({pkt['srcEid']},{pkt['senderB32']},{pkt['nonce']})", pkt["guid"], pkt["message"],
-        "0x0000000000000000000000000000000000000000", "0x",
-        "--rpc-url", dst_rpc, "--unlocked", "--from", endpoint, "--gas-limit", "1500000",
-    ]))
-    pkt["relayTx"] = relay_tx
-    pkt["endpoint"] = endpoint
-    return pkt
-
-
 def _deploy_socket_mock(l2_rpc: str) -> str:
     if l2_rpc in SOCKET_MOCK_CACHE:
         return SOCKET_MOCK_CACHE[l2_rpc]
@@ -371,6 +319,7 @@ def main(
     collateral_asset: str = typer.Option(L1_COLLATERAL_ASSET, help="Override L1 collateral asset used for fresh deposit"),
     faucet: str = typer.Option("", help="Override faucet contract address"),
     relay_l2_ack_to_l1: bool = typer.Option(True, "--relay-l2-ack-to-l1/--no-relay-l2-ack-to-l1"),
+    strict_bridge_paths: bool = typer.Option(False, "--strict-bridge-paths", help="Fail instead of substituting mock bridge adapters."),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ):
     l1 = json.loads((ROOT / l1_json).read_text())
@@ -521,6 +470,8 @@ def main(
             )
         except Exception as e:
             err = str(e)
+            if strict_bridge_paths:
+                raise RuntimeError(f"strict bridge path failed without fallback: {err}") from e
             if "TRANSFER_FROM_FAILED" not in err and "NotEnoughNative" not in err:
                 raise
             # Sepolia fork can carry stale Socket route config or drifted bridge fees.
@@ -554,7 +505,7 @@ def main(
         }
 
     step("create_deposit_with_permit", do_deposit)
-    step("relay_l1_to_l2_exact", lambda: relay_exact_lz_packet(l1_rpc, l2_rpc, out["steps"][-1]["result"]["tx"]))
+    step("relay_l1_to_l2_exact", lambda: _relay_exact_lz_packet(l1_rpc, l2_rpc, out["steps"][-1]["result"]["tx"]))
     step("simulate_socket_finalized", lambda: _ensure_socket_finalized_for_guid(l2_rpc, receiver, out["steps"][-1]["result"]["guid"]))
     step("fund_l2_receiver_for_deposit", lambda: _ensure_receiver_asset_balance_for_guid(l2_rpc, receiver, out["steps"][-2]["result"]["guid"]))
     step("grant_tsa_signer", lambda: _ensure_tsa_signer(l2_rpc, l2a["l2Tsa"], receiver))
@@ -633,7 +584,7 @@ def main(
             ack_tx = hashes[-1]
         if not ack_tx:
             raise RuntimeError(f"keeper handled message but produced no relayable tx: {json.dumps(sent[0])}")
-        return relay_exact_lz_packet(l2_rpc, l1_rpc, ack_tx)
+        return _relay_exact_lz_packet(l2_rpc, l1_rpc, ack_tx)
 
     step("relay_l2_to_l1_exact", relay_l2_ack_to_l1)
 

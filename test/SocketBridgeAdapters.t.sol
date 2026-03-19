@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {SocketBridgeAdapterL2Compat} from "../src/bridge/SocketBridgeAdapterL2Compat.sol";
 import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
 import {SocketBridgeAdapterOld} from "../src/bridge/SocketBridgeAdapterOld.sol";
 
@@ -84,6 +85,24 @@ contract MockSocketVault {
     }
 }
 
+contract MockSocketWithdrawController {
+    IERC20 public immutable token;
+    uint256 public totalBridged;
+
+    constructor(IERC20 token_) {
+        token = token_;
+    }
+
+    function getMinFees(address, uint256) external pure returns (uint256) {
+        return 2;
+    }
+
+    function withdrawFromAppChain(address, uint256 amount_, uint256, address) external payable {
+        token.transferFrom(msg.sender, address(this), amount_);
+        totalBridged += amount_;
+    }
+}
+
 contract SocketBridgeAdaptersTest is Test {
     function test_newAdapter_bridgePullsAndApprovesUnderlying() external {
         MockERC20 token = new MockERC20("T", "T", 18);
@@ -128,6 +147,31 @@ contract SocketBridgeAdaptersTest is Test {
         assertEq(token.balanceOf(address(adapter)), 0);
 
         bytes32 expectedId = bytes32((uint256(901) << 224) | (uint256(uint160(address(0xD00D))) << 64) | uint256(77));
+        assertEq(adapter.messageId(), expectedId);
+    }
+
+    function test_l2CompatAdapter_bridgePullsAndApprovesUnderlying() external {
+        MockERC20 token = new MockERC20("T", "T", 18);
+        MockSocketCore socket = new MockSocketCore(901);
+        MockConnector connector = new MockConnector(address(socket), 40232);
+        socket.setPlugConfig(address(connector), 40232, address(0xC0DE));
+        socket.setGlobalMessageCount(99);
+
+        MockSocketWithdrawController controller = new MockSocketWithdrawController(IERC20(address(token)));
+        SocketBridgeAdapterL2Compat adapter =
+            new SocketBridgeAdapterL2Compat(address(token), address(controller), address(connector), 100_000);
+
+        token.mint(address(this), 10 ether);
+        token.approve(address(adapter), type(uint256).max);
+
+        assertEq(adapter.estimateFee(), 2);
+
+        adapter.bridge(address(0xCAFE), 5 ether);
+
+        assertEq(token.balanceOf(address(controller)), 5 ether);
+        assertEq(token.balanceOf(address(adapter)), 0);
+
+        bytes32 expectedId = bytes32((uint256(901) << 224) | (uint256(uint160(address(0xC0DE))) << 64) | uint256(99));
         assertEq(adapter.messageId(), expectedId);
     }
 }

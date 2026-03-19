@@ -65,7 +65,7 @@ def main(
     sepolia_weth: str = typer.Option(L1_COLLATERAL_ASSET),
     auto_redeploy: bool = typer.Option(True, "--auto-redeploy/--no-auto-redeploy"),
 ):
-    print("=== collar.fi return-before-trade e2e ===")
+    print("=== collar.fi return-before-trade protocol-state e2e ===")
 
     _ensure_l1_sepolia_rpc(l1_rpc)
     _ensure_l2_derive_rpc(l2_rpc)
