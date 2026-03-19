@@ -10,7 +10,7 @@ import {
     MessagingReceipt,
     Origin
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
-import {OAppUpgradeable} from "../oapp-upgradeable/OAppUpgradeable.sol";
+import {OAppUpgradeable} from "@layerzerolabs/oapp-evm-upgradeable/contracts/oapp/OAppUpgradeable.sol";
 
 import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 
