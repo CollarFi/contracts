@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
+import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
@@ -10,7 +10,7 @@ import {
     MessagingReceipt,
     Origin
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
-import {OApp} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
+import {OAppUpgradeable} from "../oapp-upgradeable/OAppUpgradeable.sol";
 
 import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
 
@@ -24,7 +24,7 @@ interface IRfqNonceTracker {
 }
 
 /// @notice L2 receiver for LayerZero metadata messages.
-contract CollarTSAReceiver is AccessControl, OApp {
+contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgradeable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
@@ -87,17 +87,28 @@ contract CollarTSAReceiver is AccessControl, OApp {
     error CTR_ReturnRequestBlocksTrade();
     error CTR_LoanIdTooLargeForNonce();
 
-    constructor(
+    constructor(address endpoint_) OAppUpgradeable(endpoint_) {
+        _disableInitializers();
+    }
+
+    function initialize(
         address admin,
         address endpoint_,
         ISocketMessageTracker socket_,
         ICollarTSA tsa_,
         ICollarLoanStore loanStore_,
         uint32 remoteEid_
-    ) OApp(endpoint_, admin) Ownable(admin) {
-        if (address(loanStore_) == address(0)) {
+    ) external initializer {
+        if (
+            admin == address(0) || endpoint_ != address(endpoint) || address(tsa_) == address(0)
+                || address(loanStore_) == address(0)
+        ) {
             revert CTR_InvalidPeer();
         }
+
+        __AccessControl_init();
+        __Ownable_init(admin);
+        __OApp_init(admin);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PARAMETER_ROLE, admin);

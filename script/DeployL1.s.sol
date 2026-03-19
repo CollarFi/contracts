@@ -63,6 +63,7 @@ contract DeployL1 is Script {
         CollarVault vault;
         address vaultImpl;
         CollarVaultMessenger messenger;
+        address messengerImpl;
         CollarVaultFinalizeModule finalizeModule;
         CollarVaultSettleModule settleModule;
         CollarVaultRolloverModule rolloverModule;
@@ -124,7 +125,7 @@ contract DeployL1 is Script {
         dep.lzEndpoint = _ensureLzEndpoint(cfg);
 
         (dep.vault, dep.vaultImpl) = _deployVault(cfg, dep.liquidityVault, dep.eulerAdapter);
-        dep.messenger = _deployMessenger(cfg, dep.vault, dep.lzEndpoint);
+        (dep.messenger, dep.messengerImpl) = _deployMessenger(cfg, dep.vault, dep.lzEndpoint);
 
         dep.finalizeModule = new CollarVaultFinalizeModule();
         dep.settleModule = new CollarVaultSettleModule();
@@ -191,9 +192,13 @@ contract DeployL1 is Script {
 
     function _deployMessenger(EnvConfig memory cfg, CollarVault vault, address lzEndpoint)
         internal
-        returns (CollarVaultMessenger messenger)
+        returns (CollarVaultMessenger messenger, address messengerImpl)
     {
-        messenger = new CollarVaultMessenger(cfg.admin, address(vault), lzEndpoint, cfg.l2Eid);
+        messengerImpl = address(new CollarVaultMessenger(lzEndpoint));
+        bytes memory initData =
+            abi.encodeCall(CollarVaultMessenger.initialize, (cfg.admin, address(vault), lzEndpoint, cfg.l2Eid));
+        address messengerProxy = address(new TransparentUpgradeableProxy(messengerImpl, cfg.proxyAdminOwner, initData));
+        messenger = CollarVaultMessenger(payable(messengerProxy));
         if (cfg.lzReceiveGas > 0) {
             bytes memory lzOptions = OptionsBuilder.newOptions()
                 .addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
@@ -248,6 +253,8 @@ contract DeployL1 is Script {
         json = vm.serializeAddress("addrs", "l1VaultImplementation", dep.vaultImpl);
         json = vm.serializeAddress("addrs", "l1VaultProxyAdmin", _proxyAdminOf(address(dep.vault)));
         json = vm.serializeAddress("addrs", "l1Messenger", address(dep.messenger));
+        json = vm.serializeAddress("addrs", "l1MessengerImplementation", dep.messengerImpl);
+        json = vm.serializeAddress("addrs", "l1MessengerProxyAdmin", _proxyAdminOf(address(dep.messenger)));
         json = vm.serializeAddress("addrs", "l1FinalizeModule", address(dep.finalizeModule));
         json = vm.serializeAddress("addrs", "l1SettleModule", address(dep.settleModule));
         json = vm.serializeAddress("addrs", "l1RolloverModule", address(dep.rolloverModule));
@@ -264,6 +271,8 @@ contract DeployL1 is Script {
         console2.log("L1 vault implementation", dep.vaultImpl);
         console2.log("L1 vault proxy admin", _proxyAdminOf(address(dep.vault)));
         console2.log("L1 messenger", address(dep.messenger));
+        console2.log("L1 messenger implementation", dep.messengerImpl);
+        console2.log("L1 messenger proxy admin", _proxyAdminOf(address(dep.messenger)));
         console2.log("L1 finalizeModule", address(dep.finalizeModule));
         console2.log("L1 settleModule", address(dep.settleModule));
         console2.log("L1 rolloverModule", address(dep.rolloverModule));

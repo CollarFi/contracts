@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
+import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     MessagingFee,
     MessagingReceipt,
     Origin
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
-import {OApp} from "@layerzerolabs/lz-evm-oapp-v2/contracts/oapp/OApp.sol";
+import {OAppUpgradeable} from "../oapp-upgradeable/OAppUpgradeable.sol";
 
 import {CollarLZMessages} from "./CollarLZMessages.sol";
 
 /// @notice L1 messenger for LayerZero metadata messages.
-contract CollarVaultMessenger is AccessControl, OApp {
+contract CollarVaultMessenger is Initializable, AccessControlUpgradeable, OAppUpgradeable {
     bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
     bytes32 public constant PARAMETER_ROLE = keccak256("PARAMETER_ROLE");
 
@@ -36,13 +36,22 @@ contract CollarVaultMessenger is AccessControl, OApp {
     error CVM_InsufficientNativeFee();
     error CV_LZMessageMismatch();
 
-    constructor(address admin, address vault, address endpoint_, uint32 remoteEid_)
-        OApp(endpoint_, admin)
-        Ownable(admin)
-    {
+    constructor(address endpoint_) OAppUpgradeable(endpoint_) {
+        _disableInitializers();
+    }
+
+    function initialize(address admin, address vault, address endpoint_, uint32 remoteEid_) external initializer {
         if (admin == address(0) || vault == address(0)) {
             revert CVM_InvalidPeer();
         }
+        if (endpoint_ != address(endpoint)) {
+            revert CVM_InvalidPeer();
+        }
+
+        __AccessControl_init();
+        __Ownable_init(admin);
+        __OApp_init(admin);
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PARAMETER_ROLE, admin);
         _grantRole(VAULT_ROLE, vault);

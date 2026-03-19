@@ -260,18 +260,25 @@ contract DeployL2 is Script {
             tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
         }
 
-        CollarTSAReceiver receiver = new CollarTSAReceiver(
-            admin,
-            lzEndpoint,
-            ISocketMessageTracker(socketTracker),
-            ICollarTSA(tsaProxyAddr),
-            ICollarLoanStore(loanStoreAddr),
-            l1Eid
+        address receiverImplementation = address(new CollarTSAReceiver(lzEndpoint));
+        bytes memory receiverInitData = abi.encodeCall(
+            CollarTSAReceiver.initialize,
+            (
+                admin,
+                lzEndpoint,
+                ISocketMessageTracker(socketTracker),
+                ICollarTSA(tsaProxyAddr),
+                ICollarLoanStore(loanStoreAddr),
+                l1Eid
+            )
         );
+        address receiverProxyAddr =
+            address(new TransparentUpgradeableProxy(receiverImplementation, proxyAdminOwner, receiverInitData));
+        CollarTSAReceiver receiver = CollarTSAReceiver(payable(receiverProxyAddr));
 
         // Receiver writes mandate/collateral/consumed state into loan store.
         bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
-        CollarLoanStore(loanStoreAddr).grantRole(writerRole, address(receiver));
+        CollarLoanStore(loanStoreAddr).grantRole(writerRole, receiverProxyAddr);
         CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
 
         if (atomicExecutor != address(0)) {
@@ -329,7 +336,7 @@ contract DeployL2 is Script {
         }
 
         if (bridgeConfigured) {
-            CollarTSA(tsaProxyAddr).setBridgeCoordinator(address(receiver));
+            CollarTSA(tsaProxyAddr).setBridgeCoordinator(receiverProxyAddr);
         }
 
         vm.stopBroadcast();
@@ -337,7 +344,9 @@ contract DeployL2 is Script {
         string memory outPath = vm.envString("OUTPUT_JSON");
 
         string memory json;
-        json = vm.serializeAddress("addrs", "l2Receiver", address(receiver));
+        json = vm.serializeAddress("addrs", "l2Receiver", receiverProxyAddr);
+        json = vm.serializeAddress("addrs", "l2ReceiverImplementation", receiverImplementation);
+        json = vm.serializeAddress("addrs", "l2ReceiverProxyAdmin", _proxyAdminOf(receiverProxyAddr));
         json = vm.serializeAddress("addrs", "l2SocketTracker", socketTracker);
         json = vm.serializeAddress("addrs", "l2LoanStore", loanStoreAddr);
         json = vm.serializeAddress("addrs", "l2Tsa", tsaProxyAddr);
@@ -352,7 +361,9 @@ contract DeployL2 is Script {
         json = vm.serializeAddress("addrs", "l2UsdcAdapter", usdcAdapter);
         vm.writeJson(json, outPath);
 
-        console2.log("L2 receiver", address(receiver));
+        console2.log("L2 receiver", receiverProxyAddr);
+        console2.log("L2 receiver implementation", receiverImplementation);
+        console2.log("L2 receiver proxy admin", _proxyAdminOf(receiverProxyAddr));
         console2.log("L2 socketTracker", socketTracker);
         console2.log("L2 loanStore", loanStoreAddr);
         console2.log("L2 tsa(proxy)", tsaProxyAddr);

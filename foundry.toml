@@ -10,12 +10,14 @@ fs_permissions = [
 ]
 remappings = [
   "forge-std/=lib/forge-std/src/",
-  "@openzeppelin/contracts-upgradeable/security/=lib/v2-matching/lib/v2-core/lib/openzeppelin-contracts-upgradeable/contracts/utils/",
-  "@openzeppelin/contracts-upgradeable/=lib/v2-matching/lib/v2-core/lib/openzeppelin-contracts-upgradeable/contracts/",
+  "@openzeppelin/contracts-upgradeable/security/=lib/v2-matching/lib/openzeppelin-contracts-upgradeable/contracts/utils/",
+  "@openzeppelin/contracts-upgradeable/=lib/v2-matching/lib/openzeppelin-contracts-upgradeable/contracts/",
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "openzeppelin/=lib/openzeppelin-contracts/contracts/",
   "@layerzerolabs/lz-evm-oapp-v2/=lib/lz-address-book/lib/LayerZero-v2/packages/layerzero-v2/evm/oapp/",
   "@layerzerolabs/lz-evm-protocol-v2/=lib/lz-address-book/lib/LayerZero-v2/packages/layerzero-v2/evm/protocol/",
+  "@layerzerolabs/oapp-evm-upgradeable/=lib/lz-address-book/lib/devtools/packages/oapp-evm-upgradeable/contracts/",
+  "@layerzerolabs/oapp-evm/=lib/lz-address-book/lib/devtools/packages/oapp-evm/",
   "permit2/=lib/euler-earn/lib/euler-vault-kit/lib/permit2/",
   "lyra-utils/=lib/v2-matching/lib/v2-core/lib/lyra-utils/src/"
 ]

@@ -22,15 +22,29 @@ def _first_create_by_name(txs: list[dict], contract_name: str) -> str | None:
     return None
 
 
+def _creates_by_name(txs: list[dict], *contract_names: str) -> list[str]:
+    names = set(contract_names)
+    out: list[str] = []
+    for tx in txs:
+        if tx.get("transactionType") == "CREATE" and tx.get("contractName") in names:
+            addr = tx.get("contractAddress")
+            if addr:
+                out.append(addr)
+    return out
+
+
 def _l1_from_run(run: dict) -> dict:
     txs: list[dict] = run.get("transactions", [])
+    proxies = _creates_by_name(txs, "ERC1967Proxy", "TransparentUpgradeableProxy")
     out = {
-        "l1Vault": _first_create_by_name(txs, "ERC1967Proxy"),
-        "l1VaultProxy": _first_create_by_name(txs, "ERC1967Proxy"),
+        "l1Vault": proxies[0] if len(proxies) > 0 else None,
+        "l1VaultProxy": proxies[0] if len(proxies) > 0 else None,
         "l1VaultImplementation": _first_create_by_name(txs, "CollarVault"),
-        "l1Messenger": _first_create_by_name(txs, "CollarVaultMessenger"),
+        "l1Messenger": proxies[1] if len(proxies) > 1 else _first_create_by_name(txs, "CollarVaultMessenger"),
+        "l1MessengerImplementation": _first_create_by_name(txs, "CollarVaultMessenger"),
         "l1FinalizeModule": _first_create_by_name(txs, "CollarVaultFinalizeModule"),
         "l1SettleModule": _first_create_by_name(txs, "CollarVaultSettleModule"),
+        "l1RolloverModule": _first_create_by_name(txs, "CollarVaultRolloverModule"),
         "l1LiquidityVault": _first_create_by_name(txs, "CollarLiquidityVault"),
         "l1EulerAdapter": _first_create_by_name(txs, "EulerAdapterMock"),
         "l1WethAdapter": _first_create_by_name(txs, "SocketBridgeAdapterOld")
@@ -42,11 +56,13 @@ def _l1_from_run(run: dict) -> dict:
 
 def _l2_from_run(run: dict) -> dict:
     txs: list[dict] = run.get("transactions", [])
+    proxies = _creates_by_name(txs, "ERC1967Proxy", "TransparentUpgradeableProxy")
     out = {
-        "l2Receiver": _first_create_by_name(txs, "CollarTSAReceiver"),
+        "l2Receiver": proxies[1] if len(proxies) > 1 else _first_create_by_name(txs, "CollarTSAReceiver"),
+        "l2ReceiverImplementation": _first_create_by_name(txs, "CollarTSAReceiver"),
         "l2SocketTracker": _first_create_by_name(txs, "SocketMessageTrackerMock"),
         "l2LoanStore": _first_create_by_name(txs, "CollarLoanStore"),
-        "l2Tsa": _first_create_by_name(txs, "ERC1967Proxy"),
+        "l2Tsa": proxies[0] if len(proxies) > 0 else None,
         "l2TsaImplementation": _first_create_by_name(txs, "CollarTSA"),
         "l2OptionRiskVerifier": _first_create_by_name(txs, "OptionRiskVerifier"),
         "l2RfqVerifier": _first_create_by_name(txs, "RfqVerifier"),
