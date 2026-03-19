@@ -360,10 +360,12 @@ def main(
     # Ensure LZ peer wiring + default options are set for fresh fork deploys.
     l1_messenger = l1a["l1Messenger"]
     l2_receiver_addr = l2a["l2Receiver"]
+    l1_vault_addr = l1a["l1Vault"]
     if l2_eid:
         _cast_send_pk(l1_rpc, l1_messenger, "setPeer(uint32,bytes32)", l2_eid, _peer_bytes32(l2_receiver_addr))
     if l1_eid:
         _cast_send_pk(l2_rpc, l2_receiver_addr, "setPeer(uint32,bytes32)", l1_eid, _peer_bytes32(l1_messenger))
+    _cast_send_pk(l2_rpc, l2_receiver_addr, "setVaultRecipient(address)", l1_vault_addr)
 
     receive_gas = int(l1e.get("LZ_RECEIVE_GAS") or l2e.get("LZ_RECEIVE_GAS") or "200000")
     receive_value = int(l1e.get("LZ_RECEIVE_VALUE") or l2e.get("LZ_RECEIVE_VALUE") or "0")
@@ -444,6 +446,20 @@ def main(
                 "MATCHING": base_addrs[6],
             },
         )
+
+    _run_cmd(
+        "apply_lz_uln_config",
+        [
+            sys.executable,
+            str(ROOT_DIR / "ops/apply_lz_uln_config.py"),
+            str(l1_fork_env),
+            str(l2_fork_env),
+            "--broadcast",
+            "--private-key",
+            ANVIL_PK0,
+            "--json",
+        ],
+    )
 
     l1_vault = l1a["l1Vault"]
     l2_receiver = l2a["l2Receiver"]

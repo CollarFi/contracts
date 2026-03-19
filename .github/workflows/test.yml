@@ -125,6 +125,15 @@ jobs:
           ACCOUNT=CDPDeployer
           LZ_ENDPOINT=0x6C7Ab2202C98C4227C5c46f1417D81144DA716Ff
           SOCKET_TRACKER=0xFDC28fA368c33DEC7853d63B65FC5Cfe01B212fc
+          L2_SOCKET_ADAPTER_MODE=compat
+          WETH_SOCKET_BRIDGE=0xdcABb6d7E88396498FFF4CD987F60e354BF2a44b
+          WETH_SOCKET_CONNECTOR=0xAD1d1CB08A0a6f758136A41E218c7C35B62A25Ac
+          WETH_MSG_GAS_LIMIT=100000
+          WETH_PAYLOAD_SIZE=161
+          USDC_SOCKET_BRIDGE=0xBD9f6198a220046E944D704b7ff2A68b778F4A44
+          USDC_SOCKET_CONNECTOR=0x3dAfeC208802E582fB33D72b4C53F3c6C36fb7eB
+          USDC_MSG_GAS_LIMIT=100000
+          USDC_PAYLOAD_SIZE=161
           DERIVE_MARKET=ETH
           EOF
 
@@ -163,6 +172,10 @@ jobs:
       - name: Run return-before-trade e2e
         run: |
           timeout 12m uv run --no-sync python -u test/e2e/return_before_trade_e2e.py --no-auto-redeploy
+
+      - name: Run strict L2 bridge e2e
+        run: |
+          timeout 15m uv run --no-sync python -u test/e2e/strict_l2_bridge_e2e.py --no-auto-redeploy
 
       - name: Run L2 keeper ReturnRequest handling e2e
         run: |

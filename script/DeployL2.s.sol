@@ -12,6 +12,7 @@ import {ICollarTSA} from "../src/interfaces/ICollarTSA.sol";
 import {IBridgeAdapter} from "../src/interfaces/IBridgeAdapter.sol";
 import {ICollarLoanStore} from "../src/interfaces/ICollarLoanStore.sol";
 import {ISocketMessageTracker} from "../src/interfaces/ISocketMessageTracker.sol";
+import {SocketBridgeAdapterL2Compat} from "../src/bridge/SocketBridgeAdapterL2Compat.sol";
 import {SocketBridgeAdapterNew} from "../src/bridge/SocketBridgeAdapterNew.sol";
 import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
 
@@ -85,6 +86,7 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - WETH_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
 /// - WETH_MSG_GAS_LIMIT          (default: 100000)
 /// - WETH_PAYLOAD_SIZE           (default: 161)
+/// - L2_SOCKET_ADAPTER_MODE      (default: "new"; set to "compat" for Derive testnet withdraw controllers)
 /// - USDC_ASSET                  (optional; defaults to CASH.wrappedAsset())
 /// - USDC_SOCKET_BRIDGE          (new Socket controller on L2)
 /// - USDC_SOCKET_CONNECTOR       (L2 connector targeting Sepolia)
@@ -92,6 +94,8 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - USDC_PAYLOAD_SIZE           (default: 161)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+    bytes32 internal constant SOCKET_ADAPTER_MODE_COMPAT = keccak256("compat");
+    bytes32 internal constant SOCKET_ADAPTER_MODE_NEW = keccak256("new");
 
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
@@ -163,6 +167,27 @@ contract DeployL2 is Script {
         });
     }
 
+    function _deploySocketAdapter(
+        string memory adapterMode,
+        address asset,
+        address socketBridge,
+        address socketConnector,
+        uint256 msgGasLimit,
+        uint256 payloadSize
+    ) internal returns (address adapter) {
+        bytes32 modeHash = keccak256(bytes(adapterMode));
+        if (modeHash == SOCKET_ADAPTER_MODE_COMPAT) {
+            return address(new SocketBridgeAdapterL2Compat(asset, socketBridge, socketConnector, msgGasLimit));
+        }
+        if (modeHash == SOCKET_ADAPTER_MODE_NEW) {
+            return
+                address(
+                    new SocketBridgeAdapterNew(asset, socketBridge, socketConnector, msgGasLimit, payloadSize, "", "")
+                );
+        }
+        revert("invalid L2_SOCKET_ADAPTER_MODE");
+    }
+
     function run() external {
         address admin = vm.envAddress("ADMIN");
         address proxyAdminOwner = vm.envOr("PROXY_ADMIN", admin);
@@ -186,6 +211,7 @@ contract DeployL2 is Script {
         address wethSocketConnector = vm.envOr("WETH_SOCKET_CONNECTOR", address(0));
         uint256 wethMsgGasLimit = vm.envOr("WETH_MSG_GAS_LIMIT", uint256(100_000));
         uint256 wethPayloadSize = vm.envOr("WETH_PAYLOAD_SIZE", uint256(161));
+        string memory l2SocketAdapterMode = vm.envOr("L2_SOCKET_ADAPTER_MODE", string("new"));
         address usdcAsset = vm.envOr("USDC_ASSET", address(0));
         address usdcSocketBridge = vm.envOr("USDC_SOCKET_BRIDGE", address(0));
         address usdcSocketConnector = vm.envOr("USDC_SOCKET_CONNECTOR", address(0));
@@ -276,10 +302,8 @@ contract DeployL2 is Script {
                 revert("WETH_ASSET required");
             }
 
-            wethAdapter = address(
-                new SocketBridgeAdapterNew(
-                    wethAsset, wethSocketBridge, wethSocketConnector, wethMsgGasLimit, wethPayloadSize, "", ""
-                )
+            wethAdapter = _deploySocketAdapter(
+                l2SocketAdapterMode, wethAsset, wethSocketBridge, wethSocketConnector, wethMsgGasLimit, wethPayloadSize
             );
             CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
             bridgeConfigured = true;
@@ -297,10 +321,8 @@ contract DeployL2 is Script {
                 revert("USDC_ASSET required");
             }
 
-            usdcAdapter = address(
-                new SocketBridgeAdapterNew(
-                    usdcAsset, usdcSocketBridge, usdcSocketConnector, usdcMsgGasLimit, usdcPayloadSize, "", ""
-                )
+            usdcAdapter = _deploySocketAdapter(
+                l2SocketAdapterMode, usdcAsset, usdcSocketBridge, usdcSocketConnector, usdcMsgGasLimit, usdcPayloadSize
             );
             CollarTSA(tsaProxyAddr).setSocketBridgeConfig(usdcAsset, IBridgeAdapter(usdcAdapter));
             bridgeConfigured = true;
@@ -344,12 +366,14 @@ contract DeployL2 is Script {
             console2.log("L2 WETH bridge asset", wethAsset);
             console2.log("L2 WETH socket bridge", wethSocketBridge);
             console2.log("L2 WETH socket connector", wethSocketConnector);
+            console2.log("L2 socket adapter mode", l2SocketAdapterMode);
         }
         if (usdcAdapter != address(0)) {
             console2.log("L2 USDC adapter", usdcAdapter);
             console2.log("L2 USDC bridge asset", usdcAsset);
             console2.log("L2 USDC socket bridge", usdcSocketBridge);
             console2.log("L2 USDC socket connector", usdcSocketConnector);
+            console2.log("L2 socket adapter mode", l2SocketAdapterMode);
         }
         console2.log("Wrote", outPath);
     }

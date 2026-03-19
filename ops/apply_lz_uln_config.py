@@ -133,12 +133,15 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     if need_send_cfg:
         cast_send(
             side["rpc"],
-            side["account"],
+            side.get("account"),
             endpoint,
             sig,
             oapp,
             send_lib,
             send_params,
+            private_key=side.get("privateKey"),
+            from_addr=side.get("fromAddr"),
+            unlocked=bool(side.get("unlocked")),
         )
     else:
         print("  [green][skip][/green] send setConfig already correct")
@@ -146,12 +149,15 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     if need_recv_cfg:
         cast_send(
             side["rpc"],
-            side["account"],
+            side.get("account"),
             endpoint,
             sig,
             oapp,
             recv_lib,
             recv_params,
+            private_key=side.get("privateKey"),
+            from_addr=side.get("fromAddr"),
+            unlocked=bool(side.get("unlocked")),
         )
     else:
         print("  [green][skip][/green] receive setConfig already correct")
@@ -159,10 +165,13 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     if need_remote_eid:
         cast_send(
             side["rpc"],
-            side["account"],
+            side.get("account"),
             oapp,
             "setRemoteEid(uint32)",
             desired_remote_eid,
+            private_key=side.get("privateKey"),
+            from_addr=side.get("fromAddr"),
+            unlocked=bool(side.get("unlocked")),
         )
     else:
         print("  [green][skip][/green] remoteEid already correct")
@@ -170,10 +179,13 @@ def _apply_side(side: dict[str, Any], broadcast: bool) -> None:
     if need_default_options:
         cast_send(
             side["rpc"],
-            side["account"],
+            side.get("account"),
             oapp,
             "setDefaultOptions(bytes)",
             desired_default_options,
+            private_key=side.get("privateKey"),
+            from_addr=side.get("fromAddr"),
+            unlocked=bool(side.get("unlocked")),
         )
     elif desired_default_options:
         print("  [green][skip][/green] defaultOptions already correct")
@@ -187,6 +199,9 @@ def main(
     l2_env_file: Path = typer.Argument(ROOT_DIR / ".env.l2.testnet"),
     env_profile: str = typer.Option("", "--env", help="Environment profile: testnet|mainnet"),
     broadcast: bool = typer.Option(False, help="Execute onchain txs (default: dry-run)"),
+    private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of env ACCOUNT"),
+    from_addr: str = typer.Option("", "--from", help="Use unlocked sender address"),
+    unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
     json_out: bool = typer.Option(False, "--json", help="Emit machine-readable summary"),
 ) -> None:
     l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
@@ -228,6 +243,14 @@ def main(
         src_eid=l1_to_l2_eid,
         desired_remote_eid=l2_to_l1_eid,
     )
+
+    auth = {
+        "privateKey": private_key or None,
+        "fromAddr": from_addr or None,
+        "unlocked": unlocked,
+    }
+    l1_side.update(auth)
+    l2_side.update(auth)
 
     if json_out:
         print(

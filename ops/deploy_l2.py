@@ -202,10 +202,14 @@ def main(
         l2.setdefault("L1_VAULT", l1_fallback.get("L1_VAULT", ""))
 
         # Or derive from L1 output JSON referenced by the L1 env.
-        if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_fallback.get("OUTPUT_JSON"):
+    if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_fallback.get("OUTPUT_JSON"):
             l1_messenger, l1_vault = _load_l1_addrs(l1_fallback["OUTPUT_JSON"])
             l2.setdefault("L1_MESSENGER", l1_messenger)
             l2.setdefault("L1_VAULT", l1_vault)
+
+    inferred_testnet = resolved_env == "testnet" or l2_env_file.name == ".env.l2.testnet"
+    if not l2.get("L2_SOCKET_ADAPTER_MODE") and inferred_testnet:
+        l2["L2_SOCKET_ADAPTER_MODE"] = "compat"
 
     out_abs = resolve_output_json(l2["OUTPUT_JSON"])
     out_abs.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +267,7 @@ def main(
         "WETH_SOCKET_CONNECTOR",
         "WETH_MSG_GAS_LIMIT",
         "WETH_PAYLOAD_SIZE",
+        "L2_SOCKET_ADAPTER_MODE",
         "USDC_ASSET",
         "USDC_SOCKET_BRIDGE",
         "USDC_SOCKET_CONNECTOR",
