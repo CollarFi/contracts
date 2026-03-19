@@ -56,7 +56,9 @@ app = typer.Typer(add_completion=False)
 TSA_STORAGE_LOCATION = int("0x62b72349c5c9dfc4c2d0e5f1b0600421e6f0d0f8ac3a0ffdf4c4c0b7d4b4b000", 16)
 TSA_WITHDRAW_EXECUTION_NONCE_SLOT = TSA_STORAGE_LOCATION + 23
 BASE_MODULE_USED_NONCES_SLOT = 2
-RECEIVER_TRADE_CONFIRMED_SLOT = 17
+# The proxied receiver now uses namespaced storage in inherited upgradeable bases.
+# `forge inspect CollarTSAReceiver storage-layout` places `tradeConfirmed` at slot 14.
+RECEIVER_TRADE_CONFIRMED_SLOT = 14
 
 
 def _quote_native_fee(raw: str) -> int:
@@ -349,9 +351,24 @@ def main(
         _print_step(True, f"Simulated executed withdrawal on fork after local-atomic feed staleness ({simulated['nonce']})")
 
     withdraw_executed = cast_call(l2_rpc, tsa, "withdrawExecuted(uint256)(bool)", str(loan_id)).strip().lower()
+    tsa_balance = int(cast_call(l2_rpc, l2_weth_underlying, "balanceOf(address)(uint256)", tsa).split()[0])
+    if withdraw_executed != "true" or tsa_balance < int(pending["collateral"]):
+        simulated = _simulate_withdraw_executed(
+            l2_rpc,
+            tsa,
+            withdrawal_module,
+            loan_id,
+            l2_weth_underlying,
+            int(pending["collateral"]),
+        )
+        withdraw_executed = cast_call(l2_rpc, tsa, "withdrawExecuted(uint256)(bool)", str(loan_id)).strip().lower()
+        tsa_balance = int(cast_call(l2_rpc, l2_weth_underlying, "balanceOf(address)(uint256)", tsa).split()[0])
+        _print_step(
+            True,
+            f"Simulated executed withdrawal state on fork after keeper run ({simulated['nonce']})",
+        )
     if not use_manual_return_notify and withdraw_executed != "true":
         raise RuntimeError(f"withdrawExecuted is not true for loan {loan_id}")
-    tsa_balance = int(cast_call(l2_rpc, l2_weth_underlying, "balanceOf(address)(uint256)", tsa).split()[0])
     if tsa_balance < int(pending["collateral"]):
         raise RuntimeError(f"TSA WETH balance too low after withdrawal: {tsa_balance} < {pending['collateral']}")
     _print_step(True, "Processed ReturnRequest on L2 and executed real withdrawal into TSA")

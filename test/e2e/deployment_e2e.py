@@ -286,6 +286,8 @@ def main(
         {
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
+            # Derive testnet uses the compat adapter path on L2->L1.
+            "L2_SOCKET_ADAPTER_MODE": l2e.get("L2_SOCKET_ADAPTER_MODE", "compat"),
             # Force fresh local components in fork E2E; avoid ambient env contamination
             # that could point to privileged external contracts.
             "LOAN_STORE": "0x0000000000000000000000000000000000000000",

@@ -8,6 +8,7 @@ import {
     MessagingReceipt,
     Origin
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
@@ -209,6 +210,8 @@ contract MockCollarTSA is ICollarTSA {
 contract LZMessagingTest is Test {
     CollarVaultMessenger internal messenger;
     CollarTSAReceiver internal receiver;
+    CollarVaultMessenger internal messengerImplementation;
+    CollarTSAReceiver internal receiverImplementation;
     MockSocketMessageTracker internal socket;
     MockCollarTSA internal tsa;
     CollarLoanStore internal loanStore;
@@ -237,8 +240,31 @@ contract LZMessagingTest is Test {
         tsa = new MockCollarTSA(address(wrappedDepositAsset), address(wrappedCashAsset), address(rfqModule));
         loanStore = new CollarLoanStore(address(this));
 
-        messenger = new CollarVaultMessenger(address(this), address(this), address(endpointL1), L2_EID);
-        receiver = new CollarTSAReceiver(address(this), address(endpointL2), socket, tsa, loanStore, L1_EID);
+        messengerImplementation = new CollarVaultMessenger(address(endpointL1));
+        receiverImplementation = new CollarTSAReceiver(address(endpointL2));
+        messenger = CollarVaultMessenger(
+            payable(address(
+                    new TransparentUpgradeableProxy(
+                        address(messengerImplementation),
+                        address(this),
+                        abi.encodeCall(
+                            CollarVaultMessenger.initialize, (address(this), address(this), address(endpointL1), L2_EID)
+                        )
+                    )
+                ))
+        );
+        receiver = CollarTSAReceiver(
+            payable(address(
+                    new TransparentUpgradeableProxy(
+                        address(receiverImplementation),
+                        address(this),
+                        abi.encodeCall(
+                            CollarTSAReceiver.initialize,
+                            (address(this), address(endpointL2), socket, tsa, loanStore, L1_EID)
+                        )
+                    )
+                ))
+        );
         loanStore.grantRole(loanStore.WRITER_ROLE(), address(receiver));
 
         vaultRecipient = address(0xCAFE);
@@ -246,6 +272,26 @@ contract LZMessagingTest is Test {
 
         messenger.setPeer(L2_EID, _addressToBytes32(address(receiver)));
         receiver.setPeer(L1_EID, _addressToBytes32(address(messenger)));
+    }
+
+    function testMessengerImplementationInitializeDisabled() public {
+        vm.expectRevert();
+        messengerImplementation.initialize(address(this), address(this), address(endpointL1), L2_EID);
+    }
+
+    function testReceiverImplementationInitializeDisabled() public {
+        vm.expectRevert();
+        receiverImplementation.initialize(address(this), address(endpointL2), socket, tsa, loanStore, L1_EID);
+    }
+
+    function testMessengerCannotInitializeTwice() public {
+        vm.expectRevert();
+        messenger.initialize(address(this), address(this), address(endpointL1), L2_EID);
+    }
+
+    function testReceiverCannotInitializeTwice() public {
+        vm.expectRevert();
+        receiver.initialize(address(this), address(endpointL2), socket, tsa, loanStore, L1_EID);
     }
 
     function testQuoteMessageReturnsFee() public {
