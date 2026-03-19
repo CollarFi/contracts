@@ -37,13 +37,56 @@ from common import (
     ensure_live_deployments as _ensure_live_deployments,
     ensure_token_balance as _ensure_token_balance,
     inject_lz_message as _inject_lz_message,
+    relay_exact_lz_packet as _relay_exact_lz_packet,
     print_step as _print_step,
     require_code as _require_code,
+    run,
     set_time as _set_time,
+    extract_tx_hash as _extract_tx_hash,
 )
 from loan_flow_helpers import get_mandate, get_pending, run_fresh_atomic_pending_loan
 
 app = typer.Typer(add_completion=False)
+
+BASE_MODULE_USED_NONCES_SLOT = 2
+
+
+def _to_bytes32(value: int) -> str:
+    return f"0x{value:064x}"
+
+
+def _keccak_hex(data_hex: str) -> str:
+    return run(["cast", "keccak", data_hex]).splitlines()[0].strip()
+
+
+def _mapping_slot_uint(key: int, slot: int) -> str:
+    encoded = run(["cast", "abi-encode", "f(uint256,uint256)", str(key), str(slot)]).strip()
+    return _keccak_hex(encoded)
+
+
+def _mapping_slot_address(address_key: str, slot: int) -> int:
+    encoded = run(["cast", "abi-encode", "f(address,uint256)", address_key, str(slot)]).strip()
+    return int(_keccak_hex(encoded), 16)
+
+
+def _set_storage(rpc: str, contract: str, slot: str, value: str) -> None:
+    run(["cast", "rpc", "anvil_setStorageAt", contract, slot, value, "--rpc-url", rpc])
+
+
+def _simulate_rfq_nonce_used(l2_rpc: str, tsa: str, taker_nonce: int) -> tuple[str, str]:
+    raw = cast_call(
+        l2_rpc,
+        tsa,
+        "getCollarTSAAddresses()(address,address,address,address,address,address)",
+    )
+    addrs = re.findall(r"0x[a-fA-F0-9]{40}", raw)
+    if len(addrs) < 5:
+        raise RuntimeError(f"failed to parse TSA collar addrs: {raw}")
+    rfq_module = addrs[4]
+    owner_slot = _mapping_slot_address(tsa, BASE_MODULE_USED_NONCES_SLOT)
+    module_slot = _mapping_slot_uint(taker_nonce, owner_slot)
+    _set_storage(l2_rpc, rfq_module, module_slot, _to_bytes32(1))
+    return rfq_module, module_slot
 
 
 def _expect_revert(fn, err_hint: str) -> None:
@@ -76,7 +119,7 @@ def main(
 
     l1_path = ROOT / l1_json
     l2_path = ROOT / l2_json
-    l1, _, redeployed = _ensure_live_deployments(
+    l1, l2, redeployed = _ensure_live_deployments(
         l1_path,
         l2_path,
         l1_rpc,
@@ -202,6 +245,54 @@ def main(
     path = Path(tempfile.mkdtemp(prefix="return-before-trade-e2e-")) / "result.json"
     path.write_text(json.dumps(out, indent=2))
     _print_step(True, f"Result artifact written: {path}")
+
+    fresh_blocked = run_fresh_atomic_pending_loan(l1_json, l2_json, l1_rpc, l2_rpc, sepolia_weth)
+    blocked_loan_id = int(fresh_blocked["loanId"])
+    blocked_pending = get_pending(vault, l1_rpc, blocked_loan_id)
+    blocked_mandate = get_mandate(vault, l1_rpc, blocked_loan_id)
+
+    receiver = l2["l2Receiver"]
+    tsa = l2["l2Tsa"]
+    taker_nonce = 1_000_000 + blocked_loan_id
+    _, rfq_slot = _simulate_rfq_nonce_used(l2_rpc, tsa, taker_nonce)
+    cast_send_pk(l2_rpc, receiver, "recordTradeExecuted(uint256,uint256)", str(blocked_loan_id), str(taker_nonce))
+    _print_step(True, f"Recorded RFQ execution before L1 trade confirmation (loanId={blocked_loan_id})")
+
+    _set_time(l1_rpc, int(blocked_mandate["deadline"]) + 1)
+    blocked_lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+    blocked_subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
+    blocked_default_opts = cast_call(l1_rpc, blocked_lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
+    blocked_return_msg = (
+        f"(1,{blocked_loan_id},{sepolia_weth},{blocked_pending['collateral']},{vault},{blocked_subaccount_id},"
+        f"0x{'00'*32},0,0x{'00'*32},0,0x)"
+    )
+    blocked_return_lz_fee = int(
+        re.search(
+            r"\d+",
+            cast_call(
+                l1_rpc,
+                blocked_lz_messenger,
+                "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+                blocked_return_msg,
+                blocked_default_opts,
+            ),
+        ).group(0)
+    )
+    blocked_return_tx = cast_send_pk(
+        l1_rpc,
+        vault,
+        "requestCollateralReturn(uint256)",
+        str(blocked_loan_id),
+        private_key=BORROWER_PK,
+        value=str(blocked_return_lz_fee),
+    )
+    blocked_request_hash = _extract_tx_hash(blocked_return_tx)
+    relayed = _relay_exact_lz_packet(l1_rpc, l2_rpc, blocked_request_hash)
+    _expect_revert(
+        lambda: cast_send_pk(l2_rpc, receiver, "handleMessage(bytes32)", relayed["guid"]),
+        "custom error",
+    )
+    _print_step(True, f"Blocked return request after recorded RFQ execution (slot={rfq_slot})")
 
     print("\nResult: SUCCESS")
 

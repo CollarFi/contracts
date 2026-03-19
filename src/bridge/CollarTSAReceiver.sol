@@ -27,6 +27,8 @@ interface IRfqNonceTracker {
 contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgradeable {
     using SafeERC20 for IERC20;
 
+    uint256 internal constant LOAN_ID_NONCE_MODULUS = 1_000_000;
+
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
     bytes32 public constant PARAMETER_ROLE = keccak256("PARAMETER_ROLE");
 
@@ -48,6 +50,7 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
     mapping(uint256 => bool) public collateralReturnedSent;
     mapping(uint256 => bool) public settlementReported;
     mapping(uint256 => bool) public tradeConfirmed;
+    mapping(uint256 => uint256) public tradeExecutionNonceByLoanId;
 
     // Loan terms/collateral accounting is persisted in `loanStore`.
 
@@ -59,6 +62,7 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
     event SocketUpdated(address indexed socket);
     event TSAUpdated(address indexed tsa);
     event VaultRecipientUpdated(address indexed recipient);
+    event TradeExecutionRecorded(uint256 indexed loanId, uint256 takerNonce);
 
     error CTR_InvalidPeer();
     error CTR_InvalidRecipient();
@@ -86,6 +90,7 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
     error CTR_TradeAlreadyConfirmed();
     error CTR_ReturnRequestBlocksTrade();
     error CTR_LoanIdTooLargeForNonce();
+    error CTR_InvalidTradeExecutionNonce();
 
     constructor(address endpoint_) OAppUpgradeable(endpoint_) {
         _disableInitializers();
@@ -307,6 +312,37 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         return _sendAck(pendingMessages[guid], CollarLZMessages.Action.DepositConfirmed, msg.value, msg.sender);
     }
 
+    function recordTradeExecuted(uint256 loanId, uint256 takerNonce) external onlyRole(KEEPER_ROLE) {
+        if (returnCompleted[loanId]) {
+            revert CTR_TradeConfirmedAfterReturn();
+        }
+        if (tradeConfirmed[loanId]) {
+            revert CTR_TradeAlreadyConfirmed();
+        }
+
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(loanId);
+        if (!_loanExists(loan) || loan.consumed) {
+            revert CTR_MessageNotFound();
+        }
+        if (loan.returnRequested) {
+            revert CTR_ReturnRequestBlocksTrade();
+        }
+
+        _validateTradeExecutionNonce(loanId, takerNonce);
+
+        uint256 recordedNonce = tradeExecutionNonceByLoanId[loanId];
+        if (recordedNonce != 0) {
+            if (recordedNonce != takerNonce) {
+                revert CTR_InvalidTradeExecutionNonce();
+            }
+            return;
+        }
+
+        tradeExecutionNonceByLoanId[loanId] = takerNonce;
+        loanStore.setTradeExecuted(loanId, true);
+        emit TradeExecutionRecorded(loanId, takerNonce);
+    }
+
     function sendSettlementReport(
         uint256 loanId,
         address asset,
@@ -409,7 +445,7 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         if (loan.returnRequested) {
             revert CTR_ReturnRequestBlocksTrade();
         }
-        _validateTradeConfirmedPreconditions(p.amount, p.socketMessageId, p.takerNonce);
+        _validateTradeConfirmedPreconditions(p.loanId, p.amount, p.socketMessageId, p.takerNonce);
 
         bool isRollover = loan.rolloverPending;
         bytes memory payload = isRollover
@@ -451,17 +487,20 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         return receipt;
     }
 
-    function _validateTradeConfirmedPreconditions(uint256 amount, bytes32 socketMessageId, uint256 takerNonce)
+    function _validateTradeConfirmedPreconditions(
+        uint256 loanId,
+        uint256 amount,
+        bytes32 socketMessageId,
+        uint256 takerNonce
+    )
         internal
         view
     {
-        (,,,, address rfqModule,) = tsa.getCollarTSAAddresses();
-        if (rfqModule == address(0)) {
-            revert CTR_RfqModuleNotSet();
+        uint256 recordedNonce = tradeExecutionNonceByLoanId[loanId];
+        if (recordedNonce == 0 || recordedNonce != takerNonce) {
+            revert CTR_InvalidTradeExecutionNonce();
         }
-        if (!IRfqNonceTracker(rfqModule).usedNonces(address(tsa), takerNonce)) {
-            revert CTR_RfqTradeNotConfirmed();
-        }
+        _validateTradeExecutionNonce(loanId, takerNonce);
         if (amount > 0) {
             if (socketMessageId == bytes32(0)) {
                 revert CTR_SocketNotFinalized();
@@ -470,6 +509,28 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
                 revert CTR_SocketNotFinalized();
             }
         }
+    }
+
+    function _validateTradeExecutionNonce(uint256 loanId, uint256 takerNonce) internal view {
+        if (loanId >= LOAN_ID_NONCE_MODULUS) {
+            revert CTR_LoanIdTooLargeForNonce();
+        }
+        if (takerNonce % LOAN_ID_NONCE_MODULUS != loanId) {
+            revert CTR_InvalidTradeExecutionNonce();
+        }
+
+        (,,,, address rfqModule,) = tsa.getCollarTSAAddresses();
+        if (rfqModule == address(0)) {
+            revert CTR_RfqModuleNotSet();
+        }
+        if (!IRfqNonceTracker(rfqModule).usedNonces(address(tsa), takerNonce)) {
+            revert CTR_RfqTradeNotConfirmed();
+        }
+    }
+
+    function _loanExists(ICollarLoanStore.Loan memory loan) internal pure returns (bool) {
+        return loan.borrower != address(0) || loan.borrowAmount != 0 || loan.collateralAsset != address(0)
+            || loan.collateralAmount != 0 || loan.maturity != 0;
     }
 
     function quoteMessage(CollarLZMessages.Message calldata message, bytes calldata options)
