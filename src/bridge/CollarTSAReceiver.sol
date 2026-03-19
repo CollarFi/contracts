@@ -492,10 +492,7 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         uint256 amount,
         bytes32 socketMessageId,
         uint256 takerNonce
-    )
-        internal
-        view
-    {
+    ) internal view {
         uint256 recordedNonce = tradeExecutionNonceByLoanId[loanId];
         if (recordedNonce == 0 || recordedNonce != takerNonce) {
             revert CTR_InvalidTradeExecutionNonce();
