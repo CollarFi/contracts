@@ -33,14 +33,28 @@ def _creates_by_name(txs: list[dict], *contract_names: str) -> list[str]:
     return out
 
 
-def _l1_from_run(run: dict) -> dict:
+def _load_existing(chain_id: int, layer: str) -> dict:
+    out_path = ROOT / "deployments" / str(chain_id) / f"{layer}.json"
+    if not out_path.is_file():
+        return {}
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    return data.get("addrs", data) if isinstance(data, dict) else {}
+
+
+def _merge_existing(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    merged.update({k: v for k, v in new.items() if v})
+    return merged
+
+
+def _l1_from_run(run: dict, existing: dict) -> dict:
     txs: list[dict] = run.get("transactions", [])
     proxies = _creates_by_name(txs, "ERC1967Proxy", "TransparentUpgradeableProxy")
     out = {
-        "l1Vault": proxies[0] if len(proxies) > 0 else None,
-        "l1VaultProxy": proxies[0] if len(proxies) > 0 else None,
+        "l1Vault": proxies[0] if len(proxies) > 0 else existing.get("l1Vault"),
+        "l1VaultProxy": proxies[0] if len(proxies) > 0 else existing.get("l1VaultProxy") or existing.get("l1Vault"),
         "l1VaultImplementation": _first_create_by_name(txs, "CollarVault"),
-        "l1Messenger": proxies[1] if len(proxies) > 1 else _first_create_by_name(txs, "CollarVaultMessenger"),
+        "l1Messenger": proxies[1] if len(proxies) > 1 else existing.get("l1Messenger"),
         "l1MessengerImplementation": _first_create_by_name(txs, "CollarVaultMessenger"),
         "l1FinalizeModule": _first_create_by_name(txs, "CollarVaultFinalizeModule"),
         "l1SettleModule": _first_create_by_name(txs, "CollarVaultSettleModule"),
@@ -51,24 +65,24 @@ def _l1_from_run(run: dict) -> dict:
         or _first_create_by_name(txs, "SocketBridgeAdapterNew")
         or _first_create_by_name(txs, "SocketBridgeAdapter"),
     }
-    return {k: v for k, v in out.items() if v}
+    return _merge_existing(existing, out)
 
 
-def _l2_from_run(run: dict) -> dict:
+def _l2_from_run(run: dict, existing: dict) -> dict:
     txs: list[dict] = run.get("transactions", [])
     proxies = _creates_by_name(txs, "ERC1967Proxy", "TransparentUpgradeableProxy")
     out = {
-        "l2Receiver": proxies[1] if len(proxies) > 1 else _first_create_by_name(txs, "CollarTSAReceiver"),
+        "l2Receiver": proxies[1] if len(proxies) > 1 else existing.get("l2Receiver"),
         "l2ReceiverImplementation": _first_create_by_name(txs, "CollarTSAReceiver"),
         "l2SocketTracker": _first_create_by_name(txs, "SocketMessageTrackerMock"),
         "l2LoanStore": _first_create_by_name(txs, "CollarLoanStore"),
-        "l2Tsa": proxies[0] if len(proxies) > 0 else None,
+        "l2Tsa": proxies[0] if len(proxies) > 0 else existing.get("l2Tsa"),
         "l2TsaImplementation": _first_create_by_name(txs, "CollarTSA"),
         "l2OptionRiskVerifier": _first_create_by_name(txs, "OptionRiskVerifier"),
         "l2RfqVerifier": _first_create_by_name(txs, "RfqVerifier"),
         "l2LzEndpoint": _first_create_by_name(txs, "LZEndpointV2Mock"),
     }
-    return {k: v for k, v in out.items() if v}
+    return _merge_existing(existing, out)
 
 
 def main() -> None:
@@ -79,7 +93,8 @@ def main() -> None:
 
     script_name = "DeployL1.s.sol" if args.layer == "l1" else "DeployL2.s.sol"
     run = _load_run(script_name, args.chain_id)
-    addrs = _l1_from_run(run) if args.layer == "l1" else _l2_from_run(run)
+    existing = _load_existing(args.chain_id, args.layer)
+    addrs = _l1_from_run(run, existing) if args.layer == "l1" else _l2_from_run(run, existing)
 
     out_dir = ROOT / "deployments" / str(args.chain_id)
     out_dir.mkdir(parents=True, exist_ok=True)

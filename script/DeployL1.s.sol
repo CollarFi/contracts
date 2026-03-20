@@ -5,7 +5,11 @@ import "forge-std/Script.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {
+    TransparentUpgradeableProxy,
+    ITransparentUpgradeableProxy
+} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {ProxyAdmin} from "openzeppelin/proxy/transparent/ProxyAdmin.sol";
 
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
@@ -35,6 +39,8 @@ contract DeployL1 is Script {
     struct EnvConfig {
         address admin;
         address proxyAdminOwner;
+        address l1Vault;
+        address l1Messenger;
         address treasury;
         address vaultOwner;
         address permit2;
@@ -87,6 +93,8 @@ contract DeployL1 is Script {
     function _loadConfig() internal view returns (EnvConfig memory cfg) {
         cfg.admin = vm.envOr("ADMIN", msg.sender);
         cfg.proxyAdminOwner = vm.envOr("PROXY_ADMIN", cfg.admin);
+        cfg.l1Vault = vm.envOr("L1_VAULT", address(0));
+        cfg.l1Messenger = vm.envOr("L1_MESSENGER", address(0));
         cfg.treasury = vm.envAddress("TREASURY");
         cfg.vaultOwner = vm.envOr("VAULT_OWNER", cfg.admin);
 
@@ -124,8 +132,8 @@ contract DeployL1 is Script {
         dep.eulerAdapter = _ensureEulerAdapter(cfg);
         dep.lzEndpoint = _ensureLzEndpoint(cfg);
 
-        (dep.vault, dep.vaultImpl) = _deployVault(cfg, dep.liquidityVault, dep.eulerAdapter);
-        (dep.messenger, dep.messengerImpl) = _deployMessenger(cfg, dep.vault, dep.lzEndpoint);
+        (dep.vault, dep.vaultImpl) = _deployOrUpgradeVault(cfg, dep.liquidityVault, dep.eulerAdapter);
+        (dep.messenger, dep.messengerImpl) = _deployOrUpgradeMessenger(cfg, dep.vault, dep.lzEndpoint);
 
         dep.finalizeModule = new CollarVaultFinalizeModule();
         dep.settleModule = new CollarVaultSettleModule();
@@ -140,7 +148,7 @@ contract DeployL1 is Script {
         dep.vault.setFinalizeModule(address(dep.finalizeModule));
         dep.vault.setSettleModule(address(dep.settleModule));
         dep.vault.setRolloverModule(address(dep.rolloverModule));
-        if (cfg.rfqSigner != address(0)) {
+        if (cfg.rfqSigner != address(0) && !dep.vault.hasRole(dep.vault.RFQ_SIGNER_ROLE(), cfg.rfqSigner)) {
             dep.vault.grantRole(dep.vault.RFQ_SIGNER_ROLE(), cfg.rfqSigner);
         }
 
@@ -153,27 +161,35 @@ contract DeployL1 is Script {
     }
 
     function _ensureLiquidityVault(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.l1Vault != address(0)) return address(CollarVault(payable(cfg.l1Vault)).liquidityVault());
         if (cfg.liquidityVault != address(0)) return cfg.liquidityVault;
         if (cfg.usdcAsset == address(0)) revert("USDC_ASSET required when LIQUIDITY_VAULT is unset");
         return address(new CollarLiquidityVault(IERC20(cfg.usdcAsset), "Collar Liquidity Vault", "cLV", cfg.admin));
     }
 
     function _ensureEulerAdapter(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.l1Vault != address(0)) return address(CollarVault(payable(cfg.l1Vault)).lendingAdapter());
         if (cfg.eulerAdapter != address(0)) return cfg.eulerAdapter;
         return address(new EulerAdapterMock());
     }
 
     function _ensureLzEndpoint(EnvConfig memory cfg) internal returns (address) {
+        if (cfg.l1Messenger != address(0)) return address(CollarVaultMessenger(payable(cfg.l1Messenger)).endpoint());
         if (cfg.lzEndpoint != address(0)) return cfg.lzEndpoint;
         return address(new LZEndpointV2Mock());
     }
 
-    function _deployVault(EnvConfig memory cfg, address liquidityVault, address eulerAdapter)
+    function _deployOrUpgradeVault(EnvConfig memory cfg, address liquidityVault, address eulerAdapter)
         internal
         returns (CollarVault vault, address vaultImpl)
     {
-        if (cfg.l2Recipient == address(0)) revert("L2_RECIPIENT required");
         vaultImpl = address(new CollarVault());
+        if (cfg.l1Vault != address(0)) {
+            _upgradeExistingProxy(cfg.l1Vault, vaultImpl, bytes(""), "L1_VAULT");
+            return (CollarVault(payable(cfg.l1Vault)), vaultImpl);
+        }
+
+        if (cfg.l2Recipient == address(0)) revert("L2_RECIPIENT required");
         bytes memory initData = abi.encodeCall(
             CollarVault.initialize,
             (
@@ -185,20 +201,25 @@ contract DeployL1 is Script {
                 cfg.treasury
             )
         );
-        // Transparent proxy with ProxyAdmin owner set to PROXY_ADMIN (defaults to ADMIN).
         address vaultProxy = address(new TransparentUpgradeableProxy(vaultImpl, cfg.proxyAdminOwner, initData));
-        vault = CollarVault(payable(vaultProxy));
+        return (CollarVault(payable(vaultProxy)), vaultImpl);
     }
 
-    function _deployMessenger(EnvConfig memory cfg, CollarVault vault, address lzEndpoint)
+    function _deployOrUpgradeMessenger(EnvConfig memory cfg, CollarVault vault, address lzEndpoint)
         internal
         returns (CollarVaultMessenger messenger, address messengerImpl)
     {
         messengerImpl = address(new CollarVaultMessenger(lzEndpoint));
-        bytes memory initData =
-            abi.encodeCall(CollarVaultMessenger.initialize, (cfg.admin, address(vault), lzEndpoint, cfg.l2Eid));
-        address messengerProxy = address(new TransparentUpgradeableProxy(messengerImpl, cfg.proxyAdminOwner, initData));
-        messenger = CollarVaultMessenger(payable(messengerProxy));
+        if (cfg.l1Messenger != address(0)) {
+            _upgradeExistingProxy(cfg.l1Messenger, messengerImpl, bytes(""), "L1_MESSENGER");
+            messenger = CollarVaultMessenger(payable(cfg.l1Messenger));
+        } else {
+            bytes memory initData =
+                abi.encodeCall(CollarVaultMessenger.initialize, (cfg.admin, address(vault), lzEndpoint, cfg.l2Eid));
+            address messengerProxy =
+                address(new TransparentUpgradeableProxy(messengerImpl, cfg.proxyAdminOwner, initData));
+            messenger = CollarVaultMessenger(payable(messengerProxy));
+        }
         if (cfg.lzReceiveGas > 0) {
             bytes memory lzOptions = OptionsBuilder.newOptions()
                 .addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
@@ -244,6 +265,19 @@ contract DeployL1 is Script {
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
         return address(uint160(uint256(raw)));
+    }
+
+    function _upgradeExistingProxy(address proxy, address implementation, bytes memory initData, string memory envName)
+        internal
+    {
+        if (proxy == address(0) || proxy.code.length == 0) revert(string.concat(envName, " must be a deployed proxy"));
+
+        address proxyAdmin = _proxyAdminOf(proxy);
+        if (proxyAdmin == address(0) || proxyAdmin.code.length == 0) {
+            revert(string.concat(envName, " is not a transparent proxy"));
+        }
+
+        ProxyAdmin(proxyAdmin).upgradeAndCall(ITransparentUpgradeableProxy(payable(proxy)), implementation, initData);
     }
 
     function _writeOutput(EnvConfig memory cfg, Deployed memory dep) internal {

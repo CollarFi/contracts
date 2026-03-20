@@ -16,6 +16,11 @@ from py_lib.l2_discovery import (
 )
 
 app = typer.Typer(add_completion=False)
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def _has_nonzero_addr(value: str) -> bool:
+    return bool(value) and value.lower() != ZERO_ADDRESS
 
 
 @app.command()
@@ -75,14 +80,14 @@ def main(
     if l1.get("PROXY_ADMIN"):
         env_overrides["PROXY_ADMIN"] = l1["PROXY_ADMIN"]
 
-    if l1.get("WETH_ASSET") and not l1.get("L2_WRAPPED_WETH_ASSET"):
+    if _has_nonzero_addr(l1.get("WETH_ASSET", "")) and not _has_nonzero_addr(l1.get("L2_WRAPPED_WETH_ASSET", "")):
         l1["L2_WRAPPED_WETH_ASSET"] = resolve_l2_wrapped_asset_from_tsa(l2_env_file)
         print(
             "[cyan][info][/cyan] resolved L2_WRAPPED_WETH_ASSET from L2 TSA:",
             l1["L2_WRAPPED_WETH_ASSET"],
         )
 
-    if not l1.get("L2_RECIPIENT"):
+    if not _has_nonzero_addr(l1.get("L2_RECIPIENT", "")):
         l1["L2_RECIPIENT"] = resolve_l2_receiver_from_env_file(l2_env_file)
         print("[cyan][info][/cyan] resolved L2_RECIPIENT (receiver) from L2 deployment/env:", l1["L2_RECIPIENT"])
 
@@ -92,6 +97,8 @@ def main(
         print("[cyan][info][/cyan] resolved DERIVE_SUBACCOUNT_ID from L2 TSA:", l1["DERIVE_SUBACCOUNT_ID"])
 
     for opt in (
+        "L1_VAULT",
+        "L1_MESSENGER",
         "VAULT_OWNER",
         "PERMIT2",
         "L2_RECIPIENT",
