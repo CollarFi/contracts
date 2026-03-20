@@ -172,42 +172,60 @@ def main(
     runtime_updates = _resolve_l2_runtime_env(l2_rpc, l2, receiver)
     tmpdir = Path(tempfile.mkdtemp(prefix="rfq-post-fill-attestation-e2e-"))
     l2_env = _write_env_with_updates(ROOT / ".env.l2.testnet", tmpdir / ".env.l2.fork", runtime_updates)
+    keeper_state = tmpdir / "keeper_l2_state.json"
+    rfq_trade_file = tmpdir / "rfq_trade.json"
+    rfq_trade_file.write_text(
+        json.dumps(
+            {
+                "loanId": loan_id,
+                "takerNonce": taker_nonce,
+                "callStrike": call_strike,
+                "putStrike": int(pending["putStrike"]),
+                "expiry": int(pending["maturity"]),
+                "asset": ZERO_ADDRESS,
+                "amount": 0,
+                "socketMessageId": ZERO_BYTES32,
+                "quoteHash": ZERO_BYTES32,
+                "realizedC": 0,
+            },
+            indent=2,
+        )
+    )
     keeper_out = _run_keeper_command(
         [
             "uv",
             "run",
             "python",
-            str(ROOT / "ops/management/l2_confirm_rfq_trade.py"),
+            str(ROOT / "ops/management/l2_keeper_handle_messages.py"),
             str(l2_env),
+            "--state-file",
+            str(keeper_state),
+            "--rfq-trade-file",
+            str(rfq_trade_file),
             "--receiver",
             receiver,
-            "--loan-id",
-            str(loan_id),
-            "--taker-nonce",
-            str(taker_nonce),
-            "--call-strike",
-            str(call_strike),
-            "--put-strike",
-            str(pending["putStrike"]),
-            "--expiry",
-            str(pending["maturity"]),
-            "--asset",
-            ZERO_ADDRESS,
-            "--amount",
-            "0",
-            "--socket-message-id",
-            ZERO_BYTES32,
-            "--quote-hash",
-            ZERO_BYTES32,
+            "--start-block",
+            str(int(run(["cast", "block-number", "--rpc-url", l2_rpc]))),
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
+            "--once",
             "--json",
         ]
     )
+    rfq_handled = next(
+        (
+            item
+            for item in keeper_out.get("handled", [])
+            if isinstance(item, dict) and item.get("action") == "RfqPostFillTradeConfirm" and item.get("status") == "sent"
+        ),
+        None,
+    )
+    if rfq_handled is None:
+        raise RuntimeError(f"keeper did not process queued RFQ trade: {json.dumps(keeper_out)}")
     _print_step(True, f"Confirmed RFQ trade on L2 via keeper command (moduleSlot={module_slot})")
 
-    trade_packet = _relay_exact_lz_packet(l2_rpc, l1_rpc, keeper_out["sendTradeConfirmedTx"])
+    trade_packet = _relay_exact_lz_packet(l2_rpc, l1_rpc, rfq_handled["tradeConfirmedTx"])
     subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
     inject_deposit_confirmed(
         l1_rpc,
@@ -232,8 +250,8 @@ def main(
         "loanId": loan_id,
         "depositGuid": deposit_guid,
         "tradeGuid": trade_packet["guid"],
-        "recordTradeExecutedTx": keeper_out["recordTradeExecutedTx"],
-        "sendTradeConfirmedTx": keeper_out["sendTradeConfirmedTx"],
+        "recordTradeExecutedTx": rfq_handled["recordTradeExecutedTx"],
+        "sendTradeConfirmedTx": rfq_handled["tradeConfirmedTx"],
     }
     path = tmpdir / "result.json"
     path.write_text(json.dumps(out, indent=2))
