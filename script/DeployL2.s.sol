@@ -56,6 +56,7 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - L1_VAULT (address)               (vaultRecipient)
 ///
 /// Optional:
+/// - DEPLOY_PHASE (string)          (full|proxy-admin|admin; default full)
 /// - LZ_ENDPOINT (address)            (if omitted, deploys a placeholder mock endpoint)
 /// - SOCKET_TRACKER (address)         (required; real socket message tracker)
 /// - LOAN_STORE (address)             (if omitted, deploys CollarLoanStore)
@@ -99,12 +100,33 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - USDC_PAYLOAD_SIZE           (default: 161)
 contract DeployL2 is Script {
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+    bytes32 internal constant EIP1967_IMPLEMENTATION_SLOT =
+        bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1);
     bytes32 internal constant SOCKET_ADAPTER_MODE_COMPAT = keccak256("compat");
     bytes32 internal constant SOCKET_ADAPTER_MODE_NEW = keccak256("new");
+
+    enum DeployPhase {
+        Full,
+        ProxyAdmin,
+        Admin
+    }
 
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
         return address(uint160(uint256(raw)));
+    }
+
+    function _proxyImplementationOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_IMPLEMENTATION_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
+    function _parsePhase(string memory raw) internal pure returns (DeployPhase) {
+        bytes32 phaseHash = keccak256(bytes(raw));
+        if (phaseHash == keccak256(bytes("full"))) return DeployPhase.Full;
+        if (phaseHash == keccak256(bytes("proxy-admin"))) return DeployPhase.ProxyAdmin;
+        if (phaseHash == keccak256(bytes("admin"))) return DeployPhase.Admin;
+        revert("invalid DEPLOY_PHASE");
     }
 
     function _upgradeExistingProxy(address proxy, address implementation, bytes memory initData, string memory envName)
@@ -230,6 +252,7 @@ contract DeployL2 is Script {
     }
 
     function run() external {
+        DeployPhase phase = _parsePhase(vm.envOr("DEPLOY_PHASE", string("full")));
         address admin = vm.envAddress("ADMIN");
         address proxyAdminOwner = vm.envOr("PROXY_ADMIN", admin);
 
@@ -264,124 +287,147 @@ contract DeployL2 is Script {
         address wethAdapter = address(0);
         address usdcAdapter = address(0);
         bool bridgeConfigured = false;
-        bool requiresFreshTsaDependencies = tsaProxyAddr == address(0) || tsaInitData.length != 0;
+        bool needsProxyOps = phase != DeployPhase.Admin;
+        bool needsAdminConfig = phase != DeployPhase.ProxyAdmin;
+        bool requiresFreshTsaDependencies = (tsaProxyAddr == address(0) || tsaInitData.length != 0) && needsProxyOps;
+        address receiverImplementation = address(0);
 
         vm.startBroadcast();
 
         lzEndpoint = _ensureLzEndpoint(lzEndpoint, receiverProxyAddr);
         loanStoreAddr = _ensureLoanStore(loanStoreAddr, tsaProxyAddr, admin);
 
-        if (optionRiskVerifierAddr == address(0) && requiresFreshTsaDependencies) {
-            optionRiskVerifierAddr = address(new OptionRiskVerifier());
-        }
-        if (rfqVerifierAddr == address(0) && requiresFreshTsaDependencies) {
-            rfqVerifierAddr = address(new RfqVerifier());
-        }
-        if (rfqDelegateModuleAddr == address(0) && requiresFreshTsaDependencies) {
-            rfqDelegateModuleAddr = address(new CollarTsaRfqDelegateModule());
-        }
-
-        if (tsaImplementation == address(0)) {
-            tsaImplementation = address(new CollarTSA());
-        }
-
-        if (tsaProxyAddr == address(0)) {
-            if (tsaInitData.length == 0) {
-                tsaInitData = _buildTsaInitData(
-                    admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr, rfqDelegateModuleAddr
-                );
+        if (needsProxyOps) {
+            if (optionRiskVerifierAddr == address(0) && requiresFreshTsaDependencies) {
+                optionRiskVerifierAddr = address(new OptionRiskVerifier());
+            }
+            if (rfqVerifierAddr == address(0) && requiresFreshTsaDependencies) {
+                rfqVerifierAddr = address(new RfqVerifier());
+            }
+            if (rfqDelegateModuleAddr == address(0) && requiresFreshTsaDependencies) {
+                rfqDelegateModuleAddr = address(new CollarTsaRfqDelegateModule());
             }
 
-            tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
-        } else {
-            _upgradeExistingProxy(tsaProxyAddr, tsaImplementation, tsaInitData, "TSA_PROXY");
-        }
+            if (tsaImplementation == address(0)) {
+                tsaImplementation = address(new CollarTSA());
+            }
 
-        address receiverImplementation = address(new CollarTSAReceiver(lzEndpoint));
-        if (receiverProxyAddr == address(0)) {
-            bytes memory receiverInitData = abi.encodeCall(
-                CollarTSAReceiver.initialize,
-                (
-                    admin,
-                    lzEndpoint,
-                    ISocketMessageTracker(socketTracker),
-                    ICollarTSA(tsaProxyAddr),
-                    ICollarLoanStore(loanStoreAddr),
-                    l1Eid
-                )
-            );
-            receiverProxyAddr =
-                address(new TransparentUpgradeableProxy(receiverImplementation, proxyAdminOwner, receiverInitData));
+            if (tsaProxyAddr == address(0)) {
+                if (tsaInitData.length == 0) {
+                    tsaInitData = _buildTsaInitData(
+                        admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr, rfqDelegateModuleAddr
+                    );
+                }
+
+                tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
+            } else {
+                _upgradeExistingProxy(tsaProxyAddr, tsaImplementation, tsaInitData, "TSA_PROXY");
+            }
+
+            receiverImplementation = address(new CollarTSAReceiver(lzEndpoint));
+            if (receiverProxyAddr == address(0)) {
+                bytes memory receiverInitData = abi.encodeCall(
+                    CollarTSAReceiver.initialize,
+                    (
+                        admin,
+                        lzEndpoint,
+                        ISocketMessageTracker(socketTracker),
+                        ICollarTSA(tsaProxyAddr),
+                        ICollarLoanStore(loanStoreAddr),
+                        l1Eid
+                    )
+                );
+                receiverProxyAddr =
+                    address(new TransparentUpgradeableProxy(receiverImplementation, proxyAdminOwner, receiverInitData));
+            } else {
+                _upgradeExistingProxy(receiverProxyAddr, receiverImplementation, bytes(""), "L2_RECEIVER");
+            }
         } else {
-            _upgradeExistingProxy(receiverProxyAddr, receiverImplementation, bytes(""), "L2_RECEIVER");
+            if (tsaProxyAddr == address(0) || receiverProxyAddr == address(0)) {
+                revert("TSA_PROXY and L2_RECEIVER required for DEPLOY_PHASE=admin");
+            }
+            tsaImplementation = _proxyImplementationOf(tsaProxyAddr);
+            receiverImplementation = _proxyImplementationOf(receiverProxyAddr);
         }
         CollarTSAReceiver receiver = CollarTSAReceiver(payable(receiverProxyAddr));
 
-        // Receiver writes mandate/collateral/consumed state into loan store.
-        bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
-        if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, receiverProxyAddr)) {
-            CollarLoanStore(loanStoreAddr).grantRole(writerRole, receiverProxyAddr);
-        }
-        if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, tsaProxyAddr)) {
-            CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
-        }
-
-        if (atomicExecutor != address(0)) {
-            CollarTSA(tsaProxyAddr).setSubmitter(atomicExecutor, true);
-            Matching matching = Matching(vm.envAddress("MATCHING"));
-            if (matching.owner() == admin) {
-                matching.setTradeExecutor(atomicExecutor, true);
+        if (needsAdminConfig) {
+            // Receiver writes mandate/collateral/consumed state into loan store.
+            bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
+            if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, receiverProxyAddr)) {
+                CollarLoanStore(loanStoreAddr).grantRole(writerRole, receiverProxyAddr);
             }
-        }
-
-        if (l1Vault != address(0)) {
-            receiver.setVaultRecipient(l1Vault);
-        }
-        if (l1Messenger != address(0)) {
-            // Allow messages from the L1 messenger (right-aligned bytes32 encoding).
-            receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
-        }
-
-        if (wethSocketBridge != address(0) || wethSocketConnector != address(0)) {
-            if (wethSocketBridge == address(0) || wethSocketConnector == address(0)) {
-                revert("WETH_SOCKET_BRIDGE and WETH_SOCKET_CONNECTOR required together");
+            if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, tsaProxyAddr)) {
+                CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
             }
 
-            if (wethAsset == address(0)) {
-                wethAsset = address(IWrappedERC20Asset(vm.envAddress("WRAPPED_DEPOSIT_ASSET")).wrappedAsset());
-            }
-            if (wethAsset == address(0)) {
-                revert("WETH_ASSET required");
-            }
-
-            wethAdapter = _deploySocketAdapter(
-                l2SocketAdapterMode, wethAsset, wethSocketBridge, wethSocketConnector, wethMsgGasLimit, wethPayloadSize
-            );
-            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
-            bridgeConfigured = true;
-        }
-
-        if (usdcSocketBridge != address(0) || usdcSocketConnector != address(0)) {
-            if (usdcSocketBridge == address(0) || usdcSocketConnector == address(0)) {
-                revert("USDC_SOCKET_BRIDGE and USDC_SOCKET_CONNECTOR required together");
+            if (atomicExecutor != address(0)) {
+                CollarTSA(tsaProxyAddr).setSubmitter(atomicExecutor, true);
+                Matching matching = Matching(vm.envAddress("MATCHING"));
+                if (matching.owner() == admin) {
+                    matching.setTradeExecutor(atomicExecutor, true);
+                }
             }
 
-            if (usdcAsset == address(0)) {
-                usdcAsset = address(IERC20BasedAsset(vm.envAddress("CASH")).wrappedAsset());
+            if (l1Vault != address(0)) {
+                receiver.setVaultRecipient(l1Vault);
             }
-            if (usdcAsset == address(0)) {
-                revert("USDC_ASSET required");
+            if (l1Messenger != address(0)) {
+                // Allow messages from the L1 messenger (right-aligned bytes32 encoding).
+                receiver.setPeer(l1Eid, bytes32(uint256(uint160(l1Messenger))));
             }
 
-            usdcAdapter = _deploySocketAdapter(
-                l2SocketAdapterMode, usdcAsset, usdcSocketBridge, usdcSocketConnector, usdcMsgGasLimit, usdcPayloadSize
-            );
-            CollarTSA(tsaProxyAddr).setSocketBridgeConfig(usdcAsset, IBridgeAdapter(usdcAdapter));
-            bridgeConfigured = true;
-        }
+            if (wethSocketBridge != address(0) || wethSocketConnector != address(0)) {
+                if (wethSocketBridge == address(0) || wethSocketConnector == address(0)) {
+                    revert("WETH_SOCKET_BRIDGE and WETH_SOCKET_CONNECTOR required together");
+                }
 
-        if (bridgeConfigured) {
-            CollarTSA(tsaProxyAddr).setBridgeCoordinator(receiverProxyAddr);
+                if (wethAsset == address(0)) {
+                    wethAsset = address(IWrappedERC20Asset(vm.envAddress("WRAPPED_DEPOSIT_ASSET")).wrappedAsset());
+                }
+                if (wethAsset == address(0)) {
+                    revert("WETH_ASSET required");
+                }
+
+                wethAdapter = _deploySocketAdapter(
+                    l2SocketAdapterMode,
+                    wethAsset,
+                    wethSocketBridge,
+                    wethSocketConnector,
+                    wethMsgGasLimit,
+                    wethPayloadSize
+                );
+                CollarTSA(tsaProxyAddr).setSocketBridgeConfig(wethAsset, IBridgeAdapter(wethAdapter));
+                bridgeConfigured = true;
+            }
+
+            if (usdcSocketBridge != address(0) || usdcSocketConnector != address(0)) {
+                if (usdcSocketBridge == address(0) || usdcSocketConnector == address(0)) {
+                    revert("USDC_SOCKET_BRIDGE and USDC_SOCKET_CONNECTOR required together");
+                }
+
+                if (usdcAsset == address(0)) {
+                    usdcAsset = address(IERC20BasedAsset(vm.envAddress("CASH")).wrappedAsset());
+                }
+                if (usdcAsset == address(0)) {
+                    revert("USDC_ASSET required");
+                }
+
+                usdcAdapter = _deploySocketAdapter(
+                    l2SocketAdapterMode,
+                    usdcAsset,
+                    usdcSocketBridge,
+                    usdcSocketConnector,
+                    usdcMsgGasLimit,
+                    usdcPayloadSize
+                );
+                CollarTSA(tsaProxyAddr).setSocketBridgeConfig(usdcAsset, IBridgeAdapter(usdcAdapter));
+                bridgeConfigured = true;
+            }
+
+            if (bridgeConfigured) {
+                CollarTSA(tsaProxyAddr).setBridgeCoordinator(receiverProxyAddr);
+            }
         }
 
         vm.stopBroadcast();

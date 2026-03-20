@@ -17,6 +17,20 @@ def _has_nonzero_addr(value: str) -> bool:
     return bool(value) and value.lower() != ZERO_ADDRESS
 
 
+def _resolve_signer_address(account: str, private_key: str, from_addr: str, unlocked: bool) -> str:
+    if private_key:
+        return run(["cast", "wallet", "address", "--private-key", private_key])
+    if unlocked and from_addr:
+        return from_addr
+    if account:
+        return run(["cast", "wallet", "address", "--account", account])
+    raise ValueError("invalid signer config")
+
+
+def _has_signer(account: str, private_key: str, from_addr: str, unlocked: bool) -> bool:
+    return bool(account or private_key or (unlocked and from_addr))
+
+
 def _load_l1_addrs(path_value: str) -> tuple[str, str]:
     path = resolve_output_json(path_value)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -111,6 +125,10 @@ def main(
     private_key: str = typer.Option("", "--private-key", help="Use raw private key instead of --account"),
     from_addr: str = typer.Option("", "--from", help="Use unlocked sender address (for anvil --auto-impersonate)"),
     unlocked: bool = typer.Option(False, "--unlocked", help="Use unlocked mode with --from"),
+    proxy_admin_account: str = typer.Option("", "--proxy-admin-account", help="Signer used for proxy upgrades/deployments"),
+    proxy_admin_private_key: str = typer.Option("", "--proxy-admin-private-key", help="Raw private key for proxy-admin signer"),
+    proxy_admin_from: str = typer.Option("", "--proxy-admin-from", help="Unlocked sender for proxy-admin signer"),
+    proxy_admin_unlocked: bool = typer.Option(False, "--proxy-admin-unlocked", help="Use unlocked mode with --proxy-admin-from"),
     l1_output_json: str = typer.Option("", help="Optional L1 deployment JSON to auto-fill L1_MESSENGER/L1_VAULT"),
     verifier: str = typer.Option("", help="Optional forge verifier (e.g. blockscout, etherscan)") ,
     verifier_url: str = typer.Option("", help="Optional verifier URL"),
@@ -145,16 +163,19 @@ def main(
     sender = from_addr or l2.get("FROM", "")
     use_unlocked = unlocked or (str(l2.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
 
-    if not account and not pk and not (use_unlocked and sender):
+    if not _has_signer(account, pk, sender, use_unlocked):
         raise ValueError("provide ACCOUNT, or --private-key, or --unlocked --from")
 
+    deployer = _resolve_signer_address(account, pk, sender, use_unlocked)
+
+    pa_account = proxy_admin_account or l2.get("PROXY_ADMIN_ACCOUNT", "")
+    pa_pk = proxy_admin_private_key or l2.get("PROXY_ADMIN_PRIVATE_KEY", "")
+    pa_sender = proxy_admin_from or l2.get("PROXY_ADMIN_FROM", "")
+    pa_unlocked = proxy_admin_unlocked or (str(l2.get("PROXY_ADMIN_UNLOCKED", "")).lower() in {"1", "true", "yes"})
+    use_two_signers = _has_signer(pa_account, pa_pk, pa_sender, pa_unlocked)
+
     if not l2.get("ADMIN"):
-        if pk:
-            l2["ADMIN"] = run(["cast", "wallet", "address", "--private-key", pk])
-        elif use_unlocked and sender:
-            l2["ADMIN"] = sender
-        else:
-            l2["ADMIN"] = run(["cast", "wallet", "address", "--account", account])
+        l2["ADMIN"] = deployer
 
     if not l2.get("OUTPUT_JSON"):
         chain_id = run(["cast", "chain-id", "--rpc-url", l2["RPC_URL"]])
@@ -315,17 +336,62 @@ def main(
             print(f"  {k}: {v}")
 
     print(f"[cyan][info][/cyan] deploying L2 protocol via script/DeployL2.s.sol (broadcast={broadcast}, verify={verify_enabled})")
-    forge_out = forge_script(
-        "script/DeployL2.s.sol:DeployL2",
-        l2["RPC_URL"],
-        account or None,
-        broadcast,
-        env_overrides,
-        extra_args=extra_args,
-        private_key=pk or None,
-        from_addr=sender or None,
-        unlocked=use_unlocked,
-    )
+    if use_two_signers:
+        phase1_overrides = dict(env_overrides)
+        phase1_overrides["DEPLOY_PHASE"] = "proxy-admin"
+        print("[cyan][info][/cyan] phase 1/2 (proxy-admin signer): proxy upgrades/deployments")
+        forge_script(
+            "script/DeployL2.s.sol:DeployL2",
+            l2["RPC_URL"],
+            pa_account or None,
+            broadcast,
+            phase1_overrides,
+            extra_args=extra_args,
+            private_key=pa_pk or None,
+            from_addr=pa_sender or None,
+            unlocked=pa_unlocked,
+        )
+
+        data = json.loads(out_abs.read_text(encoding="utf-8"))
+        addrs = data.get("addrs", data)
+        l2_tsa = addrs.get("l2Tsa")
+        l2_receiver = addrs.get("l2Receiver")
+        l2_loan_store = addrs.get("l2LoanStore")
+        if not l2_tsa or not l2_receiver:
+            raise ValueError("phase 1 output missing l2Tsa/l2Receiver")
+
+        phase2_overrides = dict(env_overrides)
+        phase2_overrides["DEPLOY_PHASE"] = "admin"
+        phase2_overrides["TSA_PROXY"] = str(l2_tsa)
+        phase2_overrides["L2_RECEIVER"] = str(l2_receiver)
+        if l2_loan_store:
+            phase2_overrides["LOAN_STORE"] = str(l2_loan_store)
+        print("[cyan][info][/cyan] phase 2/2 (admin signer): protocol configuration")
+        forge_out = forge_script(
+            "script/DeployL2.s.sol:DeployL2",
+            l2["RPC_URL"],
+            account or None,
+            broadcast,
+            phase2_overrides,
+            extra_args=extra_args,
+            private_key=pk or None,
+            from_addr=sender or None,
+            unlocked=use_unlocked,
+        )
+    else:
+        full_overrides = dict(env_overrides)
+        full_overrides["DEPLOY_PHASE"] = "full"
+        forge_out = forge_script(
+            "script/DeployL2.s.sol:DeployL2",
+            l2["RPC_URL"],
+            account or None,
+            broadcast,
+            full_overrides,
+            extra_args=extra_args,
+            private_key=pk or None,
+            from_addr=sender or None,
+            unlocked=use_unlocked,
+        )
 
     if json_out:
         print(
@@ -338,6 +404,11 @@ def main(
                     "privateKey": bool(pk),
                     "from": sender or None,
                     "unlocked": use_unlocked,
+                    "twoSigners": use_two_signers,
+                    "proxyAdminAccount": pa_account or None,
+                    "proxyAdminPrivateKey": bool(pa_pk),
+                    "proxyAdminFrom": pa_sender or None,
+                    "proxyAdminUnlocked": pa_unlocked,
                     "envProfile": resolved_env or None,
                     "registryProfile": profile or None,
                     "registryChainId": (registry_chain_id_used or None),

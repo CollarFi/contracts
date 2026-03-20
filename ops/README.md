@@ -22,6 +22,12 @@ This folder contains Python automation for deployment orchestration, LayerZero r
 uv run python ops/deploy_l1.py --env testnet
 uv run python ops/deploy_l2.py --env testnet
 
+# Two-signer mode (proxy admin signer separated from protocol admin signer)
+uv run python ops/deploy_l2.py --env testnet \
+  --proxy-admin-account ProxyAdminSigner
+uv run python ops/deploy_l1.py --env testnet \
+  --proxy-admin-account ProxyAdminSigner
+
 # End-to-end route setup/check
 uv run python ops/ensure_lz_route.py --env testnet
 uv run python ops/ensure_lz_route.py --env testnet --broadcast
@@ -49,6 +55,10 @@ uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-e2e.js
 - Most scripts are dry-run unless `--broadcast` is set.
 - `--env testnet|mainnet` resolves `.env.l1.<env>` / `.env.l2.<env>` automatically where applicable.
 - Address resolution fallback order (typical): env var -> deployment output JSON -> Foundry broadcast artifact.
+- `deploy_l1.py` / `deploy_l2.py` support two-phase two-signer execution:
+  - phase 1 (`DEPLOY_PHASE=proxy-admin`): proxy upgrades/deployments
+  - phase 2 (`DEPLOY_PHASE=admin`): protocol configuration
+  Set `--proxy-admin-account` / `--proxy-admin-private-key` (or env equivalents `PROXY_ADMIN_*`) to enable.
 
 ## `lz_harness` helpers
 

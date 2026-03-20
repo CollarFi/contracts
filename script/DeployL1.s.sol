@@ -34,7 +34,15 @@ contract DeployL1 is Script {
     using OptionsBuilder for bytes;
 
     bytes32 internal constant EIP1967_ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+    bytes32 internal constant EIP1967_IMPLEMENTATION_SLOT =
+        bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1);
     bytes32 internal constant VAULT_ROLE = keccak256("VAULT_ROLE");
+
+    enum DeployPhase {
+        Full,
+        ProxyAdmin,
+        Admin
+    }
 
     struct EnvConfig {
         address admin;
@@ -63,6 +71,7 @@ contract DeployL1 is Script {
         uint256 deriveSubaccountId;
         address rfqSigner;
         string outputJson;
+        DeployPhase phase;
     }
 
     struct Deployed {
@@ -125,6 +134,15 @@ contract DeployL1 is Script {
         cfg.rfqSigner = vm.envOr("RFQ_SIGNER", address(0));
 
         cfg.outputJson = vm.envString("OUTPUT_JSON");
+        cfg.phase = _parsePhase(vm.envOr("DEPLOY_PHASE", string("full")));
+    }
+
+    function _parsePhase(string memory raw) internal pure returns (DeployPhase) {
+        bytes32 phaseHash = keccak256(bytes(raw));
+        if (phaseHash == keccak256(bytes("full"))) return DeployPhase.Full;
+        if (phaseHash == keccak256(bytes("proxy-admin"))) return DeployPhase.ProxyAdmin;
+        if (phaseHash == keccak256(bytes("admin"))) return DeployPhase.Admin;
+        revert("invalid DEPLOY_PHASE");
     }
 
     function _deploy(EnvConfig memory cfg) internal returns (Deployed memory dep) {
@@ -132,8 +150,22 @@ contract DeployL1 is Script {
         dep.eulerAdapter = _ensureEulerAdapter(cfg);
         dep.lzEndpoint = _ensureLzEndpoint(cfg);
 
-        (dep.vault, dep.vaultImpl) = _deployOrUpgradeVault(cfg, dep.liquidityVault, dep.eulerAdapter);
-        (dep.messenger, dep.messengerImpl) = _deployOrUpgradeMessenger(cfg, dep.vault, dep.lzEndpoint);
+        if (cfg.phase != DeployPhase.Admin) {
+            (dep.vault, dep.vaultImpl) = _deployOrUpgradeVault(cfg, dep.liquidityVault, dep.eulerAdapter);
+            (dep.messenger, dep.messengerImpl) = _deployOrUpgradeMessenger(cfg, dep.vault, dep.lzEndpoint);
+        } else {
+            if (cfg.l1Vault == address(0) || cfg.l1Messenger == address(0)) {
+                revert("L1_VAULT and L1_MESSENGER required for DEPLOY_PHASE=admin");
+            }
+            dep.vault = CollarVault(payable(cfg.l1Vault));
+            dep.messenger = CollarVaultMessenger(payable(cfg.l1Messenger));
+            dep.vaultImpl = _proxyImplementationOf(cfg.l1Vault);
+            dep.messengerImpl = _proxyImplementationOf(cfg.l1Messenger);
+        }
+
+        if (cfg.phase == DeployPhase.ProxyAdmin) {
+            return dep;
+        }
 
         dep.finalizeModule = new CollarVaultFinalizeModule();
         dep.settleModule = new CollarVaultSettleModule();
@@ -158,6 +190,7 @@ contract DeployL1 is Script {
         }
 
         dep.wethAdapter = _maybeDeployWethAdapter(cfg, dep.vault);
+        _maybeSetMessengerDefaultOptions(cfg, dep.messenger);
     }
 
     function _ensureLiquidityVault(EnvConfig memory cfg) internal returns (address) {
@@ -220,6 +253,9 @@ contract DeployL1 is Script {
                 address(new TransparentUpgradeableProxy(messengerImpl, cfg.proxyAdminOwner, initData));
             messenger = CollarVaultMessenger(payable(messengerProxy));
         }
+    }
+
+    function _maybeSetMessengerDefaultOptions(EnvConfig memory cfg, CollarVaultMessenger messenger) internal {
         if (cfg.lzReceiveGas > 0) {
             bytes memory lzOptions = OptionsBuilder.newOptions()
                 .addExecutorLzReceiveOption(uint128(cfg.lzReceiveGas), uint128(cfg.lzReceiveValue));
@@ -264,6 +300,11 @@ contract DeployL1 is Script {
 
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
+        return address(uint160(uint256(raw)));
+    }
+
+    function _proxyImplementationOf(address proxy) internal view returns (address) {
+        bytes32 raw = vm.load(proxy, EIP1967_IMPLEMENTATION_SLOT);
         return address(uint160(uint256(raw)));
     }
 
