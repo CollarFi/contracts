@@ -3,7 +3,11 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 
-import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {
+    TransparentUpgradeableProxy,
+    ITransparentUpgradeableProxy
+} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {ProxyAdmin} from "openzeppelin/proxy/transparent/ProxyAdmin.sol";
 
 import {CollarTSA} from "../src/CollarTSA.sol";
 import {CollarLoanStore} from "../src/CollarLoanStore.sol";
@@ -56,6 +60,7 @@ import {CollarTsaRfqDelegateModule} from "../src/modules/CollarTsaRfqDelegateMod
 /// - SOCKET_TRACKER (address)         (required; real socket message tracker)
 /// - LOAN_STORE (address)             (if omitted, deploys CollarLoanStore)
 /// - TSA_PROXY (address)              (if omitted, deploys ERC1967 proxy)
+/// - L2_RECEIVER (address)            (if omitted, deploys transparent proxy)
 /// - TSA_IMPLEMENTATION (address)     (if omitted and TSA_PROXY not provided, deploys CollarTSA implementation)
 /// - TSA_INIT_DATA (bytes)            (optional explicit initializer calldata for TSA proxy)
 /// - L1_EID (uint32)                  (default: 0)
@@ -100,6 +105,19 @@ contract DeployL2 is Script {
     function _proxyAdminOf(address proxy) internal view returns (address) {
         bytes32 raw = vm.load(proxy, EIP1967_ADMIN_SLOT);
         return address(uint160(uint256(raw)));
+    }
+
+    function _upgradeExistingProxy(address proxy, address implementation, bytes memory initData, string memory envName)
+        internal
+    {
+        if (proxy == address(0) || proxy.code.length == 0) revert(string.concat(envName, " must be a deployed proxy"));
+
+        address proxyAdmin = _proxyAdminOf(proxy);
+        if (proxyAdmin == address(0) || proxyAdmin.code.length == 0) {
+            revert(string.concat(envName, " is not a transparent proxy"));
+        }
+
+        ProxyAdmin(proxyAdmin).upgradeAndCall(ITransparentUpgradeableProxy(payable(proxy)), implementation, initData);
     }
 
     function _buildTsaInitData(
@@ -188,12 +206,36 @@ contract DeployL2 is Script {
         revert("invalid L2_SOCKET_ADAPTER_MODE");
     }
 
+    function _ensureLzEndpoint(address explicitEndpoint, address receiverProxy) internal returns (address) {
+        if (receiverProxy != address(0)) {
+            return address(CollarTSAReceiver(payable(receiverProxy)).endpoint());
+        }
+        if (explicitEndpoint != address(0)) {
+            return explicitEndpoint;
+        }
+        return address(new LZEndpointV2Mock());
+    }
+
+    function _ensureLoanStore(address explicitLoanStore, address tsaProxyAddr, address admin)
+        internal
+        returns (address)
+    {
+        if (explicitLoanStore != address(0)) {
+            return explicitLoanStore;
+        }
+        if (tsaProxyAddr != address(0)) {
+            return address(CollarTSA(payable(tsaProxyAddr)).loanStore());
+        }
+        return address(new CollarLoanStore(admin));
+    }
+
     function run() external {
         address admin = vm.envAddress("ADMIN");
         address proxyAdminOwner = vm.envOr("PROXY_ADMIN", admin);
 
         address l1Messenger = vm.envOr("L1_MESSENGER", address(0));
         address l1Vault = vm.envOr("L1_VAULT", address(0));
+        address receiverProxyAddr = vm.envOr("L2_RECEIVER", address(0));
 
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
         address socketTracker = vm.envAddress("SOCKET_TRACKER");
@@ -222,64 +264,67 @@ contract DeployL2 is Script {
         address wethAdapter = address(0);
         address usdcAdapter = address(0);
         bool bridgeConfigured = false;
+        bool requiresFreshTsaDependencies = tsaProxyAddr == address(0) || tsaInitData.length != 0;
 
         vm.startBroadcast();
 
-        if (lzEndpoint == address(0)) {
-            lzEndpoint = address(new LZEndpointV2Mock());
-        }
+        lzEndpoint = _ensureLzEndpoint(lzEndpoint, receiverProxyAddr);
+        loanStoreAddr = _ensureLoanStore(loanStoreAddr, tsaProxyAddr, admin);
 
-        if (loanStoreAddr == address(0)) {
-            loanStoreAddr = address(new CollarLoanStore(admin));
-        }
-
-        if (optionRiskVerifierAddr == address(0)) {
+        if (optionRiskVerifierAddr == address(0) && requiresFreshTsaDependencies) {
             optionRiskVerifierAddr = address(new OptionRiskVerifier());
         }
-        if (rfqVerifierAddr == address(0)) {
+        if (rfqVerifierAddr == address(0) && requiresFreshTsaDependencies) {
             rfqVerifierAddr = address(new RfqVerifier());
         }
-        if (rfqDelegateModuleAddr == address(0)) {
+        if (rfqDelegateModuleAddr == address(0) && requiresFreshTsaDependencies) {
             rfqDelegateModuleAddr = address(new CollarTsaRfqDelegateModule());
         }
 
-        if (tsaProxyAddr == address(0)) {
-            if (tsaImplementation == address(0)) {
-                tsaImplementation = address(new CollarTSA());
-            }
+        if (tsaImplementation == address(0)) {
+            tsaImplementation = address(new CollarTSA());
+        }
 
-            // Auto-build initializer calldata if not provided explicitly.
+        if (tsaProxyAddr == address(0)) {
             if (tsaInitData.length == 0) {
                 tsaInitData = _buildTsaInitData(
                     admin, loanStoreAddr, optionRiskVerifierAddr, rfqVerifierAddr, rfqDelegateModuleAddr
                 );
             }
 
-            // Deploy + initialize atomically in transparent proxy constructor.
-            // ProxyAdmin owner is PROXY_ADMIN (defaults to ADMIN).
             tsaProxyAddr = address(new TransparentUpgradeableProxy(tsaImplementation, proxyAdminOwner, tsaInitData));
+        } else {
+            _upgradeExistingProxy(tsaProxyAddr, tsaImplementation, tsaInitData, "TSA_PROXY");
         }
 
         address receiverImplementation = address(new CollarTSAReceiver(lzEndpoint));
-        bytes memory receiverInitData = abi.encodeCall(
-            CollarTSAReceiver.initialize,
-            (
-                admin,
-                lzEndpoint,
-                ISocketMessageTracker(socketTracker),
-                ICollarTSA(tsaProxyAddr),
-                ICollarLoanStore(loanStoreAddr),
-                l1Eid
-            )
-        );
-        address receiverProxyAddr =
-            address(new TransparentUpgradeableProxy(receiverImplementation, proxyAdminOwner, receiverInitData));
+        if (receiverProxyAddr == address(0)) {
+            bytes memory receiverInitData = abi.encodeCall(
+                CollarTSAReceiver.initialize,
+                (
+                    admin,
+                    lzEndpoint,
+                    ISocketMessageTracker(socketTracker),
+                    ICollarTSA(tsaProxyAddr),
+                    ICollarLoanStore(loanStoreAddr),
+                    l1Eid
+                )
+            );
+            receiverProxyAddr =
+                address(new TransparentUpgradeableProxy(receiverImplementation, proxyAdminOwner, receiverInitData));
+        } else {
+            _upgradeExistingProxy(receiverProxyAddr, receiverImplementation, bytes(""), "L2_RECEIVER");
+        }
         CollarTSAReceiver receiver = CollarTSAReceiver(payable(receiverProxyAddr));
 
         // Receiver writes mandate/collateral/consumed state into loan store.
         bytes32 writerRole = CollarLoanStore(loanStoreAddr).WRITER_ROLE();
-        CollarLoanStore(loanStoreAddr).grantRole(writerRole, receiverProxyAddr);
-        CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
+        if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, receiverProxyAddr)) {
+            CollarLoanStore(loanStoreAddr).grantRole(writerRole, receiverProxyAddr);
+        }
+        if (!CollarLoanStore(loanStoreAddr).hasRole(writerRole, tsaProxyAddr)) {
+            CollarLoanStore(loanStoreAddr).grantRole(writerRole, tsaProxyAddr);
+        }
 
         if (atomicExecutor != address(0)) {
             CollarTSA(tsaProxyAddr).setSubmitter(atomicExecutor, true);

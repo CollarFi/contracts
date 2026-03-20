@@ -10,6 +10,11 @@ from rich import print
 from lz_harness.common import ROOT_DIR, forge_script, load_env, must, require_cmd, resolve_output_json, run
 
 app = typer.Typer(add_completion=False)
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def _has_nonzero_addr(value: str) -> bool:
+    return bool(value) and value.lower() != ZERO_ADDRESS
 
 
 def _load_l1_addrs(path_value: str) -> tuple[str, str]:
@@ -21,6 +26,13 @@ def _load_l1_addrs(path_value: str) -> tuple[str, str]:
     if not l1_messenger or not l1_vault:
         raise ValueError(f"could not resolve l1Messenger/l1Vault from {path}")
     return str(l1_messenger), str(l1_vault)
+
+
+def _resolve_loan_store_from_tsa(rpc_url: str, tsa_proxy: str) -> str:
+    out = run(["cast", "call", tsa_proxy, "loanStore()(address)", "--rpc-url", rpc_url]).strip()
+    if not out:
+        raise ValueError(f"could not resolve loanStore() from TSA proxy {tsa_proxy}")
+    return out.split()[0]
 
 
 def _resolve_registry_chain_id(profile: str, explicit_chain_id: str) -> str:
@@ -170,7 +182,7 @@ def main(
             l2.setdefault(k, v)
 
     # If creating a new TSA proxy without explicit init calldata, ensure auto-init inputs are present.
-    if not l2.get("TSA_PROXY") and not l2.get("TSA_INIT_DATA"):
+    if not _has_nonzero_addr(l2.get("TSA_PROXY", "")) and not l2.get("TSA_INIT_DATA"):
         auto_keys = (
             "SUBACCOUNTS",
             "AUCTION",
@@ -191,7 +203,7 @@ def main(
                 "auto TSA init encoding requires missing env vars: " + ", ".join(missing_auto)
             )
 
-    if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_output_json:
+    if (not _has_nonzero_addr(l2.get("L1_MESSENGER", "")) or not _has_nonzero_addr(l2.get("L1_VAULT", ""))) and l1_output_json:
         l1_messenger, l1_vault = _load_l1_addrs(l1_output_json)
         l2.setdefault("L1_MESSENGER", l1_messenger)
         l2.setdefault("L1_VAULT", l1_vault)
@@ -202,10 +214,16 @@ def main(
         l2.setdefault("L1_VAULT", l1_fallback.get("L1_VAULT", ""))
 
         # Or derive from L1 output JSON referenced by the L1 env.
-    if (not l2.get("L1_MESSENGER") or not l2.get("L1_VAULT")) and l1_fallback.get("OUTPUT_JSON"):
-            l1_messenger, l1_vault = _load_l1_addrs(l1_fallback["OUTPUT_JSON"])
-            l2.setdefault("L1_MESSENGER", l1_messenger)
-            l2.setdefault("L1_VAULT", l1_vault)
+    if (
+        not _has_nonzero_addr(l2.get("L1_MESSENGER", "")) or not _has_nonzero_addr(l2.get("L1_VAULT", ""))
+    ) and l1_fallback.get("OUTPUT_JSON"):
+        l1_messenger, l1_vault = _load_l1_addrs(l1_fallback["OUTPUT_JSON"])
+        l2.setdefault("L1_MESSENGER", l1_messenger)
+        l2.setdefault("L1_VAULT", l1_vault)
+
+    if _has_nonzero_addr(l2.get("TSA_PROXY", "")) and not _has_nonzero_addr(l2.get("LOAN_STORE", "")):
+        l2["LOAN_STORE"] = _resolve_loan_store_from_tsa(l2["RPC_URL"], l2["TSA_PROXY"])
+        print("[cyan][info][/cyan] resolved LOAN_STORE from TSA proxy:", l2["LOAN_STORE"])
 
     inferred_testnet = resolved_env == "testnet" or l2_env_file.name == ".env.l2.testnet"
     if not l2.get("L2_SOCKET_ADAPTER_MODE") and inferred_testnet:
@@ -244,6 +262,7 @@ def main(
         "SOCKET_TRACKER",
         "LOAN_STORE",
         "TSA_PROXY",
+        "L2_RECEIVER",
         "TSA_IMPLEMENTATION",
         "TSA_INIT_DATA",
         "L1_EID",
