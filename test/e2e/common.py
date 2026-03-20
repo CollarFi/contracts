@@ -287,7 +287,7 @@ def _iter_calls(node: dict):
         yield from _iter_calls(c)
 
 
-def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
+def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str, occurrence: int = 0) -> dict:
     trace = json.loads(
         run([
             "cast",
@@ -299,9 +299,13 @@ def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
             src_rpc,
         ])
     )
+    seen = 0
     for call in _iter_calls(trace):
         data = (call.get("input") or "").lower()
         if not data.startswith("0x4389e58f"):
+            continue
+        if seen != occurrence:
+            seen += 1
             continue
         decoded = run(["cast", "calldata-decode", "send((uint64,uint32,address,uint32,bytes32,bytes32,bytes),bytes,bool)", data])
         first = decoded.splitlines()[0].strip()
@@ -322,11 +326,11 @@ def _extract_send_packet_from_tx(src_rpc: str, tx_hash: str) -> dict:
             "guid": guid,
             "message": message,
         }
-    raise RuntimeError(f"send((...),bytes,bool) not found in trace: {tx_hash}")
+    raise RuntimeError(f"send((...),bytes,bool) occurrence {occurrence} not found in trace: {tx_hash}")
 
 
-def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str) -> dict:
-    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash)
+def relay_exact_lz_packet(src_rpc: str, dst_rpc: str, tx_hash: str, occurrence: int = 0) -> dict:
+    pkt = _extract_send_packet_from_tx(src_rpc, tx_hash, occurrence=occurrence)
     endpoint = cast_call(dst_rpc, pkt["receiver"], "endpoint()(address)").splitlines()[0].strip()
     run(["cast", "rpc", "anvil_setBalance", endpoint, "0x3635C9ADC5DEA00000", "--rpc-url", dst_rpc])
     relay_tx = extract_tx_hash(
@@ -506,6 +510,7 @@ def run_fresh_loan_flow(
     l2_rpc: str,
     collateral_asset: str,
     *,
+    maturity: int = 0,
     relay_l2_ack_to_l1: bool = True,
     strict_bridge_paths: bool = False,
 ) -> dict:
@@ -518,6 +523,8 @@ def run_fresh_loan_flow(
         "--collateral-asset", collateral_asset,
         "--json",
     ]
+    if maturity:
+        cmd += ["--maturity", str(maturity)]
     if not relay_l2_ack_to_l1:
         cmd.append("--no-relay-l2-ack-to-l1")
     if strict_bridge_paths:

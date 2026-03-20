@@ -10,6 +10,7 @@ import {
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
+import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
 
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {CollarTSAReceiver} from "../src/bridge/CollarTSAReceiver.sol";
@@ -105,6 +106,8 @@ contract MockWrappedDepositAsset {
 
 contract MockCollarTSA is ICollarTSA {
     IActionVerifier.Action public lastAction;
+    bytes public lastExtraData;
+    bytes public lastSignerSig;
     address public depositModule;
     address public withdrawalModule;
     address public rfqModule;
@@ -137,8 +140,12 @@ contract MockCollarTSA is ICollarTSA {
         lastAction = action;
     }
 
-    function signActionViaPermit(IActionVerifier.Action memory action, bytes memory, bytes memory) external {
+    function signActionViaPermit(IActionVerifier.Action memory action, bytes memory extraData, bytes memory signerSig)
+        external
+    {
         lastAction = action;
+        lastExtraData = extraData;
+        lastSignerSig = signerSig;
     }
 
     function getLastAction() external view returns (IActionVerifier.Action memory) {
@@ -179,6 +186,14 @@ contract MockCollarTSA is ICollarTSA {
 
     function setDepositExecuted(uint256 loanId, bool executed) external {
         depositExecutedByLoanId[loanId] = executed;
+    }
+
+    function getLastExtraData() external view returns (bytes memory) {
+        return lastExtraData;
+    }
+
+    function getLastSignerSig() external view returns (bytes memory) {
+        return lastSignerSig;
     }
 
     function estimateBridgeFees(address, address, uint256) external view returns (uint256) {
@@ -641,6 +656,49 @@ contract LZMessagingTest is Test {
                 realizedC: 0
             })
         );
+    }
+
+    function testSignTsaActionViaPermitForwardsCall() public {
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsa.subAccount(),
+            nonce: 1_000_001,
+            module: IMatchingModule(address(0x1234)),
+            data: hex"1234",
+            expiry: block.timestamp + 10 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+        bytes memory extraData = abi.encode(uint256(1), hex"abcd");
+        bytes memory signerSig = hex"deadbeef";
+
+        receiver.signTsaActionViaPermit(action, extraData, signerSig);
+
+        IActionVerifier.Action memory recorded = tsa.getLastAction();
+        assertEq(recorded.subaccountId, action.subaccountId);
+        assertEq(recorded.nonce, action.nonce);
+        assertEq(address(recorded.module), address(action.module));
+        assertEq(recorded.data, action.data);
+        assertEq(recorded.expiry, action.expiry);
+        assertEq(recorded.owner, action.owner);
+        assertEq(recorded.signer, action.signer);
+        assertEq(tsa.getLastExtraData(), extraData);
+        assertEq(tsa.getLastSignerSig(), signerSig);
+    }
+
+    function testSignTsaActionViaPermitOnlyKeeper() public {
+        IActionVerifier.Action memory action = IActionVerifier.Action({
+            subaccountId: tsa.subAccount(),
+            nonce: 1_000_001,
+            module: IMatchingModule(address(0x1234)),
+            data: hex"",
+            expiry: block.timestamp + 10 minutes,
+            owner: address(tsa),
+            signer: address(tsa)
+        });
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert();
+        receiver.signTsaActionViaPermit(action, "", "");
     }
 
     function testHandleRolloverIntentRecordsMandate() public {

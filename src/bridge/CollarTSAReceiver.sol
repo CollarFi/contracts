@@ -13,6 +13,7 @@ import {
 import {OAppUpgradeable} from "@layerzerolabs/oapp-evm-upgradeable/contracts/oapp/OAppUpgradeable.sol";
 
 import {IERC20BasedAsset} from "v2-core/src/interfaces/IERC20BasedAsset.sol";
+import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
 
 import {ICollarTSA} from "../interfaces/ICollarTSA.sol";
 import {ICollarLoanStore} from "../interfaces/ICollarLoanStore.sol";
@@ -310,6 +311,14 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
 
         depositConfirmed[loanId] = true;
         return _sendAck(pendingMessages[guid], CollarLZMessages.Action.DepositConfirmed, msg.value, msg.sender);
+    }
+
+    function signTsaActionViaPermit(
+        IActionVerifier.Action calldata action,
+        bytes calldata extraData,
+        bytes calldata signerSig
+    ) external onlyRole(KEEPER_ROLE) {
+        tsa.signActionViaPermit(action, extraData, signerSig);
     }
 
     function recordTradeExecuted(uint256 loanId, uint256 takerNonce) external onlyRole(KEEPER_ROLE) {

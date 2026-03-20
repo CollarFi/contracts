@@ -137,6 +137,22 @@ def _resolve_local_atomic_config(
     return resolved_deposit, resolved_withdrawal, resolved_wrapped
 
 
+def _resolve_rfq_module_addr(rpc_url: str, tsa_addr: str, configured_rfq_module: str) -> str:
+    if configured_rfq_module.strip():
+        return configured_rfq_module.strip()
+
+    collar_addrs = _extract_addresses(
+        cast_call(
+            rpc_url,
+            tsa_addr,
+            "getCollarTSAAddresses()(address,address,address,address,address,address)",
+        ),
+        6,
+        "getCollarTSAAddresses",
+    )
+    return collar_addrs[4]
+
+
 def _block_number(rpc_url: str) -> int:
     return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
 
@@ -307,7 +323,7 @@ def _quote_trade_confirm_native_fee(
     return _parse_uint(quote_raw)
 
 
-def _fresh_action_nonce_and_expiry(rpc_url: str, tsa_addr: str, loan_id: int) -> tuple[int, int]:
+def _fresh_action_expiry(rpc_url: str, tsa_addr: str) -> int:
     min_sig, max_sig = tsa_signature_expiry_window(rpc_url, tsa_addr)
     chain_now = latest_block_timestamp(rpc_url)
     cushion = max(30, min(300, min_sig // 5 if min_sig > 0 else 30))
@@ -320,6 +336,12 @@ def _fresh_action_nonce_and_expiry(rpc_url: str, tsa_addr: str, loan_id: int) ->
             "cannot derive valid action expiry window: "
             f"chain_now={chain_now} min={min_sig} max={max_sig}"
         )
+    return expiry
+
+
+def _fresh_action_nonce_and_expiry(rpc_url: str, tsa_addr: str, loan_id: int) -> tuple[int, int]:
+    expiry = _fresh_action_expiry(rpc_url, tsa_addr)
+    chain_now = latest_block_timestamp(rpc_url)
     return derive_reissue_nonce(chain_now, loan_id), expiry
 
 
@@ -404,6 +426,64 @@ def _to_decimal_str(amount: int, decimals: int) -> str:
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"
+
+
+def _normalize_decimal_str(raw: Any) -> str:
+    getcontext().prec = 80
+    dec = Decimal(str(raw).strip())
+    s = format(dec.normalize(), "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _decimal_1e18_to_int(raw: Any) -> int:
+    getcontext().prec = 80
+    return int(Decimal(str(raw).strip()) * (Decimal(10) ** 18))
+
+
+def _rfq_inverse_direction(direction: str) -> str:
+    normalized = direction.strip().lower()
+    if normalized == "buy":
+        return "sell"
+    if normalized == "sell":
+        return "buy"
+    raise ValueError(f"invalid RFQ direction: {direction}")
+
+
+def _rfq_signed_amount(direction: str, global_direction: str, amount: str) -> int:
+    leg_sign = 1 if direction.strip().lower() == "buy" else -1
+    if direction.strip().lower() not in {"buy", "sell"}:
+        raise ValueError(f"invalid RFQ leg direction: {direction}")
+    quote_sign = 1 if global_direction.strip().lower() == "buy" else -1
+    if global_direction.strip().lower() not in {"buy", "sell"}:
+        raise ValueError(f"invalid RFQ global direction: {global_direction}")
+    return _decimal_1e18_to_int(amount) * leg_sign * quote_sign
+
+
+def _format_trade_tuple(asset_address: str, sub_id: int, price: str, amount: int) -> str:
+    return f"({asset_address},{sub_id},{_decimal_1e18_to_int(price)},{amount})"
+
+
+def _build_rfq_trade_array_literal(legs: list[dict[str, Any]], global_direction: str) -> str:
+    tuples = [
+        _format_trade_tuple(
+            str(leg["assetAddress"]),
+            int(leg["subId"]),
+            str(leg["price"]),
+            _rfq_signed_amount(str(leg["direction"]), global_direction, str(leg["amount"])),
+        )
+        for leg in legs
+    ]
+    return "[" + ",".join(tuples) + "]"
+
+
+def _build_rfq_sign_payloads(loan_id: int, execute_quote: dict[str, Any]) -> tuple[str, str]:
+    maker_trades = _build_rfq_trade_array_literal(execute_quote["legs"], _rfq_inverse_direction(str(execute_quote["direction"])))
+    maker_trades_data = _abi_encode("f((address,uint256,uint256,int256)[])", maker_trades)
+    extra_data = _abi_encode("f(uint256,bytes)", loan_id, maker_trades_data)
+    order_hash = run(["cast", "keccak", maker_trades_data]).splitlines()[0].strip()
+    return maker_trades_data, _abi_encode("f(bytes32,uint256)", order_hash, int(execute_quote["maxFee1e18"]))
 
 
 def _post_private_deposit(
@@ -733,6 +813,70 @@ def _trade_queue_key(entry: dict[str, Any]) -> str:
     return f"{int(entry['loanId'])}:{int(entry['takerNonce'])}"
 
 
+def _normalize_rfq_execute_leg(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"RFQ execute leg must be an object, got: {raw!r}")
+
+    def pick_str(*names: str) -> str:
+        for name in names:
+            if raw.get(name) is not None:
+                return str(raw[name]).strip()
+        raise ValueError(f"missing required RFQ execute leg field from {names}")
+
+    def pick_int(*names: str) -> int:
+        for name in names:
+            if raw.get(name) is not None:
+                return int(raw[name])
+        raise ValueError(f"missing required RFQ execute leg field from {names}")
+
+    return {
+        "instrumentName": pick_str("instrumentName", "instrument_name"),
+        "direction": pick_str("direction"),
+        "assetAddress": pick_str("assetAddress", "asset_address"),
+        "subId": pick_int("subId", "sub_id"),
+        "price": _normalize_decimal_str(pick_str("price")),
+        "amount": _normalize_decimal_str(pick_str("amount")),
+    }
+
+
+def _normalize_rfq_execute_quote(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"RFQ execute payload must be an object, got: {raw!r}")
+
+    def pick_str(*names: str, default: str | None = None) -> str:
+        for name in names:
+            if raw.get(name) is not None:
+                return str(raw[name]).strip()
+        if default is not None:
+            return default
+        raise ValueError(f"missing required RFQ execute string field from {names}")
+
+    def pick_int(*names: str, default: int | None = None) -> int:
+        for name in names:
+            if raw.get(name) is not None:
+                return int(raw[name])
+        if default is not None:
+            return default
+        raise ValueError(f"missing required RFQ execute integer field from {names}")
+
+    legs_raw = raw.get("legs")
+    if not isinstance(legs_raw, list) or not legs_raw:
+        raise ValueError("RFQ execute payload requires a non-empty `legs` array")
+
+    max_fee = _normalize_decimal_str(pick_str("maxFee", "max_fee"))
+
+    return {
+        "rfqId": pick_str("rfqId", "rfq_id"),
+        "quoteId": pick_str("quoteId", "quote_id"),
+        "subaccountId": pick_int("subaccountId", "subaccount_id"),
+        "direction": pick_str("direction"),
+        "maxFee": max_fee,
+        "maxFee1e18": _decimal_1e18_to_int(max_fee),
+        "label": pick_str("label", default=""),
+        "legs": [_normalize_rfq_execute_leg(entry) for entry in legs_raw],
+    }
+
+
 def _normalize_rfq_trade_entry(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"rfq trade entry must be an object, got: {raw!r}")
@@ -753,7 +897,7 @@ def _normalize_rfq_trade_entry(raw: dict[str, Any]) -> dict[str, Any]:
             return default
         raise ValueError(f"missing required RFQ trade string field from {names}")
 
-    return {
+    entry = {
         "loanId": pick_int("loanId", "loan_id"),
         "takerNonce": pick_int("takerNonce", "taker_nonce"),
         "callStrike": pick_int("callStrike", "call_strike"),
@@ -766,6 +910,14 @@ def _normalize_rfq_trade_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "realizedC": pick_int("realizedC", "realized_c", default=0),
         "enqueuedAt": pick_int("enqueuedAt", "enqueued_at", default=int(time.time())),
     }
+
+    execute_raw = raw.get("executeQuote")
+    if execute_raw is None:
+        execute_raw = raw.get("execute_quote")
+    if execute_raw is not None:
+        entry["executeQuote"] = _normalize_rfq_execute_quote(execute_raw)
+
+    return entry
 
 
 def _load_rfq_trade_entries(path: Path) -> list[dict[str, Any]]:
@@ -804,6 +956,124 @@ def _enqueue_rfq_trades_from_file(state: dict[str, Any], rfq_trade_file: Path | 
         existing.add(key)
         added += 1
     return {"added": added, "skipped": skipped}
+
+
+def _build_rfq_execute_action(
+    *,
+    rpc_url: str,
+    tsa_addr: str,
+    rfq_module: str,
+    trade: dict[str, Any],
+) -> dict[str, Any]:
+    execute_quote = trade.get("executeQuote")
+    if not isinstance(execute_quote, dict):
+        raise ValueError("RFQ trade entry missing executeQuote payload")
+
+    expiry = _fresh_action_expiry(rpc_url, tsa_addr)
+    _, action_data = _build_rfq_sign_payloads(int(trade["loanId"]), execute_quote)
+
+    action = {
+        "subaccountId": int(execute_quote["subaccountId"]),
+        "nonce": int(trade["takerNonce"]),
+        "module": rfq_module,
+        "data": action_data,
+        "expiry": expiry,
+        "owner": tsa_addr,
+        "signer": tsa_addr,
+    }
+    action["typedDataHash"] = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getActionTypedDataHash((uint256,uint256,address,bytes,uint256,address,address))(bytes32)",
+        _format_action_tuple(action),
+    ).strip()
+    return action
+
+
+def _sign_and_submit_rfq_execute_quote(
+    *,
+    rpc_url: str,
+    receiver_addr: str,
+    tsa_addr: str,
+    rfq_module: str,
+    trade: dict[str, Any],
+    account: str,
+    private_key: str,
+    api_url: str,
+    x_lyra_wallet: str,
+    broadcast: bool,
+) -> dict[str, Any]:
+    execute_quote = trade.get("executeQuote")
+    if not isinstance(execute_quote, dict):
+        raise ValueError("RFQ trade entry missing executeQuote payload")
+    if broadcast and not (account or private_key):
+        raise ValueError("RFQ execute_quote submission requires ACCOUNT or --private-key")
+
+    action = _build_rfq_execute_action(rpc_url=rpc_url, tsa_addr=tsa_addr, rfq_module=rfq_module, trade=trade)
+    maker_trades_data, _ = _build_rfq_sign_payloads(int(trade["loanId"]), execute_quote)
+    signer_sig = wallet_sign(str(action["typedDataHash"]), no_hash=True, account=account, private_key=private_key)
+
+    out: dict[str, Any] = {
+        "typedDataHash": str(action["typedDataHash"]),
+        "subaccountId": str(action["subaccountId"]),
+        "nonce": str(action["nonce"]),
+        "expiry": str(action["expiry"]),
+        "rfqId": str(execute_quote["rfqId"]),
+        "quoteId": str(execute_quote["quoteId"]),
+    }
+    if not broadcast:
+        return out
+
+    permit_tx = cast_send(
+        rpc_url,
+        account or None,
+        receiver_addr,
+        "signTsaActionViaPermit((uint256,uint256,address,bytes,uint256,address,address),bytes,bytes)",
+        _format_action_tuple(action),
+        _abi_encode("f(uint256,bytes)", int(trade["loanId"]), maker_trades_data),
+        signer_sig,
+        private_key=private_key or None,
+    )
+
+    ts_ms = str(int(time.time() * 1000))
+    auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+    status, private_resp = http_post_json(
+        f"{api_url.rstrip('/')}/private/execute_quote",
+        {
+            "subaccount_id": int(execute_quote["subaccountId"]),
+            "nonce": int(action["nonce"]),
+            "signer": tsa_addr,
+            "signature_expiry_sec": int(action["expiry"]),
+            "signature": signer_sig,
+            "direction": str(execute_quote["direction"]),
+            "legs": [
+                {
+                    "instrument_name": str(leg["instrumentName"]),
+                    "direction": str(leg["direction"]),
+                    "price": str(leg["price"]),
+                    "amount": str(leg["amount"]),
+                }
+                for leg in execute_quote["legs"]
+            ],
+            "max_fee": str(execute_quote["maxFee"]),
+            "label": str(execute_quote["label"]),
+            "rfq_id": str(execute_quote["rfqId"]),
+            "quote_id": str(execute_quote["quoteId"]),
+        },
+        headers={
+            "X-LyraWallet": x_lyra_wallet,
+            "X-LyraTimestamp": ts_ms,
+            "X-LyraSignature": auth_sig,
+        },
+    )
+    if status >= 400 or private_resp.get("error"):
+        raise RuntimeError(f"private/execute_quote failed ({status}): {json.dumps(private_resp)}")
+
+    out["permitSignerSig"] = signer_sig
+    out["signActionViaPermitTx"] = extract_tx_hash(permit_tx)
+    out["apiResult"] = private_resp.get("result")
+    out["apiId"] = private_resp.get("id")
+    return out
 
 
 def _submit_rfq_trade_confirmation(
@@ -1078,6 +1348,7 @@ def main(
     atomic_executor_addr = _resolve_atomic_executor_addr(env, rpc_url)
     deposit_module = (env.get("DEPOSIT_MODULE") or "").strip()
     withdrawal_module = (env.get("WITHDRAWAL_MODULE") or "").strip()
+    rfq_module = _resolve_rfq_module_addr(rpc_url, tsa_addr, (env.get("RFQ_MODULE") or "").strip())
     wrapped_deposit_asset = (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip()
 
     eff_api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
@@ -1162,7 +1433,7 @@ def main(
             attempts += 1
 
             item = {
-                "action": "RfqPostFillTradeConfirm",
+                "action": "RfqExecuteAndConfirm" if trade.get("executeQuote") else "RfqPostFillTradeConfirm",
                 "loanId": str(trade["loanId"]),
                 "takerNonce": str(trade["takerNonce"]),
                 "queueKey": key,
@@ -1170,6 +1441,49 @@ def main(
             }
 
             try:
+                execute_state = trade.get("executeState") if isinstance(trade.get("executeState"), dict) else None
+                if trade.get("executeQuote"):
+                    execute_meta: dict[str, Any]
+                    if execute_state is None:
+                        retry_delay = api_retry_initial_delay_seconds
+                        execute_meta = {}
+                        for api_attempt in range(1, api_retry_attempts + 1):
+                            try:
+                                execute_meta = _sign_and_submit_rfq_execute_quote(
+                                    rpc_url=rpc_url,
+                                    receiver_addr=receiver_addr,
+                                    tsa_addr=tsa_addr,
+                                    rfq_module=rfq_module,
+                                    trade=trade,
+                                    account=account,
+                                    private_key=pk,
+                                    api_url=eff_api_url,
+                                    x_lyra_wallet=eff_derive_wallet,
+                                    broadcast=broadcast,
+                                )
+                                item["deriveApiAttempts"] = str(api_attempt)
+                                break
+                            except Exception as exc:
+                                if api_attempt >= api_retry_attempts or not is_retryable_signature_sync_error_text(
+                                    str(exc)
+                                ):
+                                    raise
+                                item["deriveApiAttempts"] = str(api_attempt)
+                                time.sleep(retry_delay)
+                                retry_delay = min(
+                                    max(retry_delay * 1.7, 0.0),
+                                    api_retry_max_delay_seconds,
+                                )
+                        item["deriveApi"] = execute_meta
+                        if broadcast:
+                            trade["executeState"] = {
+                                "completedAt": int(time.time()),
+                                "deriveApi": execute_meta,
+                            }
+                            _save_state(state_file, state)
+                    else:
+                        item["deriveApi"] = execute_state.get("deriveApi")
+
                 trade_result = _submit_rfq_trade_confirmation(
                     rpc_url=rpc_url,
                     receiver_addr=receiver_addr,
@@ -1190,6 +1504,8 @@ def main(
                         "takerNonce": int(trade["takerNonce"]),
                         "tradeConfirmedTx": item["tradeConfirmedTx"],
                     }
+                    if item.get("deriveApi") is not None:
+                        state["rfqTradesCompleted"][key]["deriveApi"] = item["deriveApi"]
                     state["rfqTradeQueue"].pop(0)
                     _save_state(state_file, state)
                     item["status"] = "sent"

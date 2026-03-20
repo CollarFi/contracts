@@ -160,6 +160,7 @@ def accept_mandate_for_pending(
 
     lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
     subaccount_id = int(cast_call(l1_rpc, vault, "deriveSubaccountId()(uint256)").split()[0])
+    l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", collateral_asset).splitlines()[0].strip()
     default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
     apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
     year = 365 * 24 * 3600
@@ -180,7 +181,7 @@ def accept_mandate_for_pending(
         str(mandate_deadline),
     )
     quote_msg = (
-        f"(6,{loan_id},{collateral_asset},{pending['borrowAmount']},{vault},{subaccount_id},"
+        f"(6,{loan_id},{l2_asset},{pending['borrowAmount']},{vault},{subaccount_id},"
         f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
     )
     lz_fee = int(
@@ -289,8 +290,9 @@ def run_fresh_atomic_pending_loan(
     l1_rpc: str,
     l2_rpc: str,
     collateral_asset: str,
+    maturity: int = 0,
 ) -> dict:
-    flow = run_fresh_loan_flow(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset)
+    flow = run_fresh_loan_flow(l1_json, l2_json, l1_rpc, l2_rpc, collateral_asset, maturity=maturity)
     if not flow.get("ok"):
         raise RuntimeError("fresh_loan_flow failed")
     verify = next((s.get("result") for s in flow.get("steps", []) if s.get("step") == "verify_expected_state"), None)

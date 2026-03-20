@@ -220,6 +220,7 @@ def main(
         rfq_sig = _sign_no_prefix(rfq_hash, ANVIL_PK0)
 
         lz_messenger = cast_call(l1_rpc, vault, "lzMessenger()(address)").splitlines()[0].strip()
+        l2_asset = cast_call(l1_rpc, vault, "l2MessageAsset(address)(address)", sepolia_weth).splitlines()[0].strip()
         default_opts = cast_call(l1_rpc, lz_messenger, "defaultOptions()(bytes)").splitlines()[0].strip()
         max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
         strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", sepolia_weth).split()[0])
@@ -236,7 +237,7 @@ def main(
             str(mandate_deadline),
         )
         quote_msg = (
-            f"(6,{loan_id},{sepolia_weth},{p_borrow},{vault},{subaccount_id},"
+            f"(6,{loan_id},{l2_asset},{p_borrow},{vault},{subaccount_id},"
             f"0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
         )
         lz_fee = int(re.search(
