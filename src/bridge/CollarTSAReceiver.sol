@@ -313,14 +313,6 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         return _sendAck(pendingMessages[guid], CollarLZMessages.Action.DepositConfirmed, msg.value, msg.sender);
     }
 
-    function signTsaActionViaPermit(
-        IActionVerifier.Action calldata action,
-        bytes calldata extraData,
-        bytes calldata signerSig
-    ) external onlyRole(KEEPER_ROLE) {
-        tsa.signActionViaPermit(action, extraData, signerSig);
-    }
-
     function recordTradeExecuted(uint256 loanId, uint256 takerNonce) external onlyRole(KEEPER_ROLE) {
         if (returnCompleted[loanId]) {
             revert CTR_TradeConfirmedAfterReturn();

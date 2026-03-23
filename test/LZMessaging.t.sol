@@ -658,49 +658,6 @@ contract LZMessagingTest is Test {
         );
     }
 
-    function testSignTsaActionViaPermitForwardsCall() public {
-        IActionVerifier.Action memory action = IActionVerifier.Action({
-            subaccountId: tsa.subAccount(),
-            nonce: 1_000_001,
-            module: IMatchingModule(address(0x1234)),
-            data: hex"1234",
-            expiry: block.timestamp + 10 minutes,
-            owner: address(tsa),
-            signer: address(tsa)
-        });
-        bytes memory extraData = abi.encode(uint256(1), hex"abcd");
-        bytes memory signerSig = hex"deadbeef";
-
-        receiver.signTsaActionViaPermit(action, extraData, signerSig);
-
-        IActionVerifier.Action memory recorded = tsa.getLastAction();
-        assertEq(recorded.subaccountId, action.subaccountId);
-        assertEq(recorded.nonce, action.nonce);
-        assertEq(address(recorded.module), address(action.module));
-        assertEq(recorded.data, action.data);
-        assertEq(recorded.expiry, action.expiry);
-        assertEq(recorded.owner, action.owner);
-        assertEq(recorded.signer, action.signer);
-        assertEq(tsa.getLastExtraData(), extraData);
-        assertEq(tsa.getLastSignerSig(), signerSig);
-    }
-
-    function testSignTsaActionViaPermitOnlyKeeper() public {
-        IActionVerifier.Action memory action = IActionVerifier.Action({
-            subaccountId: tsa.subAccount(),
-            nonce: 1_000_001,
-            module: IMatchingModule(address(0x1234)),
-            data: hex"",
-            expiry: block.timestamp + 10 minutes,
-            owner: address(tsa),
-            signer: address(tsa)
-        });
-
-        vm.prank(address(0xBEEF));
-        vm.expectRevert();
-        receiver.signTsaActionViaPermit(action, "", "");
-    }
-
     function testHandleRolloverIntentRecordsMandate() public {
         bytes32 mandateHash = keccak256("rollover");
         bytes memory data = abi.encode(

@@ -1027,8 +1027,8 @@ def _sign_and_submit_rfq_execute_quote(
     permit_tx = cast_send(
         rpc_url,
         account or None,
-        receiver_addr,
-        "signTsaActionViaPermit((uint256,uint256,address,bytes,uint256,address,address),bytes,bytes)",
+        tsa_addr,
+        "signActionViaPermit((uint256,uint256,address,bytes,uint256,address,address),bytes,bytes)",
         _format_action_tuple(action),
         _abi_encode("f(uint256,bytes)", int(trade["loanId"]), maker_trades_data),
         signer_sig,
