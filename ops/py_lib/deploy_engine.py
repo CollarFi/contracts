@@ -1861,13 +1861,29 @@ def run_l2_deploy(
                     label=label,
                 )
 
+        submitters: list[tuple[str, str]] = [
+            (cfg.admin, "set L2 TSA admin submitter"),
+            (runtime.addrs["l2Receiver"], "set L2 TSA receiver submitter"),
+        ]
         if _nonzero_addr(cfg.atomic_executor):
-            if not bool(tsa.functions.isSubmitter(_normalize_addr(cfg.atomic_executor)).call()):
+            submitters.append((cfg.atomic_executor, "set L2 TSA atomic executor submitter"))
+
+        seen_submitters: set[str] = set()
+        for raw_submitter, label in submitters:
+            if not _nonzero_addr(raw_submitter):
+                continue
+            submitter = _normalize_addr(raw_submitter)
+            if submitter in seen_submitters:
+                continue
+            seen_submitters.add(submitter)
+            if not bool(tsa.functions.isSubmitter(submitter).call()):
                 runtime.send_contract_tx(
                     role="deployer",
-                    contract_call=tsa.functions.setSubmitter(_normalize_addr(cfg.atomic_executor), True),
-                    label="set L2 TSA submitter",
+                    contract_call=tsa.functions.setSubmitter(submitter, True),
+                    label=label,
                 )
+
+        if _nonzero_addr(cfg.atomic_executor):
             if _nonzero_addr(cfg.matching):
                 matching = runtime.contract("Matching", cfg.matching)
                 owner = matching.functions.owner().call()

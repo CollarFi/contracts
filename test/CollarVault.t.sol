@@ -37,6 +37,7 @@ contract CollarVaultTest is Test {
 
     MockERC20 internal usdc;
     MockERC20 internal wbtc;
+    MockERC20 internal l2Wbtc;
     CollarLiquidityVault internal liquidityVault;
     MockBridge internal bridge;
     MockBridgeAdapter internal adapter;
@@ -59,6 +60,7 @@ contract CollarVaultTest is Test {
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         wbtc = new MockERC20("Wrapped BTC", "WBTC", 8);
+        l2Wbtc = new MockERC20("L2 Wrapped BTC", "L2WBTC", 8);
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         bridge = new MockBridge(wbtc);
         adapter = new MockBridgeAdapter();
@@ -95,8 +97,7 @@ contract CollarVaultTest is Test {
         vault.setRolloverModule(address(rolloverModule));
         vault.setVariableLoanPositionImplementation(address(positionImpl));
 
-        // Unit-test setup uses same asset on both sides.
-        vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));
+        vault.setCollateralConfig(address(wbtc), true, 1e8, address(l2Wbtc));
         vault.setSocketVaultConfig(address(wbtc), IBridgeAdapter(address(adapter)));
         vault.grantRole(vault.KEEPER_ROLE(), keeper);
         vault.setDeriveSubaccountId(1);
@@ -174,6 +175,10 @@ contract CollarVaultTest is Test {
         // Verify both LZ messages were sent
         assertTrue(depositLzGuid != bytes32(0));
         assertTrue(mandateLzGuid != bytes32(0));
+        (, uint256 sentLoanId, address sentAsset, uint256 sentAmount,,,,,,,) = messenger.lastSentMessage();
+        assertEq(sentLoanId, loanId);
+        assertEq(sentAsset, address(l2Wbtc));
+        assertEq(sentAmount, params.borrowAmount);
 
         // Verify collateral was transferred from borrower
         assertEq(wbtc.balanceOf(borrower), 0);
@@ -256,6 +261,10 @@ contract CollarVaultTest is Test {
 
         vm.prank(borrower);
         vault.acceptMandate{value: 0}(loanId, rfq, rfqSig, uint64(block.timestamp + 1 days));
+        (, uint256 sentLoanId, address sentAsset, uint256 sentAmount,,,,,,,) = messenger.lastSentMessage();
+        assertEq(sentLoanId, loanId);
+        assertEq(sentAsset, address(l2Wbtc));
+        assertEq(sentAmount, params.borrowAmount);
 
         bytes32 depositGuid = bytes32(uint256(1));
         bytes32 tradeGuid = bytes32(uint256(2));

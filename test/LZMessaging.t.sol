@@ -10,6 +10,7 @@ import {
 } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {IActionVerifier} from "v2-matching/src/interfaces/IActionVerifier.sol";
+import {IMatchingModule} from "v2-matching/src/interfaces/IMatchingModule.sol";
 
 import {CollarVaultMessenger} from "../src/bridge/CollarVaultMessenger.sol";
 import {CollarTSAReceiver} from "../src/bridge/CollarTSAReceiver.sol";
@@ -105,6 +106,8 @@ contract MockWrappedDepositAsset {
 
 contract MockCollarTSA is ICollarTSA {
     IActionVerifier.Action public lastAction;
+    bytes public lastExtraData;
+    bytes public lastSignerSig;
     address public depositModule;
     address public withdrawalModule;
     address public rfqModule;
@@ -137,8 +140,12 @@ contract MockCollarTSA is ICollarTSA {
         lastAction = action;
     }
 
-    function signActionViaPermit(IActionVerifier.Action memory action, bytes memory, bytes memory) external {
+    function signActionViaPermit(IActionVerifier.Action memory action, bytes memory extraData, bytes memory signerSig)
+        external
+    {
         lastAction = action;
+        lastExtraData = extraData;
+        lastSignerSig = signerSig;
     }
 
     function getLastAction() external view returns (IActionVerifier.Action memory) {
@@ -179,6 +186,14 @@ contract MockCollarTSA is ICollarTSA {
 
     function setDepositExecuted(uint256 loanId, bool executed) external {
         depositExecutedByLoanId[loanId] = executed;
+    }
+
+    function getLastExtraData() external view returns (bytes memory) {
+        return lastExtraData;
+    }
+
+    function getLastSignerSig() external view returns (bytes memory) {
+        return lastSignerSig;
     }
 
     function estimateBridgeFees(address, address, uint256) external view returns (uint256) {
@@ -432,9 +447,8 @@ contract LZMessagingTest is Test {
 
     function testHandleReturnRequestRevertsAfterTradeConfirmed() public {
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 7;
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -449,6 +463,20 @@ contract LZMessagingTest is Test {
                 realizedC: 0
             })
         );
+
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_ReturnRequestAfterTrade.selector);
+        receiver.handleMessage(guid);
+    }
+
+    function testHandleReturnRequestRevertsAfterRecordedTradeExecution() public {
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
 
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
         bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
@@ -477,13 +505,83 @@ contract LZMessagingTest is Test {
         receiver.handleMessage(second);
     }
 
-    function testSendTradeConfirmedRequiresUsedNonce() public {
-        bytes32 quoteHash = keccak256("quote");
+    function testRecordTradeExecutedRequiresUsedNonce() public {
         uint256 takerNonce = 42;
-        bytes32 socketMessageId = bytes32(uint256(555));
-        loanStore.setTradeExecuted(1, true);
+        _recordLoan(1);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_InvalidTradeExecutionNonce.selector);
+        receiver.recordTradeExecuted(1, takerNonce);
+    }
+
+    function testRecordTradeExecutedRequiresUsedNonceForRecordedPair() public {
+        _recordLoan(1);
+        uint256 takerNonce = 1_000_001;
 
         vm.expectRevert(CollarTSAReceiver.CTR_RfqTradeNotConfirmed.selector);
+        receiver.recordTradeExecuted(1, takerNonce);
+    }
+
+    function testRecordTradeExecutedStoresNonceAndTradeState() public {
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
+
+        assertEq(receiver.tradeExecutionNonceByLoanId(1), takerNonce);
+        assertTrue(loanStore.getLoan(1).tradeExecuted);
+    }
+
+    function testRecordTradeExecutedAllowsCollateralOnlyLoan() public {
+        uint256 takerNonce = 1_000_001;
+        loanStore.recordCollateral(1, address(token), 2e18);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+
+        receiver.recordTradeExecuted(1, takerNonce);
+
+        assertEq(receiver.tradeExecutionNonceByLoanId(1), takerNonce);
+        assertTrue(loanStore.getLoan(1).tradeExecuted);
+    }
+
+    function testRecordTradeExecutedRejectsWrongLoanNoncePairing() public {
+        uint256 takerNonce = 1_000_002;
+        _recordLoan(1);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_InvalidTradeExecutionNonce.selector);
+        receiver.recordTradeExecuted(1, takerNonce);
+    }
+
+    function testRecordTradeExecutedAllowsIdempotentReplayForSameNonce() public {
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
+
+        receiver.recordTradeExecuted(1, takerNonce);
+        assertEq(receiver.tradeExecutionNonceByLoanId(1), takerNonce);
+        assertTrue(loanStore.getLoan(1).tradeExecuted);
+    }
+
+    function testRecordTradeExecutedAfterReturnRequestReverts() public {
+        _recordLoan(1);
+        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
+            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
+        );
+        _deliverToReceiver(guid, message);
+        receiver.handleMessage(guid);
+
+        uint256 takerNonce = 1_000_001;
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_ReturnRequestBlocksTrade.selector);
+        receiver.recordTradeExecuted(1, takerNonce);
+    }
+
+    function testSendTradeConfirmedRequiresRecordedExecution() public {
+        bytes32 quoteHash = keccak256("quote");
+        uint256 takerNonce = 1_000_001;
+        bytes32 socketMessageId = bytes32(uint256(555));
+        _recordLoan(1);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_TradeNotExecuted.selector);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -500,27 +598,21 @@ contract LZMessagingTest is Test {
         );
     }
 
-    function testSendTradeConfirmedAfterReturnRequestReverts() public {
-        CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
-        bytes32 guid = messenger.sendReturnRequestAutoFee{value: 1}(
-            message.loanId, message.asset, message.amount, message.recipient, message.subaccountId, address(this)
-        );
-        _deliverToReceiver(guid, message);
-        receiver.handleMessage(guid);
-
+    function testSendTradeConfirmedRequiresMatchingRecordedNonce() public {
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 9;
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
-        vm.expectRevert(CollarTSAReceiver.CTR_ReturnRequestBlocksTrade.selector);
+        uint256 takerNonce = 1_000_001;
+        bytes32 socketMessageId = bytes32(uint256(555));
+        _recordTradeExecution(1, takerNonce);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_InvalidTradeExecutionNonce.selector);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
                 asset: address(token),
-                amount: 0,
-                socketMessageId: bytes32(0),
+                amount: 1e18,
+                socketMessageId: socketMessageId,
                 quoteHash: quoteHash,
-                takerNonce: takerNonce,
+                takerNonce: takerNonce + 1,
                 callStrike: 0,
                 putStrike: 0,
                 expiry: 0,
@@ -531,9 +623,8 @@ contract LZMessagingTest is Test {
 
     function testSendTradeConfirmedRevertsIfDuplicate() public {
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 10;
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
 
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
@@ -621,8 +712,8 @@ contract LZMessagingTest is Test {
         bytes32 socketMessageId = bytes32(uint256(556));
         uint256 amount = 1e18;
 
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
         socket.setExecuted(socketMessageId, true);
 
         receiver.sendTradeConfirmed{value: 1}(
@@ -731,12 +822,11 @@ contract LZMessagingTest is Test {
         uint256 bridgeFee = 4;
         bytes32 socketMessageId = bytes32(uint256(302));
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 12;
+        uint256 takerNonce = 1_000_001;
 
         tsa.setBridgeFee(bridgeFee);
         tsa.setBridgeMessageId(socketMessageId);
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        _recordTradeExecution(1, takerNonce);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -773,12 +863,11 @@ contract LZMessagingTest is Test {
         uint256 bridgeFee = 5;
         bytes32 socketMessageId = bytes32(uint256(303));
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 13;
+        uint256 takerNonce = 1_000_001;
 
         tsa.setBridgeFee(bridgeFee);
         tsa.setBridgeMessageId(socketMessageId);
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        _recordTradeExecution(1, takerNonce);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -844,12 +933,11 @@ contract LZMessagingTest is Test {
     function testBridgeSettlementAndNotifyRevertsIfAlreadyReported() public {
         uint256 bridgeFee = 2;
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 14;
+        uint256 takerNonce = 1_000_001;
 
         tsa.setBridgeFee(bridgeFee);
         tsa.setBridgeMessageId(bytes32(uint256(304)));
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        _recordTradeExecution(1, takerNonce);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -873,9 +961,8 @@ contract LZMessagingTest is Test {
 
     function testSendCollateralReturnedAllowsNeutralAfterTradeConfirmed() public {
         bytes32 quoteHash = keccak256("quote");
-        uint256 takerNonce = 11;
-        loanStore.setTradeExecuted(1, true);
-        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        uint256 takerNonce = 1_000_001;
+        _recordTradeExecution(1, takerNonce);
         receiver.sendTradeConfirmed{value: 1}(
             CollarTSAReceiver.TradeConfirmedParams({
                 loanId: 1,
@@ -941,6 +1028,35 @@ contract LZMessagingTest is Test {
         receiver.handleMessage(guid);
         assertTrue(receiver.handledMessages(guid));
         assertTrue(receiver.returnRequested(message.loanId));
+    }
+
+    function _recordLoan(uint256 loanId) internal {
+        ICollarLoanStore.Loan memory existing = loanStore.getLoan(loanId);
+        if (existing.borrower != address(0)) {
+            return;
+        }
+
+        loanStore.recordMandate(
+            loanId,
+            address(0xB0B),
+            address(token),
+            1e18,
+            25_000e6,
+            20_000e6,
+            0,
+            0,
+            0.8e18,
+            1e18,
+            uint64(block.timestamp + 30 days),
+            uint64(block.timestamp + 1 days)
+        );
+        loanStore.recordCollateral(loanId, address(token), 2e18);
+    }
+
+    function _recordTradeExecution(uint256 loanId, uint256 takerNonce) internal {
+        _recordLoan(loanId);
+        rfqModule.setUsedNonce(address(tsa), takerNonce, true);
+        receiver.recordTradeExecuted(loanId, takerNonce);
     }
 
     function _buildMessage(CollarLZMessages.Action action, bytes32 socketMessageId)

@@ -318,6 +318,7 @@ def main(
     l2_rpc: str = typer.Option(f"http://127.0.0.1:{L2_ANVIL_PORT}"),
     collateral_asset: str = typer.Option(L1_COLLATERAL_ASSET, help="Override L1 collateral asset used for fresh deposit"),
     faucet: str = typer.Option("", help="Override faucet contract address"),
+    maturity: int = typer.Option(0, help="Override pending loan maturity timestamp"),
     relay_l2_ack_to_l1: bool = typer.Option(True, "--relay-l2-ack-to-l1/--no-relay-l2-ack-to-l1"),
     strict_bridge_paths: bool = typer.Option(False, "--strict-bridge-paths", help="Fail instead of substituting mock bridge adapters."),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
@@ -398,20 +399,20 @@ def main(
         nonce = int(allowance.splitlines()[2].split()[0])
         sig = sign_permit2_single(chain_id, permit2, weth, 10**18, expiration, nonce, vault, sig_deadline, BORROWER_PK)
 
-        maturity = now + 7 * 24 * 3600
+        maturity_ts = maturity or (now + 7 * 24 * 3600)
         put_strike = 1500000000000000000000
         call_strike = 1700000000000000000000
         borrow_amount = 1500000000
         usdc_asset = cast_call(l1_rpc, vault, "usdc()(address)").splitlines()[0].strip()
         liquidity_vault = cast_call(l1_rpc, vault, "liquidityVault()(address)").splitlines()[0].strip()
         _seed_l1_liquidity_vault(l1_rpc, usdc_asset, liquidity_vault, borrow_amount)
-        params = f"({weth},1000000000000000000,{maturity},{put_strike},{borrow_amount})"
+        params = f"({weth},1000000000000000000,{maturity_ts},{put_strike},{borrow_amount})"
         permit_arg = f"(({weth},1000000000000000000,{expiration},{nonce}),{vault},{sig_deadline})"
 
         rfq_expiry = now + 3600
         mandate_deadline = now + resolve_mandate_ttl(l1_rpc, vault)
         rfq_nonce = now
-        rfq_arg = f"(0,{weth},1000000000000000000,{maturity},{put_strike},{call_strike},{borrow_amount},0,{rfq_expiry},{borrower},{rfq_nonce})"
+        rfq_arg = f"(0,{weth},1000000000000000000,{maturity_ts},{put_strike},{call_strike},{borrow_amount},0,{rfq_expiry},{borrower},{rfq_nonce})"
         rfq_hash = cast_call(
             l1_rpc,
             vault,
@@ -434,7 +435,7 @@ def main(
         deposit_lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", deposit_quote_msg, default_opts)).group(0))
         apr = int(cast_call(l1_rpc, vault, "originationFeeApr()(uint256)").split()[0])
         year = 365 * 24 * 3600
-        fixed_interest = ((borrow_amount * apr) // 10**18) * (maturity - now) // year
+        fixed_interest = ((borrow_amount * apr) // 10**18) * (maturity_ts - now) // year
         max_roll_ltv = int(cast_call(l1_rpc, vault, "maxRollLtv()(uint256)").split()[0])
         strike_scale = int(cast_call(l1_rpc, vault, "strikeScale(address)(uint256)", weth).split()[0])
         mandate_data = _abi_encode(
@@ -446,10 +447,12 @@ def main(
             str(fixed_interest),
             str(max_roll_ltv),
             str(strike_scale),
-            str(maturity),
+            str(maturity_ts),
             str(mandate_deadline),
         )
-        mandate_quote_msg = f"(6,{next_loan},{weth},{borrow_amount},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
+        mandate_quote_msg = (
+            f"(6,{next_loan},{l2_asset},{borrow_amount},{vault},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,{mandate_data})"
+        )
         mandate_lz_fee = int(re.search(r"\d+", cast_call(l1_rpc, lz_messenger, "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))", mandate_quote_msg, default_opts)).group(0))
 
         create_sig = "createDepositWithMandatePermit((address,uint256,uint256,uint256,uint256),(uint256,address,uint256,uint64,uint256,uint256,uint256,uint256,uint64,address,uint256),bytes,uint64,((address,uint160,uint48,uint48),address,uint256),bytes)"

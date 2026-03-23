@@ -318,7 +318,11 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
     ) internal returns (bytes32 lzGuid) {
         CollarVaultShared.CollarVaultStorage storage $ = CollarVaultShared.getStorage();
         uint256 strikeScale = $.strikeScale[pending.collateralAsset];
+        address l2MessageAsset_ = $.l2MessageAsset[pending.collateralAsset];
         if (strikeScale == 0) {
+            revert CV_InvalidConfig();
+        }
+        if (l2MessageAsset_ == address(0)) {
             revert CV_InvalidConfig();
         }
         bytes memory mandateData = abi.encode(
@@ -334,13 +338,7 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         );
 
         lzGuid = $.lzMessenger.sendMandateCreatedAutoFee{value: ethForLz}(
-            loanId,
-            pending.collateralAsset,
-            pending.borrowAmount,
-            address(this),
-            $.deriveSubaccountId,
-            mandateData,
-            msg.sender
+            loanId, l2MessageAsset_, pending.borrowAmount, address(this), $.deriveSubaccountId, mandateData, msg.sender
         );
     }
 
