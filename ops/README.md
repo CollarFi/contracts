@@ -22,6 +22,10 @@ This folder contains Python automation for deployment orchestration, LayerZero r
 uv run python ops/deploy_l1.py --env testnet
 uv run python ops/deploy_l2.py --env testnet
 
+# Explicit mode selection
+uv run python ops/deploy_l1.py --env testnet --mode fresh --broadcast
+uv run python ops/deploy_l2.py --env testnet --mode upgrade --broadcast
+
 # Two-signer mode (proxy admin signer separated from protocol admin signer)
 uv run python ops/deploy_l2.py --env testnet \
   --proxy-admin-account ProxyAdminSigner
@@ -55,10 +59,11 @@ uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-e2e.js
 - Most scripts are dry-run unless `--broadcast` is set.
 - `--env testnet|mainnet` resolves `.env.l1.<env>` / `.env.l2.<env>` automatically where applicable.
 - Address resolution fallback order (typical): env var -> deployment output JSON -> Foundry broadcast artifact.
-- `deploy_l1.py` / `deploy_l2.py` support two-phase two-signer execution:
-  - phase 1 (`DEPLOY_PHASE=proxy-admin`): proxy upgrades/deployments
-  - phase 2 (`DEPLOY_PHASE=admin`): protocol configuration
-  Set `--proxy-admin-account` / `--proxy-admin-private-key` (or env equivalents `PROXY_ADMIN_*`) to enable.
+- `deploy_l1.py` / `deploy_l2.py` support `--mode auto|fresh|upgrade`.
+- One deploy run can switch signer roles internally. Set `--proxy-admin-account` / `--proxy-admin-private-key`
+  (or env equivalents `PROXY_ADMIN_*`) to enable a dedicated proxy-admin signer.
+- Named Foundry keystores are the default signer source. Use `ACCOUNT_PASSWORD` and
+  `PROXY_ADMIN_ACCOUNT_PASSWORD` / `PROXY_ADMIN_PASSWORD` for non-interactive runs.
 
 ## `lz_harness` helpers
 

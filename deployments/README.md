@@ -6,22 +6,17 @@ Deployment artifacts are organized by `chain_id`:
 - `deployments/<chain_id>/l2.json`
 
 ## Generate from Foundry broadcast logs
-
-Use:
+Deployment JSON is now written directly by the Python deployers:
 
 ```bash
-python3 script/export_deployments.py <chain_id> l1
-python3 script/export_deployments.py <chain_id> l2
+uv run python ops/deploy_l1.py --env testnet --broadcast
+uv run python ops/deploy_l2.py --env testnet --broadcast
 ```
 
-The exporter reads:
-
-- `broadcast/DeployL1.s.sol/<chain_id>/run-latest.json`
-- `broadcast/DeployL2.s.sol/<chain_id>/run-latest.json`
-
-and writes the normalized deployment json file under `deployments/<chain_id>/`.
+The deployers write normalized files under `deployments/<chain_id>/`.
 
 ## Notes
 
 - Existing flat files (e.g. `deployments/l1-default.json`) are legacy outputs.
+- The old Solidity deploy scripts and broadcast-log exporter were removed.
 - New deploy scripts default to chain-id output paths when `OUTPUT_JSON` is not provided.

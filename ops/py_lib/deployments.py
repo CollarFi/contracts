@@ -30,18 +30,3 @@ def resolve_addr(env: dict[str, str], env_key: str, out_key: str, side: str) -> 
         return str(env[env_key])
     output_json = env.get("OUTPUT_JSON") or default_output_json(must(env, "RPC_URL"), side)
     return read_addr_from_output(output_json, out_key)
-
-
-def receiver_from_broadcast(rpc_url: str) -> str:
-    chain_id = run(["cast", "chain-id", "--rpc-url", rpc_url])
-    run_path = ROOT_DIR / "broadcast" / "DeployL2.s.sol" / str(chain_id) / "run-latest.json"
-    if not run_path.is_file():
-        raise FileNotFoundError(f"missing L2 broadcast artifact: {run_path}")
-    run_json = json.loads(run_path.read_text(encoding="utf-8"))
-    txs: list[dict] = run_json.get("transactions", [])
-    for tx in txs:
-        if tx.get("transactionType") == "CREATE" and tx.get("contractName") == "CollarTSAReceiver":
-            addr = tx.get("contractAddress")
-            if addr:
-                return str(addr)
-    raise ValueError(f"CollarTSAReceiver CREATE not found in {run_path}")
