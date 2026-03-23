@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from dotenv import dotenv_values
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -32,6 +34,20 @@ def run(cmd: list[str], *, capture: bool = True, check: bool = True) -> str:
 
 def require_cmd(name: str) -> None:
     run(["bash", "-lc", f"command -v {shlex.quote(name)} >/dev/null"])
+
+
+def load_env(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"env file not found: {path}")
+    values = dotenv_values(path)
+    return {key: str(value) for key, value in values.items() if key and value is not None}
+
+
+def must(env: dict[str, str], key: str) -> str:
+    value = env.get(key, "")
+    if not value:
+        raise ValueError(f"missing required variable: {key}")
+    return value
 
 
 def resolve_output_json(path_value: str) -> Path:
