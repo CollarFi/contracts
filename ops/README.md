@@ -64,6 +64,9 @@ uv run python test/e2e/fresh_loan_flow.py --l1-json deployments/421614/l1-e2e.js
   (or env equivalents `PROXY_ADMIN_*`) to enable a dedicated proxy-admin signer.
 - Named Foundry keystores are the default signer source. Use `ACCOUNT_PASSWORD` and
   `PROXY_ADMIN_ACCOUNT_PASSWORD` / `PROXY_ADMIN_PASSWORD` for non-interactive runs.
+- Contract verification runs after successful broadcasts when `--verify` is enabled. Verification is best-effort:
+  explorer timeouts and Cloudflare-style blocks are recorded under deployment `meta.verification` and do not fail the
+  deployment run.
 
 ## `lz_harness` helpers
 

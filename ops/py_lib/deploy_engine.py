@@ -258,6 +258,7 @@ class VerificationConfig:
     verifier: str = ""
     verifier_url: str = ""
     etherscan_api_key: str = ""
+    timeout_seconds: int = 120
 
 
 @dataclass
@@ -467,10 +468,33 @@ class DeploymentRuntime:
     def persist(self) -> None:
         write_deployment_state(self.output_json, self.addrs, self.meta)
 
+    @staticmethod
+    def _is_cloudflare_verification_failure(output: str) -> bool:
+        lowered = output.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "cloudflare",
+                "attention required",
+                "error code: 1020",
+                "access denied",
+                "forbidden",
+            )
+        )
+
+    @staticmethod
+    def _verification_error_summary(output: str) -> str:
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            return "verification failed"
+        return lines[-1]
+
     def verify_pending(self) -> None:
         if not self.verification.enabled or not self.broadcast:
             return
-        for entry in self._verify_entries:
+        pending = list(self._verify_entries)
+        self._verify_entries.clear()
+        for entry in pending:
             cmd = [
                 "forge",
                 "verify-contract",
@@ -491,22 +515,42 @@ class DeploymentRuntime:
                 cmd += ["--verifier-url", self.verification.verifier_url]
             if self.verification.etherscan_api_key:
                 cmd += ["--etherscan-api-key", self.verification.etherscan_api_key]
-            proc = subprocess.run(
-                cmd,
-                cwd=ROOT_DIR,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
             record = {
                 "label": entry.label,
                 "address": entry.address,
                 "contract": entry.contract_id,
-                "ok": proc.returncode == 0,
                 "command": " ".join(shlex.quote(part) for part in cmd),
+                "nonBlocking": True,
             }
-            if proc.returncode != 0:
-                record["error"] = proc.stdout.strip().splitlines()[-1] if proc.stdout else "verification failed"
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=ROOT_DIR,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=self.verification.timeout_seconds,
+                )
+                output = proc.stdout or ""
+                record["ok"] = proc.returncode == 0
+                record["status"] = "ok" if proc.returncode == 0 else "failed"
+                if proc.returncode != 0:
+                    if self._is_cloudflare_verification_failure(output):
+                        record["status"] = "cloudflare_blocked"
+                    record["error"] = self._verification_error_summary(output)
+                    if output.strip():
+                        record["outputTail"] = "\n".join(output.strip().splitlines()[-10:])
+            except subprocess.TimeoutExpired as exc:
+                output = exc.stdout if isinstance(exc.stdout, str) else ""
+                record["ok"] = False
+                record["status"] = "timeout"
+                record["error"] = f"verification timed out after {self.verification.timeout_seconds}s"
+                if output.strip():
+                    record["outputTail"] = "\n".join(output.strip().splitlines()[-10:])
+            except Exception as exc:
+                record["ok"] = False
+                record["status"] = "error"
+                record["error"] = str(exc)
             self.meta["verification"].append(record)
             self.persist()
 
