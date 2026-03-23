@@ -17,8 +17,11 @@ from ops.py_lib.deploy_engine import (
     VerificationEntry,
     _infer_mode,
 )
+from ops.py_lib.operation_engine import OperationRuntime, resolve_l1_vault_address
 from ops.py_lib.runtime import read_deployment_state, write_deployment_state
 from ops.py_lib.signers import SignerInput, resolve_signer
+from ops.management.enable_collateral import run_enable_collateral
+from ops.management.set_l2_message_asset import run_set_l2_message_asset
 
 
 class _StubRuntime:
@@ -27,6 +30,44 @@ class _StubRuntime:
 
     def has_code(self, addr: str) -> bool:
         return addr.lower() in self.code_addrs
+
+
+class _FakeOperationRuntime:
+    def __init__(self, *, env: dict[str, str], rpc_url: str = "http://127.0.0.1:8545", broadcast: bool = False) -> None:
+        self.env = env
+        self.rpc_url = rpc_url
+        self.broadcast = broadcast
+        self.env_file = Path(".env.test")
+        self.calls: list[tuple[str, tuple[str, ...], bool]] = []
+        self.sends: list[tuple[str, tuple[str, ...]]] = []
+        self.call_results: dict[tuple[str, str, tuple[str, ...], bool], str] = {}
+        self.next_tx = "0xdeadbeef"
+
+    @property
+    def mode(self) -> str:
+        return "broadcast" if self.broadcast else "dry-run"
+
+    def chain_id(self) -> str:
+        return self.env.get("CHAIN_ID", "31337")
+
+    def cast_call(self, to: str, sig: str, *args: str, allow_fail: bool = False) -> str:
+        key = (to, sig, args, allow_fail)
+        self.calls.append((sig, args, allow_fail))
+        if key not in self.call_results:
+            raise AssertionError(f"unexpected cast_call: {key}")
+        return self.call_results[key]
+
+    def render_cast_send(self, to: str, sig: str, *args: str, value_wei: str | None = None) -> str:
+        del value_wei
+        return f"cast send {to} {sig} {' '.join(args)} --rpc-url {self.rpc_url} --account test"
+
+    def cast_send(self, to: str, sig: str, *args: str, value_wei: str | None = None) -> str:
+        del value_wei
+        self.sends.append((sig, args))
+        return self.next_tx
+
+    def signer_summary(self) -> dict[str, object]:
+        return {"kind": "account", "address": None, "account": "test", "unlocked": False, "from": None}
 
 
 class DeployEngineTests(unittest.TestCase):
@@ -105,6 +146,90 @@ class DeployEngineTests(unittest.TestCase):
             loaded = read_deployment_state(path)
             self.assertEqual(loaded["l1Vault"], "0x1234")
             self.assertEqual(loaded["meta"]["mode"], "fresh")
+
+    def test_operation_runtime_loads_env_and_renders_redacted_private_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env.l1.test"
+            env_path.write_text(
+                "RPC_URL=http://127.0.0.1:8545\nACCOUNT=OpsSigner\nPRIVATE_KEY=0x59c6995e998f97a5a0044966f094538c5f27b0e6f0f64f7f36f5d5f7d3c5b5fd\n",
+                encoding="utf-8",
+            )
+            runtime = OperationRuntime.from_env_file(env_path, broadcast=False)
+            cmd = runtime.render_cast_send("0x1234", "ping()")
+            self.assertIn("--private-key '<redacted>'", cmd)
+            self.assertEqual(runtime.mode, "dry-run")
+
+    def test_resolve_l1_vault_address_prefers_env_then_output(self) -> None:
+        env = {"L1_VAULT": "0x1111111111111111111111111111111111111111"}
+        self.assertEqual(
+            resolve_l1_vault_address(env, "http://127.0.0.1:8545"),
+            "0x1111111111111111111111111111111111111111",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "l1.json"
+            out_path.write_text(json_dumps({"addrs": {"l1VaultProxy": "0x2222222222222222222222222222222222222222"}}), encoding="utf-8")
+            env = {"OUTPUT_JSON": str(out_path)}
+            self.assertEqual(
+                resolve_l1_vault_address(env, "http://127.0.0.1:8545"),
+                "0x2222222222222222222222222222222222222222",
+            )
+
+    def test_enable_collateral_broadcasts_even_when_already_matching(self) -> None:
+        vault = "0x1111111111111111111111111111111111111111"
+        asset = "0x2222222222222222222222222222222222222222"
+        l2_asset = "0x3333333333333333333333333333333333333333"
+        runtime = _FakeOperationRuntime(
+            env={
+                "OUTPUT_JSON": "unused.json",
+                "WETH_ASSET": asset,
+                "L2_WRAPPED_WETH_ASSET": l2_asset,
+            },
+            broadcast=True,
+        )
+        runtime.call_results[(vault, "collateralAllowed(address)(bool)", (asset,), False)] = "true"
+        runtime.call_results[(vault, "strikeScale(address)(uint256)", (asset,), False)] = str(10**30)
+        runtime.call_results[(vault, "l2MessageAsset(address)(address)", (asset,), False)] = l2_asset
+
+        with patch("ops.management.enable_collateral.resolve_l1_vault_address", return_value=vault):
+            out = run_enable_collateral(runtime, env_profile="testnet", asset="", scale=10**30, l2_asset="")
+
+        self.assertEqual(out["tx"], runtime.next_tx)
+        self.assertEqual(len(runtime.sends), 1)
+        self.assertFalse(out["steps"][0]["needsUpdate"])
+        self.assertTrue(out["steps"][0]["executed"])
+
+    def test_set_l2_message_asset_skips_send_when_mapping_matches(self) -> None:
+        vault = "0x1111111111111111111111111111111111111111"
+        l1_asset = "0x2222222222222222222222222222222222222222"
+        l2_asset = "0x3333333333333333333333333333333333333333"
+        runtime = _FakeOperationRuntime(
+            env={
+                "OUTPUT_JSON": "unused.json",
+                "WETH_ASSET": l1_asset,
+                "L2_WRAPPED_WETH_ASSET": l2_asset,
+            },
+            broadcast=True,
+        )
+        runtime.call_results[(vault, "l2MessageAsset(address)(address)", (l1_asset,), True)] = l2_asset
+        runtime.call_results[(vault, "collateralAllowed(address)(bool)", (l1_asset,), True)] = "true"
+        runtime.call_results[(vault, "strikeScale(address)(uint256)", (l1_asset,), True)] = str(10**30)
+
+        with patch("ops.management.set_l2_message_asset.resolve_l1_vault_address", return_value=vault):
+            out = run_set_l2_message_asset(
+                runtime,
+                env_profile="testnet",
+                l2_env_file=Path(".env.l2.testnet"),
+                l1_asset="",
+                l2_asset="",
+                vault="",
+            )
+
+        self.assertTrue(out["broadcast"])
+        self.assertFalse(out["needsUpdate"])
+        self.assertIsNone(out["tx"])
+        self.assertEqual(runtime.sends, [])
+        self.assertEqual(out["steps"][0]["skippedReason"], "already_correct")
 
     def test_infer_mode_validates_partial_reuse_and_non_contracts(self) -> None:
         fresh_runtime = _StubRuntime(set())
