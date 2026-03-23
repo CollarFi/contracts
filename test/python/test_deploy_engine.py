@@ -13,14 +13,12 @@ from eth_account import Account
 from ops.py_lib.deploy_engine import (
     ArtifactLoader,
     DeploymentRuntime,
-    SignerInput,
     VerificationConfig,
     VerificationEntry,
     _infer_mode,
-    read_deployment_state,
-    resolve_signer,
-    write_deployment_state,
 )
+from ops.py_lib.runtime import read_deployment_state, write_deployment_state
+from ops.py_lib.signers import SignerInput, resolve_signer
 
 
 class _StubRuntime:
@@ -33,9 +31,30 @@ class _StubRuntime:
 
 class DeployEngineTests(unittest.TestCase):
     def test_artifact_loader_reads_contract_id(self) -> None:
-        artifact = ArtifactLoader().load("CollarVault")
-        self.assertEqual(artifact.contract_id, "src/CollarVault.sol:CollarVault")
-        self.assertTrue(artifact.bytecode.startswith("0x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_path = root / "out" / "CollarVault.sol" / "CollarVault.json"
+            artifact_path.parent.mkdir(parents=True)
+            artifact_path.write_text(
+                json_dumps(
+                    {
+                        "abi": [],
+                        "bytecode": {"object": "6000", "linkReferences": {}},
+                        "metadata": {
+                            "settings": {
+                                "compilationTarget": {
+                                    "src/CollarVault.sol": "CollarVault",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            artifact = ArtifactLoader(root=root).load("CollarVault")
+            self.assertEqual(artifact.contract_id, "src/CollarVault.sol:CollarVault")
+            self.assertTrue(artifact.bytecode.startswith("0x"))
 
     def test_resolve_signer_private_key_and_unlocked(self) -> None:
         private_key = "0x59c6995e998f97a5a0044966f094538c5f27b0e6f0f64f7f36f5d5f7d3c5b5fd"
