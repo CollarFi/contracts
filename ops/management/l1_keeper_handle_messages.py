@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,42 +13,39 @@ from rich import print
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must, run  # noqa: E402
+from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l1_l2_env_paths  # noqa: E402
+from py_lib.keeper_logs import data_int, get_message_received_logs, topic_hex, topic_int  # noqa: E402
+from py_lib.keeper_loop import resolve_scan_range, resolve_start_block, should_advance_cursor  # noqa: E402
+from py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor  # noqa: E402
+from py_lib.runtime import run  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 
 # CollarLZMessages.Action enum
 ACTION_DEPOSIT_CONFIRMED = 3
 ACTION_TRADE_CONFIRMED = 5
+HANDLED_ACTIONS = {ACTION_DEPOSIT_CONFIRMED, ACTION_TRADE_CONFIRMED}
+
+
+@dataclass(frozen=True)
+class L1KeeperRuntime:
+    rpc_url: str
+    logs_url: str
+    messenger_addr: str
+    vault_addr: str
+    state_file: Path
+    max_per_tick: int
+    broadcast: bool
+    account: str = ""
+    private_key: str = ""
+    sender: str = ""
+    unlocked: bool = False
 
 
 def _block_number(rpc_url: str) -> int:
     return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
-
-
-def _get_logs(rpc_url: str, messenger_addr: str, from_block: int, to_block: int) -> list[dict[str, Any]]:
-    out = run(
-        [
-            "cast",
-            "logs",
-            "MessageReceived(bytes32,uint8,uint256)",
-            "--address",
-            messenger_addr,
-            "--from-block",
-            str(from_block),
-            "--to-block",
-            str(to_block),
-            "--rpc-url",
-            rpc_url,
-            "--json",
-        ]
-    )
-    parsed = json.loads(out)
-    if not isinstance(parsed, list):
-        raise RuntimeError(f"unexpected cast logs output: {out}")
-    return parsed
 
 
 def _action_name(action: int) -> str:
@@ -55,17 +53,6 @@ def _action_name(action: int) -> str:
         3: "DepositConfirmed",
         5: "TradeConfirmed",
     }.get(action, f"Unknown({action})")
-
-
-def _load_state(path: Path, start_block: int) -> dict[str, Any]:
-    if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {"nextBlock": start_block}
-
-
-def _save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def _guid_consumed(rpc_url: str, vault_addr: str, guid: str) -> bool:
@@ -101,6 +88,128 @@ def _has_mandate(rpc_url: str, vault_addr: str, loan_id: int) -> bool:
     return borrower != "0x0000000000000000000000000000000000000000"
 
 
+def _latest_unconsumed_pairs(logs: list[dict[str, Any]], *, rpc_url: str, vault_addr: str) -> dict[int, dict[int, str]]:
+    by_loan: dict[int, dict[int, str]] = {}
+    for log in logs:
+        guid = topic_hex(log, 1)
+        loan_id = topic_int(log, 2)
+        action = data_int(log, default=-1)
+        if guid is None or loan_id is None or action not in HANDLED_ACTIONS:
+            continue
+        if _guid_consumed(rpc_url, vault_addr, guid):
+            continue
+        by_loan.setdefault(loan_id, {})[action] = guid
+    return by_loan
+
+
+def run_keeper_tick(
+    runtime: L1KeeperRuntime,
+    *,
+    state: dict[str, Any],
+    next_block: int,
+    handled: list[dict[str, Any]],
+) -> tuple[dict[str, Any], int]:
+    latest = _block_number(runtime.rpc_url)
+    scan_range = resolve_scan_range(next_block, latest)
+    if scan_range is None:
+        return {"fromBlock": next_block, "toBlock": latest, "logs": 0, "attempted": 0, "sent": 0}, next_block
+
+    scan_from, scan_to = scan_range
+    logs = get_message_received_logs(runtime.logs_url, runtime.messenger_addr, scan_from, scan_to)
+    by_loan = _latest_unconsumed_pairs(logs, rpc_url=runtime.rpc_url, vault_addr=runtime.vault_addr)
+
+    attempts = 0
+    sent = 0
+
+    for loan_id in sorted(by_loan.keys()):
+        pair = by_loan[loan_id]
+        deposit_guid = pair.get(ACTION_DEPOSIT_CONFIRMED)
+        trade_guid = pair.get(ACTION_TRADE_CONFIRMED)
+
+        has_pending = _has_pending_deposit(runtime.rpc_url, runtime.vault_addr, loan_id)
+        has_mandate = _has_mandate(runtime.rpc_url, runtime.vault_addr, loan_id)
+
+        if not deposit_guid or not trade_guid:
+            handled.append(
+                {
+                    "loanId": str(loan_id),
+                    "status": "waiting-pair",
+                    "depositGuid": deposit_guid,
+                    "tradeGuid": trade_guid,
+                    "hasPendingDeposit": has_pending,
+                    "hasMandate": has_mandate,
+                }
+            )
+            continue
+
+        if not has_pending or not has_mandate:
+            handled.append(
+                {
+                    "loanId": str(loan_id),
+                    "status": "blocked-state",
+                    "depositGuid": deposit_guid,
+                    "tradeGuid": trade_guid,
+                    "hasPendingDeposit": has_pending,
+                    "hasMandate": has_mandate,
+                }
+            )
+            continue
+
+        attempts += 1
+        item = {
+            "loanId": str(loan_id),
+            "action": "finalizeLoan",
+            "depositGuid": deposit_guid,
+            "tradeGuid": trade_guid,
+            "tx": None,
+            "status": "dry-run",
+        }
+
+        if runtime.broadcast:
+            try:
+                tx = cast_send(
+                    runtime.rpc_url,
+                    runtime.account or None,
+                    runtime.vault_addr,
+                    "finalizeLoan(uint256,bytes32,bytes32)",
+                    str(loan_id),
+                    deposit_guid,
+                    trade_guid,
+                    private_key=runtime.private_key or None,
+                    from_addr=runtime.sender or None,
+                    unlocked=runtime.unlocked,
+                )
+                item["tx"] = tx
+                item["status"] = "sent"
+                sent += 1
+            except Exception as exc:
+                item["status"] = f"error: {exc}"
+
+        handled.append(item)
+        if attempts >= runtime.max_per_tick:
+            break
+
+    advanced = should_advance_cursor(
+        broadcast=runtime.broadcast,
+        attempts=attempts,
+        sent=sent,
+        advance_on_dry_run=True,
+    )
+    if advanced:
+        next_block = write_keeper_cursor(state, scan_to + 1)
+        save_keeper_state(runtime.state_file, state)
+
+    return {
+        "fromBlock": scan_from,
+        "toBlock": scan_to,
+        "logs": len(logs),
+        "attempted": attempts,
+        "sent": sent,
+        "advancedCursor": advanced,
+        "nextBlock": next_block,
+    }, next_block
+
+
 @app.command()
 def main(
     l1_env_file: Path = typer.Argument(ROOT_DIR / ".env.l1.testnet"),
@@ -134,129 +243,34 @@ def main(
     if broadcast and not account and not pk and not (use_unlocked and sender):
         raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
-    if not state_file.is_file() and start_block == 0:
-        latest = _block_number(rpc_url)
-        start_block = max(0, latest - backfill_blocks)
-
-    state = _load_state(state_file, start_block)
-    next_block = int(state.get("nextBlock", start_block))
+    start_block = resolve_start_block(
+        state_file=state_file,
+        start_block=start_block,
+        backfill_blocks=backfill_blocks,
+        latest_block=lambda: _block_number(rpc_url),
+    )
+    state = load_keeper_state(state_file, start_block)
+    next_block = read_keeper_cursor(state, start_block)
+    runtime = L1KeeperRuntime(
+        rpc_url=rpc_url,
+        logs_url=logs_url,
+        messenger_addr=messenger_addr,
+        vault_addr=vault_addr,
+        state_file=state_file,
+        max_per_tick=max_per_tick,
+        broadcast=broadcast,
+        account=account,
+        private_key=pk,
+        sender=sender,
+        unlocked=use_unlocked,
+    )
 
     handled: list[dict[str, Any]] = []
 
     def tick() -> dict[str, Any]:
         nonlocal next_block
-        latest = _block_number(rpc_url)
-        if latest < next_block:
-            return {"fromBlock": next_block, "toBlock": latest, "logs": 0, "attempted": 0, "sent": 0}
-
-        scan_from = next_block
-        logs = _get_logs(logs_url, messenger_addr, scan_from, latest)
-
-        # Build latest unconsumed guid per action for each loan from scanned logs.
-        by_loan: dict[int, dict[int, str]] = {}
-        for log in logs:
-            topics = log.get("topics", [])
-            if len(topics) < 3:
-                continue
-            guid = topics[1]
-            loan_id = int(topics[2], 16)
-            data = log.get("data", "0x")
-            action = int(data, 16) if data not in {"0x", ""} else -1
-            if action not in {ACTION_DEPOSIT_CONFIRMED, ACTION_TRADE_CONFIRMED}:
-                continue
-            if _guid_consumed(rpc_url, vault_addr, guid):
-                continue
-            by_loan.setdefault(loan_id, {})[action] = guid
-
-        attempts = 0
-        sent = 0
-
-        for loan_id in sorted(by_loan.keys()):
-            pair = by_loan[loan_id]
-            deposit_guid = pair.get(ACTION_DEPOSIT_CONFIRMED)
-            trade_guid = pair.get(ACTION_TRADE_CONFIRMED)
-
-            has_pending = _has_pending_deposit(rpc_url, vault_addr, loan_id)
-            has_mandate = _has_mandate(rpc_url, vault_addr, loan_id)
-
-            if not deposit_guid or not trade_guid:
-                # Not processable yet; keep waiting for the pair.
-                handled.append(
-                    {
-                        "loanId": str(loan_id),
-                        "status": "waiting-pair",
-                        "depositGuid": deposit_guid,
-                        "tradeGuid": trade_guid,
-                        "hasPendingDeposit": has_pending,
-                        "hasMandate": has_mandate,
-                    }
-                )
-                continue
-
-            if not has_pending or not has_mandate:
-                handled.append(
-                    {
-                        "loanId": str(loan_id),
-                        "status": "blocked-state",
-                        "depositGuid": deposit_guid,
-                        "tradeGuid": trade_guid,
-                        "hasPendingDeposit": has_pending,
-                        "hasMandate": has_mandate,
-                    }
-                )
-                continue
-
-            attempts += 1
-            item = {
-                "loanId": str(loan_id),
-                "action": "finalizeLoan",
-                "depositGuid": deposit_guid,
-                "tradeGuid": trade_guid,
-                "tx": None,
-                "status": "dry-run",
-            }
-
-            if broadcast:
-                try:
-                    tx = cast_send(
-                        rpc_url,
-                        account or None,
-                        vault_addr,
-                        "finalizeLoan(uint256,bytes32,bytes32)",
-                        str(loan_id),
-                        deposit_guid,
-                        trade_guid,
-                        private_key=pk or None,
-                        from_addr=sender or None,
-                        unlocked=use_unlocked,
-                    )
-                    item["tx"] = tx
-                    item["status"] = "sent"
-                    sent += 1
-                except Exception as exc:
-                    item["status"] = f"error: {exc}"
-
-            handled.append(item)
-            if attempts >= max_per_tick:
-                break
-
-        # Advance cursor only on safe successful broadcast or always on dry-run.
-        advanced = False
-        if not broadcast or attempts == sent:
-            next_block = latest + 1
-            state["nextBlock"] = next_block
-            _save_state(state_file, state)
-            advanced = True
-
-        return {
-            "fromBlock": scan_from,
-            "toBlock": latest,
-            "logs": len(logs),
-            "attempted": attempts,
-            "sent": sent,
-            "advancedCursor": advanced,
-            "nextBlock": next_block,
-        }
+        result, next_block = run_keeper_tick(runtime, state=state, next_block=next_block, handled=handled)
+        return result
 
     if once:
         result = tick()
