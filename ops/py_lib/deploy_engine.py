@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import json
-import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
-from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
-from urllib.parse import urlparse
 
-from eth_account import Account
 from eth_utils import to_hex
 from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.contract import Contract
 
 from .lz import encode_lz_receive_option, is_empty_hex, is_zero_address
+from .runtime import CmdError, ROOT_DIR, is_local_rpc_url, load_json_object, read_deployment_state, require_cmd, run, write_deployment_state
+from .signers import ResolvedSigner, SignerInput, resolve_signer
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 EIP1967_ADMIN_SLOT = int.from_bytes(Web3.keccak(text="eip1967.proxy.admin"), "big") - 1
 EIP1967_IMPLEMENTATION_SLOT = int.from_bytes(Web3.keccak(text="eip1967.proxy.implementation"), "big") - 1
-ROOT_DIR = Path(__file__).resolve().parents[2]
 
 SignerRole = Literal["deployer", "proxy_admin"]
 DeployMode = Literal["auto", "fresh", "upgrade"]
@@ -55,39 +51,6 @@ def _bytes_env(env: dict[str, str], key: str) -> bytes:
     return raw.encode("utf-8")
 
 
-def _is_local_rpc_url(rpc_url: str) -> bool:
-    parsed = urlparse(rpc_url)
-    return parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"expected JSON object in {path}")
-    return data
-
-
-def read_deployment_state(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    data = _load_json(path)
-    addrs = data.get("addrs")
-    if isinstance(addrs, dict):
-        merged = dict(addrs)
-        if isinstance(data.get("meta"), dict):
-            merged["meta"] = data["meta"]
-        return merged
-    return data
-
-
-def write_deployment_state(path: Path, addrs: dict[str, Any], meta: dict[str, Any]) -> None:
-    payload = dict(addrs)
-    if meta:
-        payload["meta"] = meta
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-
 @dataclass(frozen=True)
 class Artifact:
     name: str
@@ -117,7 +80,7 @@ class ArtifactLoader:
         if not artifact_path.is_file():
             raise FileNotFoundError(f"artifact not found for {contract_name}: {artifact_path}")
 
-        raw = _load_json(artifact_path)
+        raw = load_json_object(artifact_path)
         abi = raw.get("abi")
         bytecode = raw.get("bytecode", {}).get("object")
         link_references = raw.get("bytecode", {}).get("linkReferences", {})
@@ -150,114 +113,6 @@ class ArtifactLoader:
             return "0x"
         encoded = w3.codec.encode([str(inp["type"]) for inp in inputs], list(args))
         return to_hex(encoded)
-
-
-class CmdError(RuntimeError):
-    pass
-
-
-def run(cmd: list[str], *, capture: bool = True, check: bool = True) -> str:
-    proc = subprocess.run(
-        cmd,
-        cwd=ROOT_DIR,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
-    if check and proc.returncode != 0:
-        raise CmdError(f"command failed ({proc.returncode}): {' '.join(shlex.quote(part) for part in cmd)}\n{(proc.stderr or '').strip()}")
-    return (proc.stdout or "").strip()
-
-
-def require_cmd(name: str) -> None:
-    run(["bash", "-lc", f"command -v {shlex.quote(name)} >/dev/null"])
-
-
-@dataclass
-class SignerInput:
-    account: str = ""
-    private_key: str = ""
-    from_addr: str = ""
-    unlocked: bool = False
-    password_env_keys: tuple[str, ...] = ()
-
-
-@dataclass
-class ResolvedSigner:
-    kind: Literal["private_key", "keystore", "unlocked"]
-    address: str
-    account: str = ""
-    private_key: str = ""
-    from_addr: str = ""
-    unlocked: bool = False
-    keystore_path: Path | None = None
-    password_env_keys: tuple[str, ...] = ()
-
-    def auth_summary(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "address": self.address,
-            "account": self.account or None,
-            "unlocked": self.unlocked,
-            "from": self.from_addr or None,
-        }
-
-    def _resolve_password(self, prompt_label: str) -> str:
-        for key in self.password_env_keys:
-            value = os.environ.get(key, "")
-            if value:
-                return value
-        if not os.isatty(0):
-            joined = ", ".join(self.password_env_keys) or "<no password env configured>"
-            raise ValueError(
-                f"missing password for Foundry account {self.account}; "
-                f"set one of [{joined}] or run in an interactive terminal"
-            )
-        return getpass(f"Password for {prompt_label}: ")
-
-    def private_key_hex(self, prompt_label: str) -> str:
-        if self.kind == "private_key":
-            return self.private_key
-        if self.kind == "keystore":
-            if self.keystore_path is None:
-                raise ValueError(f"missing keystore path for {self.account}")
-            payload = json.loads(self.keystore_path.read_text(encoding="utf-8"))
-            password = self._resolve_password(prompt_label)
-            secret = Account.decrypt(payload, password)
-            return HexBytes(secret).hex()
-        raise ValueError("unlocked signers do not expose a private key")
-
-
-def resolve_signer(role: str, cfg: SignerInput) -> ResolvedSigner | None:
-    if cfg.private_key:
-        addr = Account.from_key(cfg.private_key).address
-        return ResolvedSigner(kind="private_key", address=_normalize_addr(addr), private_key=cfg.private_key)
-    if cfg.account:
-        keystore = Path.home() / ".foundry" / "keystores" / cfg.account
-        if not keystore.is_file():
-            raise FileNotFoundError(f"Foundry keystore not found for {cfg.account}: {keystore}")
-        payload = _load_json(keystore)
-        raw_addr = payload.get("address")
-        if not isinstance(raw_addr, str) or not raw_addr:
-            raise ValueError(f"keystore {keystore} missing address")
-        if not raw_addr.startswith("0x"):
-            raw_addr = f"0x{raw_addr}"
-        return ResolvedSigner(
-            kind="keystore",
-            address=_normalize_addr(raw_addr),
-            account=cfg.account,
-            keystore_path=keystore,
-            password_env_keys=cfg.password_env_keys,
-        )
-    if cfg.unlocked and cfg.from_addr:
-        return ResolvedSigner(
-            kind="unlocked",
-            address=_normalize_addr(cfg.from_addr),
-            from_addr=_normalize_addr(cfg.from_addr),
-            unlocked=True,
-        )
-    return None
 
 
 @dataclass
@@ -541,7 +396,7 @@ class DeploymentRuntime:
             return
         pending = list(self._verify_entries)
         self._verify_entries.clear()
-        if _is_local_rpc_url(self.rpc_url):
+        if is_local_rpc_url(self.rpc_url):
             for entry in pending:
                 self.meta["verification"].append(
                     {
