@@ -115,12 +115,12 @@ class DeployEngineTests(unittest.TestCase):
                 _StubRuntime(set()),
             )
 
-    def _make_verify_runtime(self) -> DeploymentRuntime:
+    def _make_verify_runtime(self, rpc_url: str = "http://127.0.0.1:8545") -> DeploymentRuntime:
         runtime = DeploymentRuntime.__new__(DeploymentRuntime)
         runtime.verification = VerificationConfig(enabled=True, timeout_seconds=1)
         runtime.broadcast = True
         runtime.chain_id = 1
-        runtime.rpc_url = "http://127.0.0.1:8545"
+        runtime.rpc_url = rpc_url
         runtime.meta = {"verification": []}
         runtime._verify_entries = [
             VerificationEntry(
@@ -135,7 +135,7 @@ class DeployEngineTests(unittest.TestCase):
 
     @patch("ops.py_lib.deploy_engine.subprocess.run")
     def test_verify_pending_is_non_blocking_on_cloudflare_failure(self, mock_run: unittest.mock.Mock) -> None:
-        runtime = self._make_verify_runtime()
+        runtime = self._make_verify_runtime("https://sepolia.etherscan.io")
         mock_run.return_value = SimpleNamespace(
             returncode=1,
             stdout="403 Forbidden\nCloudflare Ray ID: blocked",
@@ -152,7 +152,7 @@ class DeployEngineTests(unittest.TestCase):
 
     @patch("ops.py_lib.deploy_engine.subprocess.run")
     def test_verify_pending_is_non_blocking_on_timeout(self, mock_run: unittest.mock.Mock) -> None:
-        runtime = self._make_verify_runtime()
+        runtime = self._make_verify_runtime("https://sepolia.etherscan.io")
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=["forge", "verify-contract"],
             timeout=1,
@@ -166,6 +166,19 @@ class DeployEngineTests(unittest.TestCase):
         self.assertFalse(record["ok"])
         self.assertEqual(record["status"], "timeout")
         self.assertIn("timed out", record["error"])
+
+    @patch("ops.py_lib.deploy_engine.subprocess.run")
+    def test_verify_pending_skips_local_rpc(self, mock_run: unittest.mock.Mock) -> None:
+        runtime = self._make_verify_runtime()
+
+        runtime.verify_pending()
+
+        self.assertEqual(len(runtime.meta["verification"]), 1)
+        record = runtime.meta["verification"][0]
+        self.assertFalse(record["ok"])
+        self.assertEqual(record["status"], "skipped_local_rpc")
+        self.assertTrue(record["nonBlocking"])
+        mock_run.assert_not_called()
 
 
 def json_dumps(payload: object) -> str:

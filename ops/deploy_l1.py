@@ -95,6 +95,8 @@ def main(
         l1["ADMIN"] = deployer.address
     if not l1.get("PROXY_ADMIN"):
         l1["PROXY_ADMIN"] = proxy_admin.address if proxy_admin is not None else l1["ADMIN"]
+    if proxy_admin is None and _has_nonzero_addr(l1.get("PROXY_ADMIN", "")) and l1["PROXY_ADMIN"].lower() == deployer.address.lower():
+        proxy_admin = deployer
 
     if not l1.get("OUTPUT_JSON"):
         chain_id = run(["cast", "chain-id", "--rpc-url", l1["RPC_URL"]])

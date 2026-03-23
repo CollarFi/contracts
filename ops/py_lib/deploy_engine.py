@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
+from urllib.parse import urlparse
 
 from eth_account import Account
 from eth_utils import to_hex
@@ -54,6 +55,11 @@ def _bytes_env(env: dict[str, str], key: str) -> bytes:
     return raw.encode("utf-8")
 
 
+def _is_local_rpc_url(rpc_url: str) -> bool:
+    parsed = urlparse(rpc_url)
+    return parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -89,6 +95,7 @@ class Artifact:
     contract_id: str
     abi: list[dict[str, Any]]
     bytecode: str
+    link_references: dict[str, dict[str, list[dict[str, int]]]]
 
 
 class ArtifactLoader:
@@ -113,11 +120,14 @@ class ArtifactLoader:
         raw = _load_json(artifact_path)
         abi = raw.get("abi")
         bytecode = raw.get("bytecode", {}).get("object")
+        link_references = raw.get("bytecode", {}).get("linkReferences", {})
         target = raw.get("metadata", {}).get("settings", {}).get("compilationTarget", {})
         if not isinstance(abi, list) or not isinstance(bytecode, str) or not bytecode:
             raise ValueError(f"invalid artifact shape: {artifact_path}")
         if len(target) != 1:
             raise ValueError(f"unexpected compilation target in {artifact_path}")
+        if not isinstance(link_references, dict):
+            raise ValueError(f"invalid link references in {artifact_path}")
         source_path, compiled_name = next(iter(target.items()))
         artifact = Artifact(
             name=contract_name,
@@ -125,6 +135,7 @@ class ArtifactLoader:
             contract_id=f"{source_path}:{compiled_name}",
             abi=abi,
             bytecode=bytecode if bytecode.startswith("0x") else f"0x{bytecode}",
+            link_references=link_references,
         )
         self._cache[contract_name] = artifact
         return artifact
@@ -340,6 +351,7 @@ class DeploymentRuntime:
         self.meta.setdefault("mode", None)
         self.meta.setdefault("chainId", self.chain_id)
         self.meta.setdefault("signers", {})
+        self.meta.setdefault("libraries", {})
         self.meta.setdefault("txs", [])
         self.meta.setdefault("verification", [])
         self._nonce_cache: dict[str, int] = {}
@@ -365,9 +377,47 @@ class DeploymentRuntime:
     def contract_from_artifact(self, artifact: Artifact, address: str) -> Contract:
         return self.w3.eth.contract(address=_normalize_addr(address), abi=artifact.abi)
 
-    def contract_factory(self, artifact_name: str) -> Contract:
+    def _resolve_library_address(self, role: SignerRole, library_name: str) -> str:
+        cached = self.meta["libraries"].get(library_name)
+        if isinstance(cached, str) and _nonzero_addr(cached) and self.has_code(cached):
+            return _normalize_addr(cached)
+
+        address, _ = self.deploy_contract(
+            role=role,
+            contract_name=library_name,
+            constructor_args=[],
+            label=f"deploy library {library_name}",
+        )
+        self.meta["libraries"][library_name] = address
+        self.persist()
+        return address
+
+    def _link_bytecode(self, role: SignerRole, artifact: Artifact) -> str:
+        if not artifact.link_references:
+            return artifact.bytecode
+
+        linked = artifact.bytecode.removeprefix("0x")
+        for source_refs in artifact.link_references.values():
+            if not isinstance(source_refs, dict):
+                raise ValueError(f"invalid link reference set for {artifact.name}")
+            for library_name, refs in source_refs.items():
+                address = self._resolve_library_address(role, library_name)
+                replacement = _normalize_addr(address)[2:].lower()
+                for ref in refs:
+                    start = int(ref["start"])
+                    length = int(ref["length"])
+                    if length != 20:
+                        raise ValueError(f"unsupported link reference length {length} for {library_name} in {artifact.name}")
+                    offset = start * 2
+                    linked = linked[:offset] + replacement + linked[offset + (length * 2):]
+
+        if "__$" in linked:
+            raise ValueError(f"unresolved link references remain in {artifact.name}")
+        return f"0x{linked}"
+
+    def contract_factory(self, artifact_name: str, role: SignerRole) -> Contract:
         artifact = self.artifacts.load(artifact_name)
-        return self.w3.eth.contract(abi=artifact.abi, bytecode=artifact.bytecode)
+        return self.w3.eth.contract(abi=artifact.abi, bytecode=self._link_bytecode(role, artifact))
 
     def encode_call(self, artifact_name: str, function_name: str, *args: Any) -> bytes:
         artifact = self.artifacts.load(artifact_name)
@@ -442,7 +492,7 @@ class DeploymentRuntime:
         label: str,
     ) -> tuple[str, str]:
         artifact = self.artifacts.load(contract_name)
-        factory = self.contract_factory(contract_name)
+        factory = self.contract_factory(contract_name, role)
         signer = self.require_signer(role)
         tx = factory.constructor(*constructor_args).build_transaction(self._tx_template(signer))
         tx_hash = self._sign_and_send(signer, tx, label)
@@ -491,6 +541,21 @@ class DeploymentRuntime:
             return
         pending = list(self._verify_entries)
         self._verify_entries.clear()
+        if _is_local_rpc_url(self.rpc_url):
+            for entry in pending:
+                self.meta["verification"].append(
+                    {
+                        "label": entry.label,
+                        "address": entry.address,
+                        "contract": entry.contract_id,
+                        "ok": False,
+                        "status": "skipped_local_rpc",
+                        "nonBlocking": True,
+                        "error": f"verification skipped for local RPC {self.rpc_url}",
+                    }
+                )
+                self.persist()
+            return
         for entry in pending:
             cmd = [
                 "forge",
@@ -1615,13 +1680,13 @@ def run_l2_deploy(
 
     def ensure_tsa_proxy(rt: DeploymentRuntime) -> StepResult:
         impl = rt.addrs["l2TsaImplementation"]
-        loan_store = rt.addrs["l2LoanStore"]
-        option_risk = rt.addrs["l2OptionRiskVerifier"]
-        rfq_verifier = rt.addrs["l2RfqVerifier"]
-        delegate = rt.addrs["l2RfqDelegateModule"]
-        init_data = cfg.tsa_init_data or _build_l2_tsa_init_data(rt, cfg, loan_store, option_risk, rfq_verifier, delegate)
 
         if mode == "fresh":
+            loan_store = rt.addrs["l2LoanStore"]
+            option_risk = rt.addrs["l2OptionRiskVerifier"]
+            rfq_verifier = rt.addrs["l2RfqVerifier"]
+            delegate = rt.addrs["l2RfqDelegateModule"]
+            init_data = cfg.tsa_init_data or _build_l2_tsa_init_data(rt, cfg, loan_store, option_risk, rfq_verifier, delegate)
             proxy_addr, tx_hash = rt.deploy_contract(
                 role="deployer",
                 contract_name="TransparentUpgradeableProxy",
@@ -1639,6 +1704,7 @@ def run_l2_deploy(
 
         proxy_admin = rt.proxy_admin_of(cfg.tsa_proxy)
         proxy_admin_contract = rt.contract("ProxyAdmin", proxy_admin)
+        init_data = cfg.tsa_init_data
         tx_hash = rt.send_contract_tx(
             role="proxy_admin",
             contract_call=proxy_admin_contract.functions.upgradeAndCall(
