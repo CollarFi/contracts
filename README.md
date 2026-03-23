@@ -111,13 +111,20 @@ uv run python ops/deploy_l1.py --env testnet
 # L2 receiver lookup order: L2_RECEIVER env -> L2 OUTPUT_JSON -> DeployL2 broadcast run-latest artifact.
 uv run python ops/deploy_l1.py --env testnet --broadcast
 
+# Explicit upgrade path for existing proxies
+uv run python ops/deploy_l1.py --env testnet --mode upgrade --broadcast
+
 # Deploy L2 protocol contracts (receiver + loan store + TSA proxy) with verification
 # (L1_MESSENGER/L1_VAULT optional; can wire later)
 # SOCKET_TRACKER is required and must be a real socket tracker address (no mock fallback).
 # Set PROXY_ADMIN in .env.l2.<env> to keep proxy upgrade ownership separate from ADMIN.
 # DeployL2 applies sane CollarTSA defaults on fresh TSA deploys (signature/risk windows).
-# Override with TSA_* env vars.
+# Override with TSA_* env vars. Verification is best-effort and does not fail the deploy if
+# explorer requests time out or get blocked upstream (for example by Cloudflare).
 uv run python ops/deploy_l2.py --env testnet --broadcast --verify --derive-registry-profile testnet
+
+# Explicit upgrade path for existing proxies
+uv run python ops/deploy_l2.py --env testnet --mode upgrade --broadcast --verify --derive-registry-profile testnet
 
 # Wire/check L1<->L2 route via the unified route command (includes peer wiring)
 uv run python ops/ensure_lz_route.py --env testnet --broadcast

@@ -43,7 +43,8 @@ def _status_mark(ok: bool) -> str:
 
 def _print_human_report(report: dict) -> None:
     print("\n=== collar.fi fresh deployment e2e ===")
-    print(f"Reuse mode: {report.get('reuseMode', 'fresh')}")
+    print(f"Mode: {report.get('mode', 'fresh')}")
+    print(f"Two signers: {report.get('twoSigners', False)}")
     print(f"L1 fork env: {report['l1ForkEnv']}")
     print(f"L2 fork env: {report['l2ForkEnv']}")
     print(f"L1 artifacts: {report['l1OutputJson']}")
@@ -76,6 +77,8 @@ def _print_human_report(report: dict) -> None:
 
 ANVIL_PK0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_ADDR0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+ANVIL_PK1 = "0x59c6995e998f97a5a0044976f7d3e9f5a6f77f0f2c1a5a3c0d1f3a9c8e7d1b2f"
+ANVIL_ADDR1 = "0x37681465Fa451C4Ed75107691A4E9B5Ee1209445"
 
 
 def _read_addrs(path: Path) -> dict:
@@ -129,39 +132,24 @@ def _peer_bytes32(addr: str) -> str:
     return "0x" + "00" * 12 + addr.lower().removeprefix("0x")
 
 
-def _assert_reuse_addresses(reuse_mode: str, initial_l1: dict, initial_l2: dict, final_l1: dict, final_l2: dict) -> None:
-    if reuse_mode == "fresh":
-        return
-
+def _assert_upgrade_addresses(initial_l1: dict, initial_l2: dict, final_l1: dict, final_l2: dict) -> None:
     if final_l1.get("l1Vault") != initial_l1.get("l1Vault"):
-        raise RuntimeError("reuse mode changed l1Vault runtime address")
+        raise RuntimeError("upgrade mode changed l1Vault runtime address")
     if final_l2.get("l2Tsa") != initial_l2.get("l2Tsa"):
-        raise RuntimeError("reuse mode changed l2Tsa runtime address")
+        raise RuntimeError("upgrade mode changed l2Tsa runtime address")
+    if final_l1.get("l1Messenger") != initial_l1.get("l1Messenger"):
+        raise RuntimeError("upgrade mode changed l1Messenger runtime address")
+    if final_l2.get("l2Receiver") != initial_l2.get("l2Receiver"):
+        raise RuntimeError("upgrade mode changed l2Receiver runtime address")
 
     if final_l1.get("l1VaultImplementation") == initial_l1.get("l1VaultImplementation"):
-        raise RuntimeError("reuse mode did not upgrade l1Vault implementation")
+        raise RuntimeError("upgrade mode did not upgrade l1Vault implementation")
     if final_l2.get("l2TsaImplementation") == initial_l2.get("l2TsaImplementation"):
-        raise RuntimeError("reuse mode did not upgrade l2Tsa implementation")
-
-    if reuse_mode == "mixed":
-        if final_l1.get("l1Messenger") == initial_l1.get("l1Messenger"):
-            raise RuntimeError("mixed reuse should replace l1Messenger proxy")
-        if final_l2.get("l2Receiver") == initial_l2.get("l2Receiver"):
-            raise RuntimeError("mixed reuse should replace l2Receiver proxy")
-        return
-
-    if reuse_mode == "full":
-        if final_l1.get("l1Messenger") != initial_l1.get("l1Messenger"):
-            raise RuntimeError("full reuse changed l1Messenger runtime address")
-        if final_l2.get("l2Receiver") != initial_l2.get("l2Receiver"):
-            raise RuntimeError("full reuse changed l2Receiver runtime address")
-        if final_l1.get("l1MessengerImplementation") == initial_l1.get("l1MessengerImplementation"):
-            raise RuntimeError("full reuse did not upgrade l1Messenger implementation")
-        if final_l2.get("l2ReceiverImplementation") == initial_l2.get("l2ReceiverImplementation"):
-            raise RuntimeError("full reuse did not upgrade l2Receiver implementation")
-        return
-
-    raise RuntimeError(f"unsupported reuse mode: {reuse_mode}")
+        raise RuntimeError("upgrade mode did not upgrade l2Tsa implementation")
+    if final_l1.get("l1MessengerImplementation") == initial_l1.get("l1MessengerImplementation"):
+        raise RuntimeError("upgrade mode did not upgrade l1Messenger implementation")
+    if final_l2.get("l2ReceiverImplementation") == initial_l2.get("l2ReceiverImplementation"):
+        raise RuntimeError("upgrade mode did not upgrade l2Receiver implementation")
 
 
 def _grant_role_if_needed(rpc: str, contract: str, role: str, account: str, admin: str) -> None:
@@ -269,16 +257,17 @@ def main(
     anvil_ready_timeout_s: int = typer.Option(30, help="Timeout waiting for fork RPC readiness"),
     anvil_ready_poll_s: float = typer.Option(0.5, help="Polling interval while waiting for fork RPC"),
     keep_anvil: bool = typer.Option(False, help="Keep anvil processes running"),
-    reuse_mode: str = typer.Option("fresh", help="Deployment mode: fresh|mixed|full"),
+    mode: str = typer.Option("fresh", help="Deployment mode: fresh|upgrade"),
+    two_signers: bool = typer.Option(False, help="Use a dedicated proxy-admin signer for deploy/upgrade runs"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON report"),
 ) -> None:
-    if reuse_mode not in {"fresh", "mixed", "full"}:
-        raise ValueError("reuse_mode must be one of: fresh, mixed, full")
+    if mode not in {"fresh", "upgrade"}:
+        raise ValueError("mode must be one of: fresh, upgrade")
 
     l1e = load_env(l1_env)
     l2e = load_env(l2_env)
-    l1e["PROXY_ADMIN"] = ANVIL_ADDR0
-    l2e["PROXY_ADMIN"] = ANVIL_ADDR0
+    l1e["PROXY_ADMIN"] = ANVIL_ADDR1 if two_signers else ANVIL_ADDR0
+    l2e["PROXY_ADMIN"] = ANVIL_ADDR1 if two_signers else ANVIL_ADDR0
 
     typer.echo("[e2e] ▶ spawn_anvil_l1")
     p1 = _spawn_anvil(l1e["RPC_URL"], l1_port, l1_chain_id)
@@ -296,6 +285,10 @@ def main(
     typer.echo("[e2e] ▶ wait_l2_rpc_ready")
     _wait_for_chain_id(l2_rpc, l2_chain_id, anvil_ready_timeout_s, anvil_ready_poll_s)
     typer.echo("[e2e] ✓ wait_l2_rpc_ready")
+
+    if two_signers:
+        run(["cast", "send", ANVIL_ADDR1, "--value", "10ether", "--rpc-url", l1_rpc, "--private-key", ANVIL_PK0])
+        run(["cast", "send", ANVIL_ADDR1, "--value", "10ether", "--rpc-url", l2_rpc, "--private-key", ANVIL_PK0])
 
     tmpdir = Path(tempfile.mkdtemp(prefix="collar-e2e-"))
     l1_fork_env = tmpdir / "l1.fork.env"
@@ -347,13 +340,20 @@ def main(
             sys.executable,
             str(ROOT_DIR / "ops/deploy_l2.py"),
             str(l2_fork_env),
+            "--mode",
+            "fresh",
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
             "--derive-registry-profile",
             derive_registry_profile,
             "--json",
-        ],
+        ]
+        + (
+            ["--proxy-admin-private-key", ANVIL_PK1]
+            if two_signers
+            else []
+        ),
     )
 
     # Deploy fresh L1 wired to the new L2.
@@ -388,11 +388,18 @@ def main(
             str(l1_fork_env),
             "--l2-env-file",
             str(l2_fork_env),
+            "--mode",
+            "fresh",
             "--broadcast",
             "--private-key",
             ANVIL_PK0,
             "--json",
-        ],
+        ]
+        + (
+            ["--proxy-admin-private-key", ANVIL_PK1]
+            if two_signers
+            else []
+        ),
         attempts=2,
         timeout_s=480,
         sleep_s=3,
@@ -447,32 +454,39 @@ def main(
         },
     )
 
-    if reuse_mode != "fresh":
+    if mode == "upgrade":
         l2_reuse_updates = {
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l2_out.relative_to(ROOT_DIR)),
             "TSA_PROXY": l2a.get("l2Tsa", ""),
+            "L2_RECEIVER": l2a.get("l2Receiver", ""),
             "LOAN_STORE": l2a.get("l2LoanStore", ""),
             "L1_VAULT": l1a.get("l1Vault", ""),
             "L1_MESSENGER": l1a.get("l1Messenger", ""),
             "L1_EID": l1_eid,
             "L2_SOCKET_ADAPTER_MODE": l2e.get("L2_SOCKET_ADAPTER_MODE", "compat"),
-            "L2_RECEIVER": l2a.get("l2Receiver", "") if reuse_mode == "full" else "",
         }
         _write_env(l2e, l2_fork_env, l2_rpc, l2_reuse_updates)
         _run_cmd(
-            f"deploy_l2_{reuse_mode}_reuse",
+            "deploy_l2_upgrade",
             [
                 sys.executable,
                 str(ROOT_DIR / "ops/deploy_l2.py"),
                 str(l2_fork_env),
+                "--mode",
+                "upgrade",
                 "--broadcast",
                 "--private-key",
                 ANVIL_PK0,
                 "--derive-registry-profile",
                 derive_registry_profile,
                 "--json",
-            ],
+            ]
+            + (
+                ["--proxy-admin-private-key", ANVIL_PK1]
+                if two_signers
+                else []
+            ),
         )
 
         l2a = _read_addrs(l2_out)
@@ -481,7 +495,7 @@ def main(
             "ACCOUNT": "CDPDeployer",
             "OUTPUT_JSON": str(l1_out.relative_to(ROOT_DIR)),
             "L1_VAULT": l1a.get("l1Vault", ""),
-            "L1_MESSENGER": l1a.get("l1Messenger", "") if reuse_mode == "full" else "",
+            "L1_MESSENGER": l1a.get("l1Messenger", ""),
             "L2_RECIPIENT": "",
         }
         if l1_usdc_asset:
@@ -501,25 +515,32 @@ def main(
 
         _write_env(l1e, l1_fork_env, l1_rpc, l1_reuse_updates)
         _run_cmd_with_retry(
-            f"deploy_l1_{reuse_mode}_reuse",
+            "deploy_l1_upgrade",
             [
                 sys.executable,
                 str(ROOT_DIR / "ops/deploy_l1.py"),
                 str(l1_fork_env),
                 "--l2-env-file",
                 str(l2_fork_env),
+                "--mode",
+                "upgrade",
                 "--broadcast",
                 "--private-key",
                 ANVIL_PK0,
                 "--json",
-            ],
+            ]
+            + (
+                ["--proxy-admin-private-key", ANVIL_PK1]
+                if two_signers
+                else []
+            ),
             attempts=2,
             timeout_s=480,
             sleep_s=3,
         )
 
         l1a = _read_addrs(l1_out)
-        _assert_reuse_addresses(reuse_mode, initial_l1a, initial_l2a, l1a, l2a)
+        _assert_upgrade_addresses(initial_l1a, initial_l2a, l1a, l2a)
 
         _write_env(
             l1e,
@@ -713,7 +734,8 @@ def main(
     )
 
     report = {
-        "reuseMode": reuse_mode,
+        "mode": mode,
+        "twoSigners": two_signers,
         "tmpDir": str(tmpdir),
         "l1ForkEnv": str(l1_fork_env),
         "l2ForkEnv": str(l2_fork_env),

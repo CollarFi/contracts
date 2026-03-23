@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from lz_harness.common import cast_call, load_env, must
-from py_lib.deployments import read_addr_from_output, receiver_from_broadcast
 
 
 def resolve_l2_receiver(l2_env: dict[str, str]) -> str:
@@ -24,7 +23,7 @@ def resolve_l2_receiver(l2_env: dict[str, str]) -> str:
             if addrs.get("l2Receiver"):
                 return str(addrs["l2Receiver"])
 
-    return receiver_from_broadcast(must(l2_env, "RPC_URL"))
+    raise ValueError("could not resolve L2 receiver; set L2_RECEIVER or ensure OUTPUT_JSON points to a deployment file")
 
 
 def _resolve_tsa_from_receiver(l2_env_file: Path) -> tuple[dict[str, str], str, str]:
@@ -51,8 +50,6 @@ def resolve_l2_subaccount_id_from_tsa(l2_env_file: Path) -> int:
         return int(value.split()[0], 10)
     except Exception as exc:
         raise ValueError(f"failed to parse TSA subAccount() output: {value}") from exc
-
-
 
 def resolve_l2_receiver_from_env_file(l2_env_file: Path) -> str:
     l2 = load_env(l2_env_file)
