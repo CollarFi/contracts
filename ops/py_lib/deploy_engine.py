@@ -15,10 +15,7 @@ from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.contract import Contract
 
-try:
-    from py_lib.lz import encode_lz_receive_option, is_empty_hex, is_zero_address
-except ModuleNotFoundError:
-    from ops.py_lib.lz import encode_lz_receive_option, is_empty_hex, is_zero_address
+from .lz import encode_lz_receive_option, is_empty_hex, is_zero_address
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 EIP1967_ADMIN_SLOT = int.from_bytes(Web3.keccak(text="eip1967.proxy.admin"), "big") - 1
