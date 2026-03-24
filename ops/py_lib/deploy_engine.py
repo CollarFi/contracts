@@ -1182,16 +1182,32 @@ def run_l1_deploy(
 
     def execute_steps() -> list[dict[str, Any]]:
         executed: list[dict[str, Any]] = []
-        for step in steps:
+        for index, step in enumerate(steps, start=1):
             if not step.when(runtime):
                 continue
+
             plan_entry = step.to_dict()
+            # Lightweight progress logging so long-running deploys are not opaque.
+            print(
+                f"[deploy][{runtime.chain}] step {index}: "
+                f"target={step.target}, action={step.action}, signer={step.signer_role}"
+            )
+
             if not broadcast:
                 executed.append({**plan_entry, "changed": True, "dryRun": True})
+                print("  -> dry-run only (no transactions sent)")
                 continue
+
             result = step.execute(runtime)
             runtime.addrs.update(result.outputs)
             runtime.persist()
+
+            status = "changed" if result.changed else "no-op"
+            if result.tx_hash:
+                print(f"  -> {status}, txHash={result.tx_hash}")
+            else:
+                print(f"  -> {status}")
+
             executed.append({**plan_entry, "changed": result.changed, "txHash": result.tx_hash})
         return executed
 
@@ -1681,16 +1697,32 @@ def run_l2_deploy(
 
     def execute_steps() -> list[dict[str, Any]]:
         executed: list[dict[str, Any]] = []
-        for step in steps:
+        for index, step in enumerate(steps, start=1):
             if not step.when(runtime):
                 continue
+
             plan_entry = step.to_dict()
+            # Lightweight progress logging so long-running deploys are not opaque.
+            print(
+                f"[deploy][{runtime.chain}] step {index}: "
+                f"target={step.target}, action={step.action}, signer={step.signer_role}"
+            )
+
             if not broadcast:
                 executed.append({**plan_entry, "changed": True, "dryRun": True})
+                print("  -> dry-run only (no transactions sent)")
                 continue
+
             result = step.execute(runtime)
             runtime.addrs.update(result.outputs)
             runtime.persist()
+
+            status = "changed" if result.changed else "no-op"
+            if result.tx_hash:
+                print(f"  -> {status}, txHash={result.tx_hash}")
+            else:
+                print(f"  -> {status}")
+
             executed.append({**plan_entry, "changed": result.changed, "txHash": result.tx_hash})
         return executed
 
