@@ -13,11 +13,12 @@ from rich import print
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lz_harness.common import ROOT_DIR, cast_call, cast_send, load_env, must  # noqa: E402
+from lz_harness.common import ROOT_DIR, cast_call, load_env, must  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l1_l2_env_paths  # noqa: E402
 from py_lib.keeper_logs import data_int, get_message_received_logs, topic_hex, topic_int  # noqa: E402
 from py_lib.keeper_loop import resolve_scan_range, resolve_start_block, should_advance_cursor  # noqa: E402
+from py_lib.keeper_signer import KeeperSigner  # noqa: E402
 from py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor  # noqa: E402
 from py_lib.runtime import run  # noqa: E402
 
@@ -38,10 +39,7 @@ class L1KeeperRuntime:
     state_file: Path
     max_per_tick: int
     broadcast: bool
-    account: str = ""
-    private_key: str = ""
-    sender: str = ""
-    unlocked: bool = False
+    signer: KeeperSigner | None = None
 
 
 def _block_number(rpc_url: str) -> int:
@@ -166,24 +164,22 @@ def run_keeper_tick(
         }
 
         if runtime.broadcast:
-            try:
-                tx = cast_send(
-                    runtime.rpc_url,
-                    runtime.account or None,
-                    runtime.vault_addr,
-                    "finalizeLoan(uint256,bytes32,bytes32)",
-                    str(loan_id),
-                    deposit_guid,
-                    trade_guid,
-                    private_key=runtime.private_key or None,
-                    from_addr=runtime.sender or None,
-                    unlocked=runtime.unlocked,
-                )
-                item["tx"] = tx
-                item["status"] = "sent"
-                sent += 1
-            except Exception as exc:
-                item["status"] = f"error: {exc}"
+            if runtime.signer is None:
+                item["status"] = "error: missing signer for broadcast mode"
+            else:
+                try:
+                    tx_hash = runtime.signer.send_contract_tx(
+                        contract_name="CollarVault",
+                        address=runtime.vault_addr,
+                        fn_name="finalizeLoan",
+                        args=[int(loan_id), deposit_guid, trade_guid],
+                        label="L1 keeper finalizeLoan",
+                    )
+                    item["tx"] = tx_hash
+                    item["status"] = "sent"
+                    sent += 1
+                except Exception as exc:
+                    item["status"] = f"error: {exc}"
 
         handled.append(item)
         if attempts >= runtime.max_per_tick:
@@ -240,8 +236,18 @@ def main(
     use_unlocked = unlocked or (str(env.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
     messenger_addr = messenger or resolve_addr(env, "L1_MESSENGER", "l1Messenger", "l1")
     vault_addr = vault or resolve_addr(env, "L1_VAULT", "l1Vault", "l1")
-    if broadcast and not account and not pk and not (use_unlocked and sender):
-        raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
+
+    keeper_signer: KeeperSigner | None = None
+    if broadcast:
+        keeper_signer = KeeperSigner.from_env(
+            rpc_url=rpc_url,
+            account=account,
+            private_key=pk,
+            from_addr=sender,
+            unlocked=use_unlocked,
+        )
+        if keeper_signer is None:
+            raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
     start_block = resolve_start_block(
         state_file=state_file,
@@ -259,10 +265,7 @@ def main(
         state_file=state_file,
         max_per_tick=max_per_tick,
         broadcast=broadcast,
-        account=account,
-        private_key=pk,
-        sender=sender,
-        unlocked=use_unlocked,
+        signer=keeper_signer,
     )
 
     handled: list[dict[str, Any]] = []
