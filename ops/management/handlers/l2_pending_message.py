@@ -73,6 +73,7 @@ def _submit_action_to_local_atomic(
     matching_addr_value: str,
     action: dict[str, Any],
     signer_sig: str,
+    signer: Any,
     account: str,
     private_key: str,
     from_addr: str,
@@ -82,26 +83,31 @@ def _submit_action_to_local_atomic(
     _ensure_local_trade_executor(rpc_url, matching_addr_value, sender_addr)
     _ensure_local_trade_executor(rpc_url, matching_addr_value, atomic_executor_addr)
 
+    if signer is None:
+        raise RuntimeError("L2 keeper runtime missing signer for local atomic submit")
+
+    # Encode the atomicVerifyAndMatch call data and send via KeeperSigner so
+    # nonces stay consistent with other keeper txs.
     action_data = abi_encode(
         "f((uint256,uint256,address,bytes,uint256,address,address))",
         format_action_tuple(action),
     )
-    tx_out = cast_send(
-        rpc_url,
-        account or None,
-        atomic_executor_addr,
+    call_data = abi_encode(
         "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
         f"[{format_action_tuple(action)}]",
         f"[{signer_sig}]",
         action_data,
         "[(true,0x)]",
-        private_key=private_key or None,
-        from_addr=from_addr or None,
-        unlocked=unlocked,
+    )
+    tx_hash = signer.send_tx(
+        to=atomic_executor_addr,
+        data=bytes.fromhex(call_data[2:]),
+        value_wei=0,
+        label="L2 keeper localAtomic atomicVerifyAndMatch",
     )
     return {
         "mode": "localAtomic",
-        "matchingTx": extract_tx_hash(tx_out),
+        "matchingTx": tx_hash,
         "typedDataHash": str(action["typedDataHash"]),
         "subaccountId": str(action["subaccountId"]),
         "nonce": str(action["nonce"]),
@@ -208,6 +214,7 @@ def process_message_logs(
                             matching_addr_value=runtime.matching_addr,
                             action=action_data,
                             signer_sig=signer_sig,
+                            signer=runtime.signer,
                             account=runtime.account,
                             private_key=runtime.private_key,
                             from_addr=runtime.sender,
