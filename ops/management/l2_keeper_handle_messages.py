@@ -330,7 +330,9 @@ def main(
     submit_withdraw_api = broadcast and (not no_submit_withdraw_api)
 
     # Decide when we actually need a signer (txs or API signatures).
-    needs_signer = broadcast or local_atomic_submit or submit_deposit_api or submit_withdraw_api
+    # Local atomic submit only requires signing when we are broadcasting; in
+    # dry-run mode we do not send any transactions or signatures.
+    needs_signer = broadcast or submit_deposit_api or submit_withdraw_api
 
     keeper_signer: KeeperSigner | None = None
     if needs_signer:
