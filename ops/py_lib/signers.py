@@ -57,15 +57,41 @@ class ResolvedSigner:
         return getpass(f"Password for {prompt_label}: ")
 
     def private_key_hex(self, prompt_label: str) -> str:
+        """Return the signer private key as a hex string.
+
+        For keystore-backed signers, this method now caches the decrypted
+        private key in-memory on first use. This means:
+
+        - the Foundry account password is prompted for only once per
+          process (unless provided via env vars), and
+        - subsequent transactions reuse the already-decrypted key without
+          re-opening the keystore or re-prompting for the password.
+
+        The cached key is kept only in-process and is never printed or
+        included in auth summaries.
+        """
+
         if self.kind == "private_key":
+            # Raw private key was provided directly; nothing to decrypt.
             return self.private_key
+
         if self.kind == "keystore":
+            # If we've already decrypted this keystore once in this
+            # process, reuse the cached key instead of prompting again.
+            if self.private_key:
+                return self.private_key
+
             if self.keystore_path is None:
                 raise ValueError(f"missing keystore path for {self.account}")
+
             payload = json.loads(self.keystore_path.read_text(encoding="utf-8"))
             password = self._resolve_password(prompt_label)
             secret = Account.decrypt(payload, password)
-            return HexBytes(secret).hex()
+
+            # Cache the decrypted key for subsequent calls. This value is
+            # kept in-memory only and is never logged.
+            self.private_key = HexBytes(secret).hex()
+            return self.private_key
         raise ValueError("unlocked signers do not expose a private key")
 
 
