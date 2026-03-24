@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import os
 
 import typer
 from rich import print
@@ -227,11 +228,21 @@ def main(
     if not l2.get("L2_SOCKET_ADAPTER_MODE") and inferred_testnet:
         l2["L2_SOCKET_ADAPTER_MODE"] = "compat"
 
+    # Verification config comes from both CLI flags and env vars. CLI takes
+    # precedence when provided, but env allows setting sensible defaults.
     verification = VerificationConfig(
         enabled=verify,
-        verifier=verifier,
-        verifier_url=verifier_url,
-        etherscan_api_key=etherscan_api_key or l2.get("ETHERSCAN_API_KEY", ""),
+        verifier=verifier
+        or l2.get("VERIFIER", "")
+        or os.environ.get("VERIFIER", ""),
+        verifier_url=verifier_url
+        or l2.get("VERIFIER_URL", "")
+        or os.environ.get("VERIFIER_URL", ""),
+        etherscan_api_key=(
+            etherscan_api_key
+            or l2.get("ETHERSCAN_API_KEY", "")
+            or os.environ.get("ETHERSCAN_API_KEY", "")
+        ),
     )
     requested_mode = _resolve_mode(l2.get("MODE", mode))
     cfg = build_l2_config(l2, mode=requested_mode, proxy_admin_owner=l2["PROXY_ADMIN"])
