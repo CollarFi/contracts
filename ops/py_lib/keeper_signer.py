@@ -84,6 +84,21 @@ class KeeperSigner:
         self._nonce_cache += 1
         return nonce
 
+    @staticmethod
+    def _signed_raw_tx(signed: Any) -> bytes:
+        """Return the raw signed tx bytes across eth-account versions.
+
+        eth-account exposes `raw_transaction` on newer versions and
+        `rawTransaction` on older ones.
+        """
+
+        raw = getattr(signed, "raw_transaction", None)
+        if raw is None:
+            raw = getattr(signed, "rawTransaction", None)
+        if raw is None:
+            raise AttributeError("signed transaction has neither raw_transaction nor rawTransaction")
+        return bytes(raw)
+
     def send_tx(self, *, to: str, data: bytes, value_wei: int = 0, label: str) -> str:
         """Sign and send a raw transaction.
 
@@ -112,7 +127,7 @@ class KeeperSigner:
         else:
             pk = self._pk(f"{label} ({self.signer.account or self.address})")
             signed = self.w3.eth.account.sign_transaction(tx, pk)
-            tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+            tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
         if int(receipt["status"]) != 1:
@@ -160,7 +175,7 @@ class KeeperSigner:
         else:
             pk = self._pk(f"{label} ({self.signer.account or self.address})")
             signed = self.w3.eth.account.sign_transaction(tx, pk)
-            tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+            tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
         if int(receipt["status"]) != 1:
