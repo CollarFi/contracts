@@ -174,27 +174,15 @@ def process_message_logs(
                 pending_message = parse_pending_message(pending_raw)
 
                 # Prefer KeeperSigner (eth_account + Web3) for sending txs.
-                if getattr(runtime, "signer", None) is not None:
-                    tx_hash = runtime.signer.send_contract_tx(
-                        contract_name="CollarTSAReceiver",
-                        address=runtime.receiver_addr,
-                        fn_name="handleMessage",
-                        args=[guid],
-                        label=f"L2 keeper handleMessage {guid}",
-                    )
-                else:
-                    # Fallback to cast_send for legacy/local flows.
-                    tx = cast_send(
-                        runtime.rpc_url,
-                        runtime.account or None,
-                        runtime.receiver_addr,
-                        "handleMessage(bytes32)",
-                        guid,
-                        private_key=runtime.private_key or None,
-                        from_addr=runtime.sender or None,
-                        unlocked=runtime.unlocked,
-                    )
-                    tx_hash = extract_tx_hash(tx)
+                if getattr(runtime, "signer", None) is None:
+                    raise RuntimeError("L2 keeper runtime missing signer for handleMessage in broadcast mode")
+                tx_hash = runtime.signer.send_contract_tx(
+                    contract_name="CollarTSAReceiver",
+                    address=runtime.receiver_addr,
+                    fn_name="handleMessage",
+                    args=[guid],
+                    label=f"L2 keeper handleMessage {guid}",
+                )
                 item["tx"] = tx_hash
 
                 if action in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
@@ -228,28 +216,18 @@ def process_message_logs(
                         if action == ACTION_DEPOSIT_INTENT:
                             fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
                             fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-                            if getattr(runtime, "signer", None) is not None:
-                                ack_hash = runtime.signer.send_contract_tx(
-                                    contract_name="CollarTSAReceiver",
-                                    address=runtime.receiver_addr,
-                                    fn_name="sendDepositConfirmedAfterExecution",
-                                    args=[int(loan_id)],
-                                    value_wei=int(fee_with_buffer),
-                                    label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
+                            if getattr(runtime, "signer", None) is None:
+                                raise RuntimeError(
+                                    "L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode"
                                 )
-                            else:
-                                ack_tx = cast_send(
-                                    runtime.rpc_url,
-                                    runtime.account or None,
-                                    runtime.receiver_addr,
-                                    "sendDepositConfirmedAfterExecution(uint256)",
-                                    str(loan_id),
-                                    value_wei=str(fee_with_buffer),
-                                    private_key=runtime.private_key or None,
-                                    from_addr=runtime.sender or None,
-                                    unlocked=runtime.unlocked,
-                                )
-                                ack_hash = extract_tx_hash(ack_tx)
+                            ack_hash = runtime.signer.send_contract_tx(
+                                contract_name="CollarTSAReceiver",
+                                address=runtime.receiver_addr,
+                                fn_name="sendDepositConfirmedAfterExecution",
+                                args=[int(loan_id)],
+                                value_wei=int(fee_with_buffer),
+                                label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
+                            )
                             item["depositConfirmedTx"] = ack_hash
                     elif _should_submit_api(action, runtime.submit_deposit_api, runtime.submit_withdraw_api):
                         api_meta, api_attempt = submit_with_retries(
