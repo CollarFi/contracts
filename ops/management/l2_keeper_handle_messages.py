@@ -27,11 +27,12 @@ from management.handlers.l2_rfq_trade import (  # noqa: E402
     process_rfq_trade_queue,
 )
 from management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST  # noqa: E402
-from management.l2_common import assert_tsa_signer, wallet_address  # noqa: E402
+from management.l2_common import assert_tsa_signer  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l2_env_path  # noqa: E402
 from py_lib.keeper_logs import get_message_received_logs  # noqa: E402
 from py_lib.keeper_loop import resolve_scan_range, should_advance_cursor  # noqa: E402
+from py_lib.keeper_signer import KeeperSigner  # noqa: E402
 from py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor  # noqa: E402
 
 app = typer.Typer(add_completion=False)
@@ -62,6 +63,7 @@ class L2KeeperRuntime:
     api_retry_initial_delay_seconds: float
     api_retry_max_delay_seconds: float
     allowed_actions: set[int]
+    signer: KeeperSigner | None = None
     account: str = ""
     private_key: str = ""
     sender: str = ""
@@ -311,8 +313,6 @@ def main(
     sender = from_addr or env.get("FROM", "")
     use_unlocked = unlocked or (str(env.get("UNLOCKED", "")).lower() in {"1", "true", "yes"})
     receiver_addr = receiver or resolve_addr(env, "L2_RECEIVER", "l2Receiver", "l2")
-    if broadcast and not account and not pk and not (use_unlocked and sender):
-        raise ValueError("missing auth for --broadcast: provide ACCOUNT, or --private-key, or --unlocked --from")
 
     tsa_addr = cast_call(rpc_url, receiver_addr, "tsa()(address)").strip()
     matching_addr_value = matching_addr(rpc_url, tsa_addr, env.get("MATCHING", "").strip())
@@ -329,16 +329,27 @@ def main(
     submit_deposit_api = broadcast and (not no_submit_deposit_api)
     submit_withdraw_api = broadcast and (not no_submit_withdraw_api)
 
-    if (submit_deposit_api or submit_withdraw_api) and not (account or pk):
-        raise ValueError(
-            "API submission requires ACCOUNT or --private-key "
-            "(or disable via --no-submit-deposit-api/--no-submit-withdraw-api)"
+    # Decide when we actually need a signer (txs or API signatures).
+    needs_signer = broadcast or local_atomic_submit or submit_deposit_api or submit_withdraw_api
+
+    keeper_signer: KeeperSigner | None = None
+    if needs_signer:
+        keeper_signer = KeeperSigner.from_env(
+            rpc_url=rpc_url,
+            account=account,
+            private_key=pk,
+            from_addr=sender,
+            unlocked=use_unlocked,
         )
-    if broadcast and local_atomic_submit and not (account or pk):
-        raise ValueError("local atomic submission requires ACCOUNT or --private-key for typed-data signing")
+        if keeper_signer is None:
+            raise ValueError(
+                "missing auth: provide ACCOUNT, or --private-key, or --unlocked --from when "
+                "broadcasting, using local atomic submit, or submitting via Derive API"
+            )
+
     if (submit_deposit_api or submit_withdraw_api) and not local_atomic_submit:
-        signer_wallet = wallet_address(account=account, private_key=pk)
-        assert_tsa_signer(rpc_url, tsa_addr, signer_wallet)
+        # Ensure the configured signer is a TSA signer for Derive API flows.
+        assert_tsa_signer(rpc_url, tsa_addr, keeper_signer.address if keeper_signer else "")
     if broadcast and local_atomic_submit:
         deposit_module, withdrawal_module, wrapped_deposit_asset = _resolve_local_atomic_config(
             rpc_url,
@@ -394,6 +405,7 @@ def main(
         api_retry_initial_delay_seconds=api_retry_initial_delay_seconds,
         api_retry_max_delay_seconds=api_retry_max_delay_seconds,
         allowed_actions=allowed_actions,
+        signer=keeper_signer,
         account=account,
         private_key=pk,
         sender=sender,
