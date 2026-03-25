@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 
 import {LZPingPong} from "../src/bridge/harness/LZPingPong.sol";
-import {LZEndpointV2Mock} from "../src/mocks/LZEndpointV2Mock.sol";
+import {LZEndpointV2Mock} from "../test/mocks/LZEndpointV2Mock.sol";
 
 /// @dev Deploy minimal LZ harness endpoint on one chain.
 ///
