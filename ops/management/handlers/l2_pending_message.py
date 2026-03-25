@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from lz_harness.common import cast_call, cast_send  # noqa: E402
+from lz_harness.common import cast_call, cast_send, run  # noqa: E402
 from management.l2_common import extract_tx_hash, wallet_address, wallet_sign  # noqa: E402
 from management.handlers.l2_derive_client import submit_api_for_pending_message, submit_with_retries  # noqa: E402
 from management.handlers.l2_tsa_actions import (  # noqa: E402
@@ -92,12 +92,16 @@ def _submit_action_to_local_atomic(
         "f((uint256,uint256,address,bytes,uint256,address,address))",
         format_action_tuple(action),
     )
-    call_data = abi_encode(
+    call_data = run(
+        [
+            "cast",
+            "calldata",
         "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
-        f"[{format_action_tuple(action)}]",
-        f"[{signer_sig}]",
-        action_data,
-        "[(true,0x)]",
+            f"[{format_action_tuple(action)}]",
+            f"[{signer_sig}]",
+            action_data,
+            "[(true,0x)]",
+        ]
     )
     tx_hash = signer.send_tx(
         to=atomic_executor_addr,
