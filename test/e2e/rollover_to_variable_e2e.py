@@ -147,8 +147,8 @@ def main(
     _ensure_liquidity_vault_role(l1_rpc, vault)
     _ensure_keeper_role(l1_rpc, vault)
 
-    weth_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(WETH_PRICE_USD))
-    usdc_oracle = _deploy_contract(l1_rpc, "src/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(USDC_PRICE_USD))
+    weth_oracle = _deploy_contract(l1_rpc, "test/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(WETH_PRICE_USD))
+    usdc_oracle = _deploy_contract(l1_rpc, "test/mocks/FixedPriceOracleMock.sol:FixedPriceOracleMock", str(USDC_PRICE_USD))
     collateral_vault = _create_evault(l1_rpc, factory, implementation, sepolia_weth, weth_oracle, sepolia_usdc)
     debt_vault = _create_evault(l1_rpc, factory, implementation, sepolia_usdc, usdc_oracle, sepolia_usdc)
     _configure_vault_basics(l1_rpc, collateral_vault)

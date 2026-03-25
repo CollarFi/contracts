@@ -180,7 +180,7 @@ def _deploy_socket_mock(l2_rpc: str) -> str:
     if l2_rpc in SOCKET_MOCK_CACHE:
         return SOCKET_MOCK_CACHE[l2_rpc]
     deployed = json.loads(run([
-        "forge", "create", "src/mocks/SocketMessageTrackerMock.sol:SocketMessageTrackerMock",
+        "forge", "create", "test/mocks/SocketMessageTrackerMock.sol:SocketMessageTrackerMock",
         "--rpc-url", l2_rpc, "--private-key", ANVIL_PK0, "--broadcast", "--json",
     ]))["deployedTo"]
     SOCKET_MOCK_CACHE[l2_rpc] = deployed

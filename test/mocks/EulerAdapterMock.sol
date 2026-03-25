@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ILendingAdapter} from "../interfaces/ILendingAdapter.sol";
+import {ILendingAdapter} from "../../src/interfaces/ILendingAdapter.sol";
 
 /// @dev Minimal mock for local/fork dev. No real lending occurs.
 contract EulerAdapterMock is ILendingAdapter {
