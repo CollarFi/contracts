@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from ops.lz_harness.common import run
+from ops.management.handlers.l2_pending_message import _submit_action_to_local_atomic
 from ops.management.handlers.l2_derive_client import submit_with_retries
 from ops.management.handlers.l2_rfq_trade import enqueue_rfq_trades_from_file, ensure_rfq_trade_state
 from ops.management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, parse_pending_message
@@ -140,6 +142,57 @@ class RetryHelperTests(unittest.TestCase):
         self.assertEqual(used_attempts, 3)
         self.assertEqual(attempts["count"], 3)
         self.assertEqual(sleep_mock.call_count, 2)
+
+
+class LocalAtomicSubmitTests(unittest.TestCase):
+    def test_submit_action_to_local_atomic_uses_full_calldata(self) -> None:
+        action = {
+            "subaccountId": 11,
+            "nonce": 22,
+            "module": "0x1111111111111111111111111111111111111111",
+            "data": "0x1234",
+            "expiry": 33,
+            "owner": "0x2222222222222222222222222222222222222222",
+            "signer": "0x3333333333333333333333333333333333333333",
+            "typedDataHash": "0x" + ("44" * 32),
+        }
+
+        class DummySigner:
+            def __init__(self) -> None:
+                self.tx: dict[str, object] | None = None
+
+            def send_tx(self, *, to: str, data: bytes, value_wei: int = 0, label: str) -> str:
+                self.tx = {"to": to, "data": data, "value_wei": value_wei, "label": label}
+                return "0xtxhash"
+
+        signer = DummySigner()
+        selector = bytes.fromhex(
+            run(
+                [
+                    "cast",
+                    "sig",
+                    "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
+                ]
+            )[2:]
+        )
+
+        with patch("ops.management.handlers.l2_pending_message._ensure_local_trade_executor"):
+            result = _submit_action_to_local_atomic(
+                rpc_url="http://127.0.0.1:8545",
+                atomic_executor_addr="0x4444444444444444444444444444444444444444",
+                matching_addr_value="0x5555555555555555555555555555555555555555",
+                action=action,
+                signer_sig="0xdeadbeef",
+                signer=signer,
+                account="",
+                private_key="",
+                from_addr="0x6666666666666666666666666666666666666666",
+                unlocked=False,
+            )
+
+        assert signer.tx is not None
+        self.assertTrue(bytes(signer.tx["data"]).startswith(selector))
+        self.assertEqual(result["matchingTx"], "0xtxhash")
 
 
 if __name__ == "__main__":

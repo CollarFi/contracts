@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from lz_harness.common import cast_call, cast_send  # noqa: E402
+from lz_harness.common import cast_call, cast_send, run  # noqa: E402
 from management.l2_common import extract_tx_hash, wallet_address, wallet_sign  # noqa: E402
 from management.handlers.l2_derive_client import submit_api_for_pending_message, submit_with_retries  # noqa: E402
 from management.handlers.l2_tsa_actions import (  # noqa: E402
@@ -73,6 +73,7 @@ def _submit_action_to_local_atomic(
     matching_addr_value: str,
     action: dict[str, Any],
     signer_sig: str,
+    signer: Any,
     account: str,
     private_key: str,
     from_addr: str,
@@ -82,26 +83,35 @@ def _submit_action_to_local_atomic(
     _ensure_local_trade_executor(rpc_url, matching_addr_value, sender_addr)
     _ensure_local_trade_executor(rpc_url, matching_addr_value, atomic_executor_addr)
 
+    if signer is None:
+        raise RuntimeError("L2 keeper runtime missing signer for local atomic submit")
+
+    # Encode the atomicVerifyAndMatch call data and send via KeeperSigner so
+    # nonces stay consistent with other keeper txs.
     action_data = abi_encode(
         "f((uint256,uint256,address,bytes,uint256,address,address))",
         format_action_tuple(action),
     )
-    tx_out = cast_send(
-        rpc_url,
-        account or None,
-        atomic_executor_addr,
+    call_data = run(
+        [
+            "cast",
+            "calldata",
         "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
-        f"[{format_action_tuple(action)}]",
-        f"[{signer_sig}]",
-        action_data,
-        "[(true,0x)]",
-        private_key=private_key or None,
-        from_addr=from_addr or None,
-        unlocked=unlocked,
+            f"[{format_action_tuple(action)}]",
+            f"[{signer_sig}]",
+            action_data,
+            "[(true,0x)]",
+        ]
+    )
+    tx_hash = signer.send_tx(
+        to=atomic_executor_addr,
+        data=bytes.fromhex(call_data[2:]),
+        value_wei=0,
+        label="L2 keeper localAtomic atomicVerifyAndMatch",
     )
     return {
         "mode": "localAtomic",
-        "matchingTx": extract_tx_hash(tx_out),
+        "matchingTx": tx_hash,
         "typedDataHash": str(action["typedDataHash"]),
         "subaccountId": str(action["subaccountId"]),
         "nonce": str(action["nonce"]),
@@ -173,17 +183,17 @@ def process_message_logs(
                     raise RuntimeError("failed to read pending message")
                 pending_message = parse_pending_message(pending_raw)
 
-                tx = cast_send(
-                    runtime.rpc_url,
-                    runtime.account or None,
-                    runtime.receiver_addr,
-                    "handleMessage(bytes32)",
-                    guid,
-                    private_key=runtime.private_key or None,
-                    from_addr=runtime.sender or None,
-                    unlocked=runtime.unlocked,
+                # Prefer KeeperSigner (eth_account + Web3) for sending txs.
+                if getattr(runtime, "signer", None) is None:
+                    raise RuntimeError("L2 keeper runtime missing signer for handleMessage in broadcast mode")
+                tx_hash = runtime.signer.send_contract_tx(
+                    contract_name="CollarTSAReceiver",
+                    address=runtime.receiver_addr,
+                    fn_name="handleMessage",
+                    args=[guid],
+                    label=f"L2 keeper handleMessage {guid}",
                 )
-                item["tx"] = extract_tx_hash(tx)
+                item["tx"] = tx_hash
 
                 if action in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
                     if runtime.local_atomic_submit:
@@ -208,6 +218,7 @@ def process_message_logs(
                             matching_addr_value=runtime.matching_addr,
                             action=action_data,
                             signer_sig=signer_sig,
+                            signer=runtime.signer,
                             account=runtime.account,
                             private_key=runtime.private_key,
                             from_addr=runtime.sender,
@@ -216,18 +227,19 @@ def process_message_logs(
                         if action == ACTION_DEPOSIT_INTENT:
                             fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
                             fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-                            ack_tx = cast_send(
-                                runtime.rpc_url,
-                                runtime.account or None,
-                                runtime.receiver_addr,
-                                "sendDepositConfirmedAfterExecution(uint256)",
-                                str(loan_id),
-                                value_wei=str(fee_with_buffer),
-                                private_key=runtime.private_key or None,
-                                from_addr=runtime.sender or None,
-                                unlocked=runtime.unlocked,
+                            if getattr(runtime, "signer", None) is None:
+                                raise RuntimeError(
+                                    "L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode"
+                                )
+                            ack_hash = runtime.signer.send_contract_tx(
+                                contract_name="CollarTSAReceiver",
+                                address=runtime.receiver_addr,
+                                fn_name="sendDepositConfirmedAfterExecution",
+                                args=[int(loan_id)],
+                                value_wei=int(fee_with_buffer),
+                                label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
                             )
-                            item["depositConfirmedTx"] = extract_tx_hash(ack_tx)
+                            item["depositConfirmedTx"] = ack_hash
                     elif _should_submit_api(action, runtime.submit_deposit_api, runtime.submit_withdraw_api):
                         api_meta, api_attempt = submit_with_retries(
                             lambda: submit_api_for_pending_message(
