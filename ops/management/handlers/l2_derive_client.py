@@ -175,6 +175,7 @@ def submit_api_for_pending_message(
             body={
                 "amount": debug_payload["amount"],
                 "asset_name": debug_payload["asset_name"],
+                "is_atomic_signing": True,
                 "subaccount_id": debug_payload["subaccount_id"],
                 "nonce": nonce,
                 "signature_expiry_sec": expiry,
@@ -209,6 +210,7 @@ def submit_api_for_pending_message(
             body={
                 "amount": debug_payload["amount"],
                 "asset_name": debug_payload["asset_name"],
+                "is_atomic_signing": True,
                 "subaccount_id": debug_payload["subaccount_id"],
                 "nonce": nonce,
                 "signature_expiry_sec": expiry,
