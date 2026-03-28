@@ -201,7 +201,34 @@ def format_action_tuple(action: dict[str, Any]) -> str:
     )
 
 
-def build_pending_action(
+def resolve_tsa_action_config(rpc_url: str, tsa_addr: str) -> dict[str, str]:
+    collar_raw = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getCollarTSAAddresses()(address,address,address,address,address,address)",
+    )
+    collar_lines = [line.strip() for line in collar_raw.strip().splitlines() if line.strip()]
+    if len(collar_lines) != 6:
+        raise RuntimeError(f"failed to parse getCollarTSAAddresses() from {tsa_addr}: {collar_raw}")
+
+    base_raw = cast_call(
+        rpc_url,
+        tsa_addr,
+        "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+    )
+    base_lines = [line.strip() for line in base_raw.strip().splitlines() if line.strip()]
+    if len(base_lines) != 7:
+        raise RuntimeError(f"failed to parse getBaseTSAAddresses() from {tsa_addr}: {base_raw}")
+
+    return {
+        "depositModule": collar_lines[1],
+        "withdrawalModule": collar_lines[2],
+        "wrappedDepositAsset": base_lines[2],
+        "manager": base_lines[5],
+    }
+
+
+def build_action(
     *,
     action_type: int,
     pending_message: dict[str, Any],
@@ -209,15 +236,17 @@ def build_pending_action(
     deposit_module: str,
     withdrawal_module: str,
     wrapped_deposit_asset: str,
+    manager_for_new_account: str,
     rpc_url: str,
+    nonce: int,
+    expiry: int,
 ) -> dict[str, Any]:
-    nonce, expiry = fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
     if action_type == ACTION_DEPOSIT_INTENT:
         data = abi_encode(
             "f(uint256,address,address)",
             int(pending_message["amount"]),
             wrapped_deposit_asset,
-            ZERO_ADDRESS,
+            manager_for_new_account,
         )
         module = deposit_module
     elif action_type == ACTION_RETURN_REQUEST:
@@ -232,10 +261,10 @@ def build_pending_action(
 
     action = {
         "subaccountId": int(pending_message["subaccountId"]),
-        "nonce": nonce,
+        "nonce": int(nonce),
         "module": module,
         "data": data,
-        "expiry": expiry,
+        "expiry": int(expiry),
         "owner": tsa_addr,
         "signer": tsa_addr,
     }
@@ -246,3 +275,31 @@ def build_pending_action(
         format_action_tuple(action),
     ).strip()
     return action
+
+
+def build_pending_action(
+    *,
+    action_type: int,
+    pending_message: dict[str, Any],
+    tsa_addr: str,
+    deposit_module: str,
+    withdrawal_module: str,
+    wrapped_deposit_asset: str,
+    rpc_url: str,
+) -> dict[str, Any]:
+    nonce, expiry = fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
+    manager_for_new_account = ZERO_ADDRESS
+    if action_type == ACTION_DEPOSIT_INTENT:
+        manager_for_new_account = resolve_tsa_action_config(rpc_url, tsa_addr)["manager"]
+    return build_action(
+        action_type=action_type,
+        pending_message=pending_message,
+        tsa_addr=tsa_addr,
+        deposit_module=deposit_module,
+        withdrawal_module=withdrawal_module,
+        wrapped_deposit_asset=wrapped_deposit_asset,
+        manager_for_new_account=manager_for_new_account,
+        rpc_url=rpc_url,
+        nonce=nonce,
+        expiry=expiry,
+    )

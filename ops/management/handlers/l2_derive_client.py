@@ -14,9 +14,10 @@ from management.l2_common import http_post_json, is_retryable_signature_sync_err
 from management.handlers.l2_tsa_actions import (  # noqa: E402
     ACTION_DEPOSIT_INTENT,
     ACTION_RETURN_REQUEST,
-    ZERO_ADDRESS,
+    build_action,
     fresh_action_nonce_and_expiry,
     parse_uint,
+    resolve_tsa_action_config,
 )
 
 T = TypeVar("T")
@@ -73,7 +74,74 @@ def resolve_asset_name(fallback_asset_name: str, asset_addr: str, rpc_url: str) 
     return symbol
 
 
-def _post_private_deposit(
+def build_pending_message_debug_payload(
+    *,
+    pending_message: dict[str, Any],
+    tsa_addr: str,
+    fallback_asset_name: str,
+    rpc_url: str,
+    nonce: int | None = None,
+    signature_expiry_sec: int | None = None,
+) -> dict[str, Any]:
+    resolved_nonce = nonce
+    resolved_expiry = signature_expiry_sec
+    if resolved_nonce is None or resolved_expiry is None:
+        fresh_nonce, fresh_expiry = fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
+        if resolved_nonce is None:
+            resolved_nonce = fresh_nonce
+        if resolved_expiry is None:
+            resolved_expiry = fresh_expiry
+
+    return {
+        "amount": to_decimal_str(int(pending_message["amount"]), _erc20_decimals(rpc_url, pending_message["asset"])),
+        "asset_name": resolve_asset_name(fallback_asset_name, pending_message["asset"], rpc_url),
+        "is_atomic_signing": True,
+        "nonce": int(resolved_nonce),
+        "signature_expiry_sec": int(resolved_expiry),
+        "signer": tsa_addr,
+        "subaccount_id": int(pending_message["subaccountId"]),
+    }
+
+
+def post_public_deposit_debug(*, api_url: str, body: dict[str, Any]) -> dict[str, Any]:
+    status, out = http_post_json(f"{api_url.rstrip('/')}/public/deposit_debug", body)
+    if status >= 400 or out.get("error"):
+        raise RuntimeError(f"public/deposit_debug failed ({status}): {json.dumps(out)}")
+    return out
+
+
+def post_public_withdraw_debug(*, api_url: str, body: dict[str, Any]) -> dict[str, Any]:
+    status, out = http_post_json(f"{api_url.rstrip('/')}/public/withdraw_debug", body)
+    if status >= 400 or out.get("error"):
+        raise RuntimeError(f"public/withdraw_debug failed ({status}): {json.dumps(out)}")
+    return out
+
+
+def build_private_action_body(*, debug_payload: dict[str, Any], signature: str) -> dict[str, Any]:
+    return {
+        "amount": debug_payload["amount"],
+        "asset_name": debug_payload["asset_name"],
+        "is_atomic_signing": True,
+        "subaccount_id": int(debug_payload["subaccount_id"]),
+        "nonce": int(debug_payload["nonce"]),
+        "signature_expiry_sec": int(debug_payload["signature_expiry_sec"]),
+        "signer": debug_payload["signer"],
+        "signature": signature,
+    }
+
+
+def sign_private_api_auth(
+    *,
+    account: str,
+    private_key: str,
+    timestamp_ms: str | None = None,
+) -> tuple[str, str]:
+    ts_ms = timestamp_ms or str(int(time.time() * 1000))
+    auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
+    return ts_ms, auth_sig
+
+
+def post_private_deposit(
     *,
     api_url: str,
     x_lyra_wallet: str,
@@ -95,7 +163,7 @@ def _post_private_deposit(
     return out
 
 
-def _post_private_withdraw(
+def post_private_withdraw(
     *,
     api_url: str,
     x_lyra_wallet: str,
@@ -148,39 +216,42 @@ def submit_api_for_pending_message(
     fallback_asset_name: str,
     rpc_url: str,
 ) -> dict[str, Any]:
-    nonce, expiry = fresh_action_nonce_and_expiry(rpc_url, tsa_addr, int(pending_message["loanId"]))
-    debug_payload = {
-        "amount": to_decimal_str(int(pending_message["amount"]), _erc20_decimals(rpc_url, pending_message["asset"])),
-        "asset_name": resolve_asset_name(fallback_asset_name, pending_message["asset"], rpc_url),
-        "is_atomic_signing": True,
-        "nonce": nonce,
-        "signature_expiry_sec": expiry,
-        "signer": tsa_addr,
-        "subaccount_id": int(pending_message["subaccountId"]),
-    }
+    debug_payload = build_pending_message_debug_payload(
+        pending_message=pending_message,
+        tsa_addr=tsa_addr,
+        fallback_asset_name=fallback_asset_name,
+        rpc_url=rpc_url,
+    )
+    nonce = int(debug_payload["nonce"])
+    expiry = int(debug_payload["signature_expiry_sec"])
+    action_config = resolve_tsa_action_config(rpc_url, tsa_addr)
+    local_action = build_action(
+        action_type=action_type,
+        pending_message=pending_message,
+        tsa_addr=tsa_addr,
+        deposit_module=action_config["depositModule"],
+        withdrawal_module=action_config["withdrawalModule"],
+        wrapped_deposit_asset=action_config["wrappedDepositAsset"],
+        manager_for_new_account=action_config["manager"],
+        rpc_url=rpc_url,
+        nonce=nonce,
+        expiry=expiry,
+    )
+    typed_hash = str(local_action["typedDataHash"])
 
     if action_type == ACTION_DEPOSIT_INTENT:
-        debug_status, debug_json = http_post_json(f"{api_url.rstrip('/')}/public/deposit_debug", debug_payload)
-        if debug_status >= 400 or debug_json.get("error"):
-            raise RuntimeError(f"public/deposit_debug failed ({debug_status}): {json.dumps(debug_json)}")
-        typed_hash = debug_json["result"]["typed_data_hash"]
+        debug_json = post_public_deposit_debug(api_url=api_url, body=debug_payload)
         action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
-        ts_ms = str(int(time.time() * 1000))
-        auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
-        private_resp = _post_private_deposit(
+        ts_ms, auth_sig = sign_private_api_auth(
+            account=account,
+            private_key=private_key,
+        )
+        private_resp = post_private_deposit(
             api_url=api_url,
             x_lyra_wallet=x_lyra_wallet,
             x_lyra_timestamp=ts_ms,
             x_lyra_signature=auth_sig,
-            body={
-                "amount": debug_payload["amount"],
-                "asset_name": debug_payload["asset_name"],
-                "subaccount_id": debug_payload["subaccount_id"],
-                "nonce": nonce,
-                "signature_expiry_sec": expiry,
-                "signer": tsa_addr,
-                "signature": action_sig,
-            },
+            body=build_private_action_body(debug_payload=debug_payload, signature=action_sig),
         )
         return {
             "typedDataHash": typed_hash,
@@ -194,27 +265,18 @@ def submit_api_for_pending_message(
         }
 
     if action_type == ACTION_RETURN_REQUEST:
-        debug_status, debug_json = http_post_json(f"{api_url.rstrip('/')}/public/withdraw_debug", debug_payload)
-        if debug_status >= 400 or debug_json.get("error"):
-            raise RuntimeError(f"public/withdraw_debug failed ({debug_status}): {json.dumps(debug_json)}")
-        typed_hash = debug_json["result"]["typed_data_hash"]
+        debug_json = post_public_withdraw_debug(api_url=api_url, body=debug_payload)
         action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
-        ts_ms = str(int(time.time() * 1000))
-        auth_sig = wallet_sign(ts_ms, no_hash=False, account=account, private_key=private_key)
-        private_resp = _post_private_withdraw(
+        ts_ms, auth_sig = sign_private_api_auth(
+            account=account,
+            private_key=private_key,
+        )
+        private_resp = post_private_withdraw(
             api_url=api_url,
             x_lyra_wallet=x_lyra_wallet,
             x_lyra_timestamp=ts_ms,
             x_lyra_signature=auth_sig,
-            body={
-                "amount": debug_payload["amount"],
-                "asset_name": debug_payload["asset_name"],
-                "subaccount_id": debug_payload["subaccount_id"],
-                "nonce": nonce,
-                "signature_expiry_sec": expiry,
-                "signer": tsa_addr,
-                "signature": action_sig,
-            },
+            body=build_private_action_body(debug_payload=debug_payload, signature=action_sig),
         )
         return {
             "typedDataHash": typed_hash,

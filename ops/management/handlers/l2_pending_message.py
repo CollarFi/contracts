@@ -96,7 +96,7 @@ def _submit_action_to_local_atomic(
         [
             "cast",
             "calldata",
-        "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
+            "atomicVerifyAndMatch((uint256,uint256,address,bytes,uint256,address,address)[],bytes[],bytes,(bool,bytes)[])",
             f"[{format_action_tuple(action)}]",
             f"[{signer_sig}]",
             action_data,
@@ -119,10 +119,163 @@ def _submit_action_to_local_atomic(
     }
 
 
+def _send_deposit_confirmed_after_execution(runtime: Any, *, loan_id: int, value_wei: int) -> str:
+    if getattr(runtime, "signer", None) is None:
+        raise RuntimeError("L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode")
+
+    call_data = run(
+        [
+            "cast",
+            "calldata",
+            "sendDepositConfirmedAfterExecution(uint256)",
+            str(int(loan_id)),
+        ]
+    )
+    return runtime.signer.send_tx(
+        to=runtime.receiver_addr,
+        data=bytes.fromhex(call_data[2:]),
+        value_wei=int(value_wei),
+        label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
+    )
+
+
 def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdraw_api: bool) -> bool:
     return (action_type == ACTION_DEPOSIT_INTENT and submit_deposit_api) or (
         action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
     )
+
+
+def _requires_follow_up(runtime: Any, action_type: int) -> bool:
+    if action_type not in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
+        return False
+    if runtime.local_atomic_submit:
+        return True
+    return _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api)
+
+
+def _action_already_executed(runtime: Any, *, action_type: int, loan_id: int) -> bool:
+    if action_type == ACTION_DEPOSIT_INTENT:
+        raw = cast_call(runtime.rpc_url, runtime.tsa_addr, "depositExecuted(uint256)(bool)", str(int(loan_id)), allow_fail=True)
+        return raw.strip().lower() == "true"
+    if action_type == ACTION_RETURN_REQUEST:
+        raw = cast_call(runtime.rpc_url, runtime.tsa_addr, "withdrawExecuted(uint256)(bool)", str(int(loan_id)), allow_fail=True)
+        return raw.strip().lower() == "true"
+    return False
+
+
+def _deposit_already_confirmed(runtime: Any, *, loan_id: int) -> bool:
+    raw = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "depositConfirmed(uint256)(bool)",
+        str(int(loan_id)),
+        allow_fail=True,
+    )
+    return raw.strip().lower() == "true"
+
+
+def _load_pending_message(runtime: Any, guid: str) -> tuple[str, dict[str, Any]]:
+    pending_raw = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "pendingMessages(bytes32)(uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes)",
+        guid,
+        allow_fail=True,
+    )
+    if pending_raw == "N/A":
+        raise RuntimeError("failed to read pending message")
+    return pending_raw, parse_pending_message(pending_raw)
+
+
+def _submit_follow_up(
+    runtime: Any,
+    *,
+    action_type: int,
+    loan_id: int,
+    pending_raw: str,
+    pending_message: dict[str, Any],
+) -> dict[str, Any]:
+    item_updates: dict[str, Any] = {}
+
+    if action_type not in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
+        return item_updates
+
+    if runtime.local_atomic_submit:
+        action_data = build_pending_action(
+            action_type=action_type,
+            pending_message=pending_message,
+            tsa_addr=runtime.tsa_addr,
+            deposit_module=runtime.deposit_module,
+            withdrawal_module=runtime.withdrawal_module,
+            wrapped_deposit_asset=runtime.wrapped_deposit_asset,
+            rpc_url=runtime.rpc_url,
+        )
+        signer_sig = wallet_sign(
+            str(action_data["typedDataHash"]),
+            no_hash=True,
+            account=runtime.account,
+            private_key=runtime.private_key,
+        )
+        item_updates["deriveApi"] = _submit_action_to_local_atomic(
+            rpc_url=runtime.rpc_url,
+            atomic_executor_addr=runtime.atomic_executor_addr,
+            matching_addr_value=runtime.matching_addr,
+            action=action_data,
+            signer_sig=signer_sig,
+            signer=runtime.signer,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            from_addr=runtime.sender,
+            unlocked=runtime.unlocked,
+        )
+        if action_type == ACTION_DEPOSIT_INTENT:
+            fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
+            fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
+            ack_hash = _send_deposit_confirmed_after_execution(
+                runtime,
+                loan_id=loan_id,
+                value_wei=int(fee_with_buffer),
+            )
+            item_updates["depositConfirmedTx"] = ack_hash
+        return item_updates
+
+    if _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api):
+        if _action_already_executed(runtime, action_type=action_type, loan_id=loan_id):
+            item_updates["deriveApi"] = {
+                "status": "alreadyExecutedOnchain",
+                "loanId": str(loan_id),
+            }
+            if action_type == ACTION_DEPOSIT_INTENT and not _deposit_already_confirmed(runtime, loan_id=loan_id):
+                fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
+                fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
+                ack_hash = _send_deposit_confirmed_after_execution(
+                    runtime,
+                    loan_id=loan_id,
+                    value_wei=int(fee_with_buffer),
+                )
+                item_updates["depositConfirmedTx"] = ack_hash
+            return item_updates
+
+        api_meta, api_attempt = submit_with_retries(
+            lambda: submit_api_for_pending_message(
+                action_type=action_type,
+                pending_message=pending_message,
+                tsa_addr=runtime.tsa_addr,
+                account=runtime.account,
+                private_key=runtime.private_key,
+                api_url=runtime.api_url,
+                x_lyra_wallet=runtime.derive_wallet,
+                fallback_asset_name=runtime.derive_asset_name,
+                rpc_url=runtime.rpc_url,
+            ),
+            attempts=runtime.api_retry_attempts,
+            initial_delay_seconds=runtime.api_retry_initial_delay_seconds,
+            max_delay_seconds=runtime.api_retry_max_delay_seconds,
+        )
+        item_updates["deriveApiAttempts"] = str(api_attempt)
+        item_updates["deriveApi"] = api_meta
+
+    return item_updates
 
 
 def process_message_logs(
@@ -157,7 +310,19 @@ def process_message_logs(
             allow_fail=True,
         )
         already_handled = already_handled_raw.strip().lower() == "true"
-        if already_handled:
+        follow_up_required = _requires_follow_up(runtime, action)
+        already_submitted = guid in state["apiSubmitted"]
+
+        if (
+            already_handled
+            and runtime.local_atomic_submit
+            and not already_submitted
+            and _action_already_executed(runtime, action_type=action, loan_id=loan_id)
+        ):
+            if action != ACTION_DEPOSIT_INTENT or _deposit_already_confirmed(runtime, loan_id=loan_id):
+                continue
+
+        if already_handled and not (runtime.broadcast and follow_up_required and not already_submitted):
             continue
 
         attempts += 1
@@ -172,93 +337,35 @@ def process_message_logs(
 
         if runtime.broadcast:
             try:
-                pending_raw = cast_call(
-                    runtime.rpc_url,
-                    runtime.receiver_addr,
-                    "pendingMessages(bytes32)(uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes)",
-                    guid,
-                    allow_fail=True,
-                )
-                if pending_raw == "N/A":
-                    raise RuntimeError("failed to read pending message")
-                pending_message = parse_pending_message(pending_raw)
+                pending_raw, pending_message = _load_pending_message(runtime, guid)
 
-                # Prefer KeeperSigner (eth_account + Web3) for sending txs.
-                if getattr(runtime, "signer", None) is None:
-                    raise RuntimeError("L2 keeper runtime missing signer for handleMessage in broadcast mode")
-                tx_hash = runtime.signer.send_contract_tx(
-                    contract_name="CollarTSAReceiver",
-                    address=runtime.receiver_addr,
-                    fn_name="handleMessage",
-                    args=[guid],
-                    label=f"L2 keeper handleMessage {guid}",
-                )
-                item["tx"] = tx_hash
+                if already_handled and runtime.local_atomic_submit:
+                    raise RuntimeError(
+                        "message already handled but local atomic follow-up was not recorded; refusing to re-submit local atomic action"
+                    )
 
-                if action in {ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST}:
-                    if runtime.local_atomic_submit:
-                        action_data = build_pending_action(
-                            action_type=action,
-                            pending_message=pending_message,
-                            tsa_addr=runtime.tsa_addr,
-                            deposit_module=runtime.deposit_module,
-                            withdrawal_module=runtime.withdrawal_module,
-                            wrapped_deposit_asset=runtime.wrapped_deposit_asset,
-                            rpc_url=runtime.rpc_url,
-                        )
-                        signer_sig = wallet_sign(
-                            str(action_data["typedDataHash"]),
-                            no_hash=True,
-                            account=runtime.account,
-                            private_key=runtime.private_key,
-                        )
-                        item["deriveApi"] = _submit_action_to_local_atomic(
-                            rpc_url=runtime.rpc_url,
-                            atomic_executor_addr=runtime.atomic_executor_addr,
-                            matching_addr_value=runtime.matching_addr,
-                            action=action_data,
-                            signer_sig=signer_sig,
-                            signer=runtime.signer,
-                            account=runtime.account,
-                            private_key=runtime.private_key,
-                            from_addr=runtime.sender,
-                            unlocked=runtime.unlocked,
-                        )
-                        if action == ACTION_DEPOSIT_INTENT:
-                            fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
-                            fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-                            if getattr(runtime, "signer", None) is None:
-                                raise RuntimeError(
-                                    "L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode"
-                                )
-                            ack_hash = runtime.signer.send_contract_tx(
-                                contract_name="CollarTSAReceiver",
-                                address=runtime.receiver_addr,
-                                fn_name="sendDepositConfirmedAfterExecution",
-                                args=[int(loan_id)],
-                                value_wei=int(fee_with_buffer),
-                                label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
-                            )
-                            item["depositConfirmedTx"] = ack_hash
-                    elif _should_submit_api(action, runtime.submit_deposit_api, runtime.submit_withdraw_api):
-                        api_meta, api_attempt = submit_with_retries(
-                            lambda: submit_api_for_pending_message(
-                                action_type=action,
-                                pending_message=pending_message,
-                                tsa_addr=runtime.tsa_addr,
-                                account=runtime.account,
-                                private_key=runtime.private_key,
-                                api_url=runtime.api_url,
-                                x_lyra_wallet=runtime.derive_wallet,
-                                fallback_asset_name=runtime.derive_asset_name,
-                                rpc_url=runtime.rpc_url,
-                            ),
-                            attempts=runtime.api_retry_attempts,
-                            initial_delay_seconds=runtime.api_retry_initial_delay_seconds,
-                            max_delay_seconds=runtime.api_retry_max_delay_seconds,
-                        )
-                        item["deriveApiAttempts"] = str(api_attempt)
-                        item["deriveApi"] = api_meta
+                if not already_handled:
+                    # Prefer KeeperSigner (eth_account + Web3) for sending txs.
+                    if getattr(runtime, "signer", None) is None:
+                        raise RuntimeError("L2 keeper runtime missing signer for handleMessage in broadcast mode")
+                    tx_hash = runtime.signer.send_contract_tx(
+                        contract_name="CollarTSAReceiver",
+                        address=runtime.receiver_addr,
+                        fn_name="handleMessage",
+                        args=[guid],
+                        label=f"L2 keeper handleMessage {guid}",
+                    )
+                    item["tx"] = tx_hash
+
+                item.update(
+                    _submit_follow_up(
+                        runtime,
+                        action_type=action,
+                        loan_id=loan_id,
+                        pending_raw=pending_raw,
+                        pending_message=pending_message,
+                    )
+                )
 
                 if item.get("deriveApi") is not None:
                     state["apiSubmitted"][guid] = {
