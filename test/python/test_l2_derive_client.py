@@ -31,6 +31,19 @@ class DeriveClientTests(unittest.TestCase):
             patch("ops.management.handlers.l2_derive_client.fresh_action_nonce_and_expiry", return_value=(111, 222)),
             patch("ops.management.handlers.l2_derive_client._erc20_decimals", return_value=18),
             patch("ops.management.handlers.l2_derive_client.resolve_asset_name", return_value="ETH"),
+            patch(
+                "ops.management.handlers.l2_derive_client.resolve_tsa_action_config",
+                return_value={
+                    "depositModule": "0x2222222222222222222222222222222222222222",
+                    "withdrawalModule": "0x3333333333333333333333333333333333333333",
+                    "wrappedDepositAsset": "0x4444444444444444444444444444444444444444",
+                    "manager": "0x5555555555555555555555555555555555555555",
+                },
+            ),
+            patch(
+                "ops.management.handlers.l2_derive_client.build_action",
+                return_value={"typedDataHash": "0xlocaltypedhash"},
+            ),
             patch("ops.management.handlers.l2_derive_client.wallet_sign", side_effect=["0xactionsig", "0xauthsig"]),
             patch("ops.management.handlers.l2_derive_client.http_post_json", side_effect=fake_http_post_json),
         ):
@@ -47,6 +60,7 @@ class DeriveClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result["apiId"], "req-1")
+        self.assertEqual(result["typedDataHash"], "0xlocaltypedhash")
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0][0].endswith("/public/deposit_debug"))
         self.assertTrue(calls[1][0].endswith("/private/deposit"))
@@ -68,6 +82,19 @@ class DeriveClientTests(unittest.TestCase):
             patch("ops.management.handlers.l2_derive_client.fresh_action_nonce_and_expiry", return_value=(333, 444)),
             patch("ops.management.handlers.l2_derive_client._erc20_decimals", return_value=18),
             patch("ops.management.handlers.l2_derive_client.resolve_asset_name", return_value="ETH"),
+            patch(
+                "ops.management.handlers.l2_derive_client.resolve_tsa_action_config",
+                return_value={
+                    "depositModule": "0x2222222222222222222222222222222222222222",
+                    "withdrawalModule": "0x3333333333333333333333333333333333333333",
+                    "wrappedDepositAsset": "0x4444444444444444444444444444444444444444",
+                    "manager": "0x5555555555555555555555555555555555555555",
+                },
+            ),
+            patch(
+                "ops.management.handlers.l2_derive_client.build_action",
+                return_value={"typedDataHash": "0xlocaltypedhash"},
+            ),
             patch("ops.management.handlers.l2_derive_client.wallet_sign", side_effect=["0xactionsig", "0xauthsig"]),
             patch("ops.management.handlers.l2_derive_client.http_post_json", side_effect=fake_http_post_json),
         ):
@@ -84,6 +111,7 @@ class DeriveClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result["apiId"], "req-2")
+        self.assertEqual(result["typedDataHash"], "0xlocaltypedhash")
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0][0].endswith("/public/withdraw_debug"))
         self.assertTrue(calls[1][0].endswith("/private/withdraw"))

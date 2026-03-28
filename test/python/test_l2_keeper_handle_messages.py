@@ -91,7 +91,7 @@ class L2KeeperTickTests(unittest.TestCase):
                 patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
                 patch(
                     "management.handlers.l2_pending_message.cast_call",
-                    side_effect=["false", _pending_message_raw(loan_id=7)],
+                    side_effect=["false", _pending_message_raw(loan_id=7), "false"],
                 ),
                 patch("management.handlers.l2_pending_message.submit_api_for_pending_message", side_effect=api_error),
             ):
@@ -119,7 +119,7 @@ class L2KeeperTickTests(unittest.TestCase):
                 patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
                 patch(
                     "management.handlers.l2_pending_message.cast_call",
-                    side_effect=["true", _pending_message_raw(loan_id=7)],
+                    side_effect=["true", _pending_message_raw(loan_id=7), "false"],
                 ),
                 patch("management.handlers.l2_pending_message.submit_api_for_pending_message", side_effect=api_error),
             ):
@@ -161,7 +161,7 @@ class L2KeeperTickTests(unittest.TestCase):
                 patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
                 patch(
                     "management.handlers.l2_pending_message.cast_call",
-                    side_effect=["true", _pending_message_raw(loan_id=9)],
+                    side_effect=["true", _pending_message_raw(loan_id=9), "false"],
                 ),
                 patch("management.handlers.l2_pending_message.submit_api_for_pending_message", return_value=api_meta),
             ):
@@ -183,6 +183,51 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(state["apiSubmitted"][guid]["deriveApi"], api_meta)
             signer.send_contract_tx.assert_not_called()
             self.assertTrue(state_file.is_file())
+
+    def test_already_executed_onchain_skips_api_and_sends_deposit_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "keeper_l2_state.json"
+            signer = Mock()
+            signer.send_contract_tx.return_value = "0xack"
+            runtime = self._runtime(state_file=state_file, signer=signer)
+            guid = "0x" + ("33" * 32)
+            logs = [_message_log(guid=guid, loan_id=11, action=ACTION_DEPOSIT_INTENT, block_number=405)]
+            state = {
+                "nextBlock": 400,
+                "apiSubmitted": {},
+                "rfqTradeQueue": [],
+                "rfqTradesCompleted": {},
+            }
+            handled: list[dict[str, object]] = []
+
+            with (
+                patch("ops.management.l2_keeper_handle_messages._block_number", return_value=405),
+                patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
+                patch(
+                    "management.handlers.l2_pending_message.cast_call",
+                    side_effect=["true", _pending_message_raw(loan_id=11), "true", "false"],
+                ),
+                patch("management.handlers.l2_pending_message.quote_ack_native_fee", return_value=100),
+                patch("management.handlers.l2_pending_message.submit_api_for_pending_message") as submit_api_mock,
+            ):
+                result, next_block = run_keeper_tick(
+                    runtime,
+                    state=state,
+                    next_block=400,
+                    handled=handled,
+                    rfq_trade_file=None,
+                )
+
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["sent"], 1)
+            self.assertTrue(result["advancedCursor"])
+            self.assertEqual(next_block, 406)
+            self.assertEqual(handled[-1]["status"], "sent")
+            self.assertEqual(handled[-1]["deriveApi"]["status"], "alreadyExecutedOnchain")
+            self.assertEqual(handled[-1]["depositConfirmedTx"], "0xack")
+            self.assertEqual(state["apiSubmitted"][guid]["deriveApi"]["status"], "alreadyExecutedOnchain")
+            submit_api_mock.assert_not_called()
+            signer.send_contract_tx.assert_called_once()
 
 
 if __name__ == "__main__":

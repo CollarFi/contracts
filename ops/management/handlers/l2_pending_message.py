@@ -133,6 +133,27 @@ def _requires_follow_up(runtime: Any, action_type: int) -> bool:
     return _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api)
 
 
+def _action_already_executed(runtime: Any, *, action_type: int, loan_id: int) -> bool:
+    if action_type == ACTION_DEPOSIT_INTENT:
+        raw = cast_call(runtime.rpc_url, runtime.tsa_addr, "depositExecuted(uint256)(bool)", str(int(loan_id)), allow_fail=True)
+        return raw.strip().lower() == "true"
+    if action_type == ACTION_RETURN_REQUEST:
+        raw = cast_call(runtime.rpc_url, runtime.tsa_addr, "withdrawExecuted(uint256)(bool)", str(int(loan_id)), allow_fail=True)
+        return raw.strip().lower() == "true"
+    return False
+
+
+def _deposit_already_confirmed(runtime: Any, *, loan_id: int) -> bool:
+    raw = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "depositConfirmed(uint256)(bool)",
+        str(int(loan_id)),
+        allow_fail=True,
+    )
+    return raw.strip().lower() == "true"
+
+
 def _load_pending_message(runtime: Any, guid: str) -> tuple[str, dict[str, Any]]:
     pending_raw = cast_call(
         runtime.rpc_url,
@@ -204,6 +225,29 @@ def _submit_follow_up(
         return item_updates
 
     if _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api):
+        if _action_already_executed(runtime, action_type=action_type, loan_id=loan_id):
+            item_updates["deriveApi"] = {
+                "status": "alreadyExecutedOnchain",
+                "loanId": str(loan_id),
+            }
+            if action_type == ACTION_DEPOSIT_INTENT and not _deposit_already_confirmed(runtime, loan_id=loan_id):
+                fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
+                fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
+                if getattr(runtime, "signer", None) is None:
+                    raise RuntimeError(
+                        "L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode"
+                    )
+                ack_hash = runtime.signer.send_contract_tx(
+                    contract_name="CollarTSAReceiver",
+                    address=runtime.receiver_addr,
+                    fn_name="sendDepositConfirmedAfterExecution",
+                    args=[int(loan_id)],
+                    value_wei=int(fee_with_buffer),
+                    label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
+                )
+                item_updates["depositConfirmedTx"] = ack_hash
+            return item_updates
+
         api_meta, api_attempt = submit_with_retries(
             lambda: submit_api_for_pending_message(
                 action_type=action_type,

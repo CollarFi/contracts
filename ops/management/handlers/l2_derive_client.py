@@ -14,9 +14,10 @@ from management.l2_common import http_post_json, is_retryable_signature_sync_err
 from management.handlers.l2_tsa_actions import (  # noqa: E402
     ACTION_DEPOSIT_INTENT,
     ACTION_RETURN_REQUEST,
-    ZERO_ADDRESS,
+    build_action,
     fresh_action_nonce_and_expiry,
     parse_uint,
+    resolve_tsa_action_config,
 )
 
 T = TypeVar("T")
@@ -223,10 +224,23 @@ def submit_api_for_pending_message(
     )
     nonce = int(debug_payload["nonce"])
     expiry = int(debug_payload["signature_expiry_sec"])
+    action_config = resolve_tsa_action_config(rpc_url, tsa_addr)
+    local_action = build_action(
+        action_type=action_type,
+        pending_message=pending_message,
+        tsa_addr=tsa_addr,
+        deposit_module=action_config["depositModule"],
+        withdrawal_module=action_config["withdrawalModule"],
+        wrapped_deposit_asset=action_config["wrappedDepositAsset"],
+        manager_for_new_account=action_config["manager"],
+        rpc_url=rpc_url,
+        nonce=nonce,
+        expiry=expiry,
+    )
+    typed_hash = str(local_action["typedDataHash"])
 
     if action_type == ACTION_DEPOSIT_INTENT:
         debug_json = post_public_deposit_debug(api_url=api_url, body=debug_payload)
-        typed_hash = debug_json["result"]["typed_data_hash"]
         action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
         ts_ms, auth_sig = sign_private_api_auth(
             account=account,
@@ -252,7 +266,6 @@ def submit_api_for_pending_message(
 
     if action_type == ACTION_RETURN_REQUEST:
         debug_json = post_public_withdraw_debug(api_url=api_url, body=debug_payload)
-        typed_hash = debug_json["result"]["typed_data_hash"]
         action_sig = wallet_sign(typed_hash, no_hash=True, account=account, private_key=private_key)
         ts_ms, auth_sig = sign_private_api_auth(
             account=account,
