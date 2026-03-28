@@ -119,6 +119,26 @@ def _submit_action_to_local_atomic(
     }
 
 
+def _send_deposit_confirmed_after_execution(runtime: Any, *, loan_id: int, value_wei: int) -> str:
+    if getattr(runtime, "signer", None) is None:
+        raise RuntimeError("L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode")
+
+    call_data = run(
+        [
+            "cast",
+            "calldata",
+            "sendDepositConfirmedAfterExecution(uint256)",
+            str(int(loan_id)),
+        ]
+    )
+    return runtime.signer.send_tx(
+        to=runtime.receiver_addr,
+        data=bytes.fromhex(call_data[2:]),
+        value_wei=int(value_wei),
+        label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
+    )
+
+
 def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdraw_api: bool) -> bool:
     return (action_type == ACTION_DEPOSIT_INTENT and submit_deposit_api) or (
         action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
@@ -211,15 +231,10 @@ def _submit_follow_up(
         if action_type == ACTION_DEPOSIT_INTENT:
             fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
             fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-            if getattr(runtime, "signer", None) is None:
-                raise RuntimeError("L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode")
-            ack_hash = runtime.signer.send_contract_tx(
-                contract_name="CollarTSAReceiver",
-                address=runtime.receiver_addr,
-                fn_name="sendDepositConfirmedAfterExecution",
-                args=[int(loan_id)],
+            ack_hash = _send_deposit_confirmed_after_execution(
+                runtime,
+                loan_id=loan_id,
                 value_wei=int(fee_with_buffer),
-                label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
             )
             item_updates["depositConfirmedTx"] = ack_hash
         return item_updates
@@ -233,17 +248,10 @@ def _submit_follow_up(
             if action_type == ACTION_DEPOSIT_INTENT and not _deposit_already_confirmed(runtime, loan_id=loan_id):
                 fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
                 fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-                if getattr(runtime, "signer", None) is None:
-                    raise RuntimeError(
-                        "L2 keeper runtime missing signer for sendDepositConfirmedAfterExecution in broadcast mode"
-                    )
-                ack_hash = runtime.signer.send_contract_tx(
-                    contract_name="CollarTSAReceiver",
-                    address=runtime.receiver_addr,
-                    fn_name="sendDepositConfirmedAfterExecution",
-                    args=[int(loan_id)],
+                ack_hash = _send_deposit_confirmed_after_execution(
+                    runtime,
+                    loan_id=loan_id,
                     value_wei=int(fee_with_buffer),
-                    label=f"L2 keeper sendDepositConfirmedAfterExecution {loan_id}",
                 )
                 item_updates["depositConfirmedTx"] = ack_hash
             return item_updates

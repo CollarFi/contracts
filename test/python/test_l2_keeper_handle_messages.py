@@ -221,7 +221,7 @@ class L2KeeperTickTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "keeper_l2_state.json"
             signer = Mock()
-            signer.send_contract_tx.return_value = "0xack"
+            signer.send_tx.return_value = "0xack"
             runtime = self._runtime(state_file=state_file, signer=signer)
             guid = "0x" + ("33" * 32)
             logs = [_message_log(guid=guid, loan_id=11, action=ACTION_DEPOSIT_INTENT, block_number=405)]
@@ -260,7 +260,7 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(handled[-1]["depositConfirmedTx"], "0xack")
             self.assertEqual(state["apiSubmitted"][guid]["deriveApi"]["status"], "alreadyExecutedOnchain")
             submit_api_mock.assert_not_called()
-            signer.send_contract_tx.assert_called_once()
+            signer.send_tx.assert_called_once()
 
     def test_local_atomic_replay_skips_when_return_request_already_executed_onchain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
