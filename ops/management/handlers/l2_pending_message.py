@@ -305,6 +305,15 @@ def process_message_logs(
         follow_up_required = _requires_follow_up(runtime, action)
         already_submitted = guid in state["apiSubmitted"]
 
+        if (
+            already_handled
+            and runtime.local_atomic_submit
+            and not already_submitted
+            and _action_already_executed(runtime, action_type=action, loan_id=loan_id)
+        ):
+            if action != ACTION_DEPOSIT_INTENT or _deposit_already_confirmed(runtime, loan_id=loan_id):
+                continue
+
         if already_handled and not (runtime.broadcast and follow_up_required and not already_submitted):
             continue
 

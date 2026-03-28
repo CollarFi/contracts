@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from ops.management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT
+from ops.management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST
 from ops.management.l2_keeper_handle_messages import L2KeeperRuntime, run_keeper_tick
 
 
@@ -67,6 +67,39 @@ class L2KeeperTickTests(unittest.TestCase):
             private_key="0x1234",
             sender="",
             unlocked=False,
+        )
+
+    def _local_atomic_runtime(self, *, state_file: Path, signer: Mock | None) -> L2KeeperRuntime:
+        runtime = self._runtime(state_file=state_file, signer=signer)
+        return L2KeeperRuntime(
+            rpc_url=runtime.rpc_url,
+            receiver_addr=runtime.receiver_addr,
+            tsa_addr=runtime.tsa_addr,
+            matching_addr=runtime.matching_addr,
+            atomic_executor_addr=runtime.atomic_executor_addr,
+            deposit_module=runtime.deposit_module,
+            withdrawal_module=runtime.withdrawal_module,
+            rfq_module=runtime.rfq_module,
+            wrapped_deposit_asset=runtime.wrapped_deposit_asset,
+            state_file=runtime.state_file,
+            max_per_tick=runtime.max_per_tick,
+            broadcast=runtime.broadcast,
+            lz_fee_buffer_bps=runtime.lz_fee_buffer_bps,
+            local_atomic_submit=True,
+            submit_deposit_api=False,
+            submit_withdraw_api=False,
+            api_url=runtime.api_url,
+            derive_wallet=runtime.derive_wallet,
+            derive_asset_name=runtime.derive_asset_name,
+            api_retry_attempts=runtime.api_retry_attempts,
+            api_retry_initial_delay_seconds=runtime.api_retry_initial_delay_seconds,
+            api_retry_max_delay_seconds=runtime.api_retry_max_delay_seconds,
+            allowed_actions={ACTION_RETURN_REQUEST},
+            signer=runtime.signer,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            sender=runtime.sender,
+            unlocked=runtime.unlocked,
         )
 
     def test_api_error_after_handle_message_keeps_cursor_on_retry(self) -> None:
@@ -228,6 +261,44 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(state["apiSubmitted"][guid]["deriveApi"]["status"], "alreadyExecutedOnchain")
             submit_api_mock.assert_not_called()
             signer.send_contract_tx.assert_called_once()
+
+    def test_local_atomic_replay_skips_when_return_request_already_executed_onchain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "keeper_l2_state.json"
+            signer = Mock()
+            runtime = self._local_atomic_runtime(state_file=state_file, signer=signer)
+            guid = "0x" + ("44" * 32)
+            logs = [_message_log(guid=guid, loan_id=13, action=ACTION_RETURN_REQUEST, block_number=505)]
+            state = {
+                "nextBlock": 500,
+                "apiSubmitted": {},
+                "rfqTradeQueue": [],
+                "rfqTradesCompleted": {},
+            }
+            handled: list[dict[str, object]] = []
+
+            with (
+                patch("ops.management.l2_keeper_handle_messages._block_number", return_value=505),
+                patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
+                patch(
+                    "management.handlers.l2_pending_message.cast_call",
+                    side_effect=["true", "true"],
+                ),
+            ):
+                result, next_block = run_keeper_tick(
+                    runtime,
+                    state=state,
+                    next_block=500,
+                    handled=handled,
+                    rfq_trade_file=None,
+                )
+
+            self.assertEqual(result["attempted"], 0)
+            self.assertEqual(result["sent"], 0)
+            self.assertTrue(result["advancedCursor"])
+            self.assertEqual(next_block, 506)
+            self.assertEqual(handled, [])
+            signer.send_contract_tx.assert_not_called()
 
 
 if __name__ == "__main__":
