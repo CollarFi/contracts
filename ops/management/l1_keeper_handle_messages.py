@@ -42,6 +42,11 @@ class L1KeeperRuntime:
     signer: KeeperSigner | None = None
 
 
+def ensure_l1_keeper_state(state: dict[str, Any]) -> None:
+    if "finalizedLoans" not in state or not isinstance(state.get("finalizedLoans"), dict):
+        state["finalizedLoans"] = {}
+
+
 def _block_number(rpc_url: str) -> int:
     return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
 
@@ -107,6 +112,7 @@ def run_keeper_tick(
     next_block: int,
     handled: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], int]:
+    ensure_l1_keeper_state(state)
     latest = _block_number(runtime.rpc_url)
     scan_range = resolve_scan_range(next_block, latest)
     if scan_range is None:
@@ -176,6 +182,13 @@ def run_keeper_tick(
                         label="L1 keeper finalizeLoan",
                     )
                     item["tx"] = tx_hash
+                    state["finalizedLoans"][str(loan_id)] = {
+                        "completedAt": int(time.time()),
+                        "depositGuid": deposit_guid,
+                        "tradeGuid": trade_guid,
+                        "tx": tx_hash,
+                    }
+                    save_keeper_state(runtime.state_file, state)
                     item["status"] = "sent"
                     sent += 1
                 except Exception as exc:
@@ -312,7 +325,8 @@ def main(
                 else:
                     print(
                         f"  - loan={item['loanId']} finalizeLoan "
-                        f"deposit={item['depositGuid']} trade={item['tradeGuid']} -> {item['status']}"
+                        f"deposit={item['depositGuid']} trade={item['tradeGuid']} "
+                        f"tx={item.get('tx') or '-'} -> {item['status']}"
                     )
         time.sleep(poll_seconds)
 

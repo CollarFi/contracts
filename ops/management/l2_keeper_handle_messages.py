@@ -177,6 +177,8 @@ def run_keeper_tick(
     handled: list[dict[str, Any]],
     rfq_trade_file: Path | None,
 ) -> tuple[dict[str, Any], int]:
+    ensure_api_state(state)
+    ensure_rfq_trade_state(state)
     enqueue_summary = enqueue_rfq_trades_from_file(state, rfq_trade_file)
     if enqueue_summary["added"]:
         save_keeper_state(runtime.state_file, state)
@@ -456,9 +458,22 @@ def main(
                     f"advanced={result.get('advancedCursor', False)}"
                 )
                 for item in handled[-result["attempted"] :]:
+                    tx_parts = []
+                    if item.get("tx"):
+                        tx_parts.append(f"handleTx={item['tx']}")
+                    derive_api = item.get("deriveApi")
+                    if isinstance(derive_api, dict) and derive_api.get("matchingTx"):
+                        tx_parts.append(f"matchTx={derive_api['matchingTx']}")
+                    if item.get("depositConfirmedTx"):
+                        tx_parts.append(f"ackTx={item['depositConfirmedTx']}")
+                    if item.get("collateralReturnedTx"):
+                        tx_parts.append(f"returnTx={item['collateralReturnedTx']}")
+                    if item.get("tradeConfirmedTx"):
+                        tx_parts.append(f"tradeTx={item['tradeConfirmedTx']}")
+                    tx_text = (" " + " ".join(tx_parts)) if tx_parts else ""
                     print(
                         f"  - {item['action']} loan={item['loanId']} guid={item.get('guid', item.get('queueKey', '?'))} "
-                        f"block={item.get('eventBlock', '?')} -> {item['status']}"
+                        f"block={item.get('eventBlock', '?')}{tx_text} -> {item['status']}"
                     )
         except Exception as exc:
             print(f"[red][error][/red] {exc}")

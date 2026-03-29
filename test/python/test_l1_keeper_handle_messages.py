@@ -197,3 +197,4 @@ class L1KeeperTickTests(unittest.TestCase):
             self.assertTrue(state_file.is_file())
             self.assertEqual(handled[0]["status"], "sent")
             self.assertEqual(handled[0]["tx"], "0xtx")
+            self.assertEqual(state["finalizedLoans"]["88"]["tx"], "0xtx")

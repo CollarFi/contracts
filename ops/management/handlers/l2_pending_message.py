@@ -18,6 +18,7 @@ from management.handlers.l2_tsa_actions import (  # noqa: E402
     abi_encode,
     build_pending_action,
     format_action_tuple,
+    parse_uint,
     parse_pending_message,
     quote_ack_native_fee,
 )
@@ -28,6 +29,8 @@ from py_lib.keeper_state import save_keeper_state  # noqa: E402
 def ensure_api_state(state: dict[str, Any]) -> None:
     if "apiSubmitted" not in state or not isinstance(state.get("apiSubmitted"), dict):
         state["apiSubmitted"] = {}
+    if "messageTxs" not in state or not isinstance(state.get("messageTxs"), dict):
+        state["messageTxs"] = {}
 
 
 def is_local_rpc(rpc_url: str) -> bool:
@@ -139,6 +142,81 @@ def _send_deposit_confirmed_after_execution(runtime: Any, *, loan_id: int, value
     )
 
 
+def _collateral_return_already_sent(runtime: Any, *, loan_id: int) -> bool:
+    raw = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "collateralReturnedSent(uint256)(bool)",
+        str(int(loan_id)),
+        allow_fail=True,
+    )
+    return raw.strip().lower() == "true"
+
+
+def _quote_collateral_return_native_fee(runtime: Any, *, loan_id: int, pending_message: dict[str, Any]) -> int:
+    vault_recipient = cast_call(runtime.rpc_url, runtime.receiver_addr, "vaultRecipient()(address)").strip()
+    wrapped_underlying = cast_call(
+        runtime.rpc_url,
+        runtime.wrapped_deposit_asset,
+        "wrappedAsset()(address)",
+        allow_fail=True,
+    ).strip().split()[0]
+    bridge_fee = int(
+        parse_uint(cast_call(
+            runtime.rpc_url,
+            runtime.tsa_addr,
+            "estimateBridgeFees(address,address,uint256)(uint256)",
+            wrapped_underlying,
+            vault_recipient,
+            str(int(pending_message["amount"])),
+        ))
+    )
+    options = cast_call(runtime.rpc_url, runtime.receiver_addr, "defaultOptions()(bytes)").strip()
+    subaccount_id = cast_call(runtime.rpc_url, runtime.tsa_addr, "subAccount()(uint256)").strip().split()[0]
+    message_tuple = (
+        f"(4,{int(loan_id)},{pending_message['asset']},{int(pending_message['amount'])},{vault_recipient},"
+        f"{subaccount_id},0x{'0' * 64},0,0x{'0' * 64},0,0x)"
+    )
+    quote_raw = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "quoteMessage((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes),bytes)((uint256,uint256))",
+        message_tuple,
+        options,
+    ).strip()
+    lz_fee = parse_uint(quote_raw.split(",", 1)[0].lstrip("(").strip()) if quote_raw.startswith("(") else parse_uint(quote_raw)
+    lz_fee_with_buffer = lz_fee + (lz_fee * runtime.lz_fee_buffer_bps) // 10_000
+    return bridge_fee + lz_fee_with_buffer
+
+
+def _bridge_pending_return_and_notify(
+    runtime: Any,
+    *,
+    loan_id: int,
+    pending_message: dict[str, Any],
+    value_wei: int,
+) -> str:
+    if getattr(runtime, "signer", None) is None:
+        raise RuntimeError("L2 keeper runtime missing signer for bridgePendingReturnAndNotify in broadcast mode")
+
+    call_data = run(
+        [
+            "cast",
+            "calldata",
+            "bridgePendingReturnAndNotify(uint256,address,uint256)",
+            str(int(loan_id)),
+            str(pending_message["asset"]),
+            str(int(pending_message["amount"])),
+        ]
+    )
+    return runtime.signer.send_tx(
+        to=runtime.receiver_addr,
+        data=bytes.fromhex(call_data[2:]),
+        value_wei=int(value_wei),
+        label=f"L2 keeper bridgePendingReturnAndNotify {loan_id}",
+    )
+
+
 def _should_submit_api(action_type: int, submit_deposit_api: bool, submit_withdraw_api: bool) -> bool:
     return (action_type == ACTION_DEPOSIT_INTENT and submit_deposit_api) or (
         action_type == ACTION_RETURN_REQUEST and submit_withdraw_api
@@ -237,6 +315,15 @@ def _submit_follow_up(
                 value_wei=int(fee_with_buffer),
             )
             item_updates["depositConfirmedTx"] = ack_hash
+        elif action_type == ACTION_RETURN_REQUEST and not _collateral_return_already_sent(runtime, loan_id=loan_id):
+            fee_with_buffer = _quote_collateral_return_native_fee(runtime, loan_id=loan_id, pending_message=pending_message)
+            bridge_hash = _bridge_pending_return_and_notify(
+                runtime,
+                loan_id=loan_id,
+                pending_message=pending_message,
+                value_wei=int(fee_with_buffer),
+            )
+            item_updates["collateralReturnedTx"] = bridge_hash
         return item_updates
 
     if _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api):
@@ -254,6 +341,15 @@ def _submit_follow_up(
                     value_wei=int(fee_with_buffer),
                 )
                 item_updates["depositConfirmedTx"] = ack_hash
+            elif action_type == ACTION_RETURN_REQUEST and not _collateral_return_already_sent(runtime, loan_id=loan_id):
+                fee_with_buffer = _quote_collateral_return_native_fee(runtime, loan_id=loan_id, pending_message=pending_message)
+                bridge_hash = _bridge_pending_return_and_notify(
+                    runtime,
+                    loan_id=loan_id,
+                    pending_message=pending_message,
+                    value_wei=int(fee_with_buffer),
+                )
+                item_updates["collateralReturnedTx"] = bridge_hash
             return item_updates
 
         api_meta, api_attempt = submit_with_retries(
@@ -274,6 +370,15 @@ def _submit_follow_up(
         )
         item_updates["deriveApiAttempts"] = str(api_attempt)
         item_updates["deriveApi"] = api_meta
+        if action_type == ACTION_RETURN_REQUEST and not _collateral_return_already_sent(runtime, loan_id=loan_id):
+            fee_with_buffer = _quote_collateral_return_native_fee(runtime, loan_id=loan_id, pending_message=pending_message)
+            bridge_hash = _bridge_pending_return_and_notify(
+                runtime,
+                loan_id=loan_id,
+                pending_message=pending_message,
+                value_wei=int(fee_with_buffer),
+            )
+            item_updates["collateralReturnedTx"] = bridge_hash
 
     return item_updates
 
@@ -373,7 +478,22 @@ def process_message_logs(
                         "submittedAt": int(time.time()),
                         "deriveApi": item["deriveApi"],
                     }
-                    save_keeper_state(runtime.state_file, state)
+                tx_record = {
+                    "action": action_name(action),
+                    "loanId": str(loan_id),
+                    "completedAt": int(time.time()),
+                }
+                for key in ("tx", "depositConfirmedTx", "collateralReturnedTx"):
+                    if item.get(key):
+                        tx_record[key] = item[key]
+                derive_api = item.get("deriveApi")
+                if isinstance(derive_api, dict):
+                    for key in ("matchingTx", "apiId"):
+                        if derive_api.get(key):
+                            tx_record[key] = derive_api[key]
+                if len(tx_record) > 3:
+                    state["messageTxs"][guid] = tx_record
+                save_keeper_state(runtime.state_file, state)
 
                 item["status"] = "sent"
                 sent += 1

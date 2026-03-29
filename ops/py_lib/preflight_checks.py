@@ -48,6 +48,32 @@ def recipient_check(
     }
 
 
+def vault_recipient_check(
+    l1_env_file: Path = ROOT_DIR / ".env.l1.testnet",
+    l2_env_file: Path = ROOT_DIR / ".env.l2.testnet",
+    *,
+    env_profile: str = "",
+) -> dict[str, Any]:
+    l1_env_file, l2_env_file = resolve_l1_l2_env_paths(env_profile, l1_env_file, l2_env_file)
+    l1 = load_env(l1_env_file)
+    l2 = load_env(l2_env_file)
+
+    must(l1, "RPC_URL")
+    must(l2, "RPC_URL")
+
+    vault = resolve_addr(l1, "L1_VAULT", "l1Vault", "l1")
+    receiver = resolve_addr(l2, "L2_RECEIVER", "l2Receiver", "l2")
+    actual = strip_units(cast_call(l2["RPC_URL"], receiver, "vaultRecipient()(address)", allow_fail=True))
+
+    return {
+        "ok": actual.lower() == vault.lower(),
+        "vault": vault,
+        "receiver": receiver,
+        "actualVaultRecipient": actual,
+        "expectedVaultRecipient": vault,
+    }
+
+
 def peer_check(
     l1_env_file: Path = ROOT_DIR / ".env.l1.testnet",
     l2_env_file: Path = ROOT_DIR / ".env.l2.testnet",

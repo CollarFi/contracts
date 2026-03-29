@@ -102,6 +102,39 @@ class L2KeeperTickTests(unittest.TestCase):
             unlocked=runtime.unlocked,
         )
 
+    def _withdraw_runtime(self, *, state_file: Path, signer: Mock | None) -> L2KeeperRuntime:
+        runtime = self._runtime(state_file=state_file, signer=signer)
+        return L2KeeperRuntime(
+            rpc_url=runtime.rpc_url,
+            receiver_addr=runtime.receiver_addr,
+            tsa_addr=runtime.tsa_addr,
+            matching_addr=runtime.matching_addr,
+            atomic_executor_addr=runtime.atomic_executor_addr,
+            deposit_module=runtime.deposit_module,
+            withdrawal_module=runtime.withdrawal_module,
+            rfq_module=runtime.rfq_module,
+            wrapped_deposit_asset=runtime.wrapped_deposit_asset,
+            state_file=runtime.state_file,
+            max_per_tick=runtime.max_per_tick,
+            broadcast=runtime.broadcast,
+            lz_fee_buffer_bps=runtime.lz_fee_buffer_bps,
+            local_atomic_submit=False,
+            submit_deposit_api=False,
+            submit_withdraw_api=True,
+            api_url=runtime.api_url,
+            derive_wallet=runtime.derive_wallet,
+            derive_asset_name=runtime.derive_asset_name,
+            api_retry_attempts=runtime.api_retry_attempts,
+            api_retry_initial_delay_seconds=runtime.api_retry_initial_delay_seconds,
+            api_retry_max_delay_seconds=runtime.api_retry_max_delay_seconds,
+            allowed_actions={ACTION_RETURN_REQUEST},
+            signer=runtime.signer,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            sender=runtime.sender,
+            unlocked=runtime.unlocked,
+        )
+
     def test_api_error_after_handle_message_keeps_cursor_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "keeper_l2_state.json"
@@ -214,6 +247,7 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(handled[-1]["status"], "sent")
             self.assertEqual(handled[-1]["deriveApi"], api_meta)
             self.assertEqual(state["apiSubmitted"][guid]["deriveApi"], api_meta)
+            self.assertEqual(state["messageTxs"][guid]["apiId"], "req-1")
             signer.send_contract_tx.assert_not_called()
             self.assertTrue(state_file.is_file())
 
@@ -259,6 +293,7 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(handled[-1]["deriveApi"]["status"], "alreadyExecutedOnchain")
             self.assertEqual(handled[-1]["depositConfirmedTx"], "0xack")
             self.assertEqual(state["apiSubmitted"][guid]["deriveApi"]["status"], "alreadyExecutedOnchain")
+            self.assertEqual(state["messageTxs"][guid]["depositConfirmedTx"], "0xack")
             submit_api_mock.assert_not_called()
             signer.send_tx.assert_called_once()
 
@@ -299,6 +334,95 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(next_block, 506)
             self.assertEqual(handled, [])
             signer.send_contract_tx.assert_not_called()
+
+    def test_return_request_api_success_bridges_and_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "keeper_l2_state.json"
+            signer = Mock()
+            signer.send_contract_tx.return_value = "0xhandle"
+            signer.send_tx.return_value = "0xreturn"
+            runtime = self._withdraw_runtime(state_file=state_file, signer=signer)
+            guid = "0x" + ("55" * 32)
+            logs = [_message_log(guid=guid, loan_id=17, action=ACTION_RETURN_REQUEST, block_number=605)]
+            state = {
+                "nextBlock": 600,
+                "apiSubmitted": {},
+                "rfqTradeQueue": [],
+                "rfqTradesCompleted": {},
+            }
+            handled: list[dict[str, object]] = []
+            api_meta = {"apiId": "req-17", "nonce": "99"}
+
+            with (
+                patch("ops.management.l2_keeper_handle_messages._block_number", return_value=605),
+                patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
+                patch(
+                    "management.handlers.l2_pending_message.cast_call",
+                    side_effect=["false", _pending_message_raw(loan_id=17), "false", "false"],
+                ),
+                patch("management.handlers.l2_pending_message.submit_api_for_pending_message", return_value=api_meta),
+                patch("management.handlers.l2_pending_message._quote_collateral_return_native_fee", return_value=123),
+            ):
+                result, next_block = run_keeper_tick(
+                    runtime,
+                    state=state,
+                    next_block=600,
+                    handled=handled,
+                    rfq_trade_file=None,
+                )
+
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["sent"], 1)
+            self.assertTrue(result["advancedCursor"])
+            self.assertEqual(next_block, 606)
+            self.assertEqual(handled[-1]["status"], "sent")
+            self.assertEqual(handled[-1]["collateralReturnedTx"], "0xreturn")
+            self.assertEqual(state["messageTxs"][guid]["collateralReturnedTx"], "0xreturn")
+            signer.send_tx.assert_called_once()
+
+    def test_return_request_already_executed_onchain_bridges_and_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "keeper_l2_state.json"
+            signer = Mock()
+            signer.send_tx.return_value = "0xreturn"
+            runtime = self._withdraw_runtime(state_file=state_file, signer=signer)
+            guid = "0x" + ("66" * 32)
+            logs = [_message_log(guid=guid, loan_id=19, action=ACTION_RETURN_REQUEST, block_number=705)]
+            state = {
+                "nextBlock": 700,
+                "apiSubmitted": {},
+                "rfqTradeQueue": [],
+                "rfqTradesCompleted": {},
+            }
+            handled: list[dict[str, object]] = []
+
+            with (
+                patch("ops.management.l2_keeper_handle_messages._block_number", return_value=705),
+                patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
+                patch(
+                    "management.handlers.l2_pending_message.cast_call",
+                    side_effect=["true", _pending_message_raw(loan_id=19), "true", "false"],
+                ),
+                patch("management.handlers.l2_pending_message._quote_collateral_return_native_fee", return_value=123),
+                patch("management.handlers.l2_pending_message.submit_api_for_pending_message") as submit_api_mock,
+            ):
+                result, next_block = run_keeper_tick(
+                    runtime,
+                    state=state,
+                    next_block=700,
+                    handled=handled,
+                    rfq_trade_file=None,
+                )
+
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["sent"], 1)
+            self.assertTrue(result["advancedCursor"])
+            self.assertEqual(next_block, 706)
+            self.assertEqual(handled[-1]["deriveApi"]["status"], "alreadyExecutedOnchain")
+            self.assertEqual(handled[-1]["collateralReturnedTx"], "0xreturn")
+            self.assertEqual(state["messageTxs"][guid]["collateralReturnedTx"], "0xreturn")
+            submit_api_mock.assert_not_called()
+            signer.send_tx.assert_called_once()
 
 
 if __name__ == "__main__":
