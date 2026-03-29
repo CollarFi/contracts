@@ -26,8 +26,9 @@ app = typer.Typer(add_completion=False)
 
 # CollarLZMessages.Action enum
 ACTION_DEPOSIT_CONFIRMED = 3
+ACTION_COLLATERAL_RETURNED = 4
 ACTION_TRADE_CONFIRMED = 5
-HANDLED_ACTIONS = {ACTION_DEPOSIT_CONFIRMED, ACTION_TRADE_CONFIRMED}
+HANDLED_ACTIONS = {ACTION_DEPOSIT_CONFIRMED, ACTION_COLLATERAL_RETURNED, ACTION_TRADE_CONFIRMED}
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,8 @@ class L1KeeperRuntime:
 def ensure_l1_keeper_state(state: dict[str, Any]) -> None:
     if "finalizedLoans" not in state or not isinstance(state.get("finalizedLoans"), dict):
         state["finalizedLoans"] = {}
+    if "returnedDeposits" not in state or not isinstance(state.get("returnedDeposits"), dict):
+        state["returnedDeposits"] = {}
 
 
 def _block_number(rpc_url: str) -> int:
@@ -54,6 +57,7 @@ def _block_number(rpc_url: str) -> int:
 def _action_name(action: int) -> str:
     return {
         3: "DepositConfirmed",
+        4: "CollateralReturned",
         5: "TradeConfirmed",
     }.get(action, f"Unknown({action})")
 
@@ -89,6 +93,17 @@ def _has_mandate(rpc_url: str, vault_addr: str, loan_id: int) -> bool:
         return False
     borrower = raw.splitlines()[0].strip().lower()
     return borrower != "0x0000000000000000000000000000000000000000"
+
+
+def _return_requested(rpc_url: str, vault_addr: str, loan_id: int) -> bool:
+    raw = cast_call(
+        rpc_url,
+        vault_addr,
+        "returnRequested(uint256)(bool)",
+        str(loan_id),
+        allow_fail=True,
+    )
+    return raw.strip().lower() == "true"
 
 
 def _latest_unconsumed_pairs(logs: list[dict[str, Any]], *, rpc_url: str, vault_addr: str) -> dict[int, dict[int, str]]:
@@ -128,10 +143,64 @@ def run_keeper_tick(
     for loan_id in sorted(by_loan.keys()):
         pair = by_loan[loan_id]
         deposit_guid = pair.get(ACTION_DEPOSIT_CONFIRMED)
+        returned_guid = pair.get(ACTION_COLLATERAL_RETURNED)
         trade_guid = pair.get(ACTION_TRADE_CONFIRMED)
 
         has_pending = _has_pending_deposit(runtime.rpc_url, runtime.vault_addr, loan_id)
         has_mandate = _has_mandate(runtime.rpc_url, runtime.vault_addr, loan_id)
+        return_requested = _return_requested(runtime.rpc_url, runtime.vault_addr, loan_id)
+
+        if returned_guid:
+            if not has_pending or not return_requested:
+                handled.append(
+                    {
+                        "loanId": str(loan_id),
+                        "action": "finalizeDepositReturn",
+                        "collateralReturnedGuid": returned_guid,
+                        "status": "blocked-state",
+                        "hasPendingDeposit": has_pending,
+                        "returnRequested": return_requested,
+                    }
+                )
+                continue
+
+            attempts += 1
+            item = {
+                "loanId": str(loan_id),
+                "action": "finalizeDepositReturn",
+                "collateralReturnedGuid": returned_guid,
+                "tx": None,
+                "status": "dry-run",
+            }
+
+            if runtime.broadcast:
+                if runtime.signer is None:
+                    item["status"] = "error: missing signer for broadcast mode"
+                else:
+                    try:
+                        tx_hash = runtime.signer.send_contract_tx(
+                            contract_name="CollarVault",
+                            address=runtime.vault_addr,
+                            fn_name="finalizeDepositReturn",
+                            args=[int(loan_id), returned_guid],
+                            label="L1 keeper finalizeDepositReturn",
+                        )
+                        item["tx"] = tx_hash
+                        state["returnedDeposits"][str(loan_id)] = {
+                            "completedAt": int(time.time()),
+                            "collateralReturnedGuid": returned_guid,
+                            "tx": tx_hash,
+                        }
+                        save_keeper_state(runtime.state_file, state)
+                        item["status"] = "sent"
+                        sent += 1
+                    except Exception as exc:
+                        item["status"] = f"error: {exc}"
+
+            handled.append(item)
+            if attempts >= runtime.max_per_tick:
+                break
+            continue
 
         if not deposit_guid or not trade_guid:
             handled.append(
@@ -321,6 +390,11 @@ def main(
                     print(
                         f"  - loan={item['loanId']} waiting-pair "
                         f"deposit={item.get('depositGuid')} trade={item.get('tradeGuid')}"
+                    )
+                elif item.get("action") == "finalizeDepositReturn":
+                    print(
+                        f"  - loan={item['loanId']} finalizeDepositReturn "
+                        f"guid={item['collateralReturnedGuid']} tx={item.get('tx') or '-'} -> {item['status']}"
                     )
                 else:
                     print(

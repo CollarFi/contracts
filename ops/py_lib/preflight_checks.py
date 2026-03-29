@@ -89,17 +89,22 @@ def peer_check(
 
     l1_messenger = resolve_addr(l1, "L1_MESSENGER", "l1Messenger", "l1")
     l2_receiver = resolve_addr(l2, "L2_RECEIVER", "l2Receiver", "l2")
-    l2_eid = int((l1.get("L2_EID") or l1.get("REMOTE_EID") or "0").strip())
-    l1_eid = int((l2.get("L1_EID") or "0").strip())
 
-    if l2_eid == 0 and l2.get("LZ_ENDPOINT"):
-        l2_eid_raw = cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)", allow_fail=True)
-        if l2_eid_raw != "N/A":
-            l2_eid = int(strip_units(l2_eid_raw))
-    if l1_eid == 0 and l1.get("LZ_ENDPOINT"):
+    # Route EIDs should come from the live LayerZero endpoints. Env EIDs are
+    # only a fallback for deployments where the endpoint is unavailable.
+    l1_chain_eid = 0
+    l2_chain_eid = 0
+    if l1.get("LZ_ENDPOINT"):
         l1_eid_raw = cast_call(l1["RPC_URL"], l1["LZ_ENDPOINT"], "eid()(uint32)", allow_fail=True)
         if l1_eid_raw != "N/A":
-            l1_eid = int(strip_units(l1_eid_raw))
+            l1_chain_eid = int(strip_units(l1_eid_raw))
+    if l2.get("LZ_ENDPOINT"):
+        l2_eid_raw = cast_call(l2["RPC_URL"], l2["LZ_ENDPOINT"], "eid()(uint32)", allow_fail=True)
+        if l2_eid_raw != "N/A":
+            l2_chain_eid = int(strip_units(l2_eid_raw))
+
+    l2_eid = l2_chain_eid or int((l1.get("L2_EID") or l1.get("REMOTE_EID") or "0").strip())
+    l1_eid = l1_chain_eid or int((l2.get("L1_EID") or "0").strip())
 
     l1_peer_actual = cast_call(l1["RPC_URL"], l1_messenger, "peers(uint32)(bytes32)", str(l2_eid), allow_fail=True)
     l2_peer_actual = cast_call(l2["RPC_URL"], l2_receiver, "peers(uint32)(bytes32)", str(l1_eid), allow_fail=True)

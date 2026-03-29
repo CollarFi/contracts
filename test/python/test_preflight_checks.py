@@ -74,6 +74,54 @@ class PreflightChecksTests(unittest.TestCase):
         self.assertEqual(out["l2ToL1Eid"], 40161)
         self.assertEqual(out["issues"], [])
 
+    def test_peer_check_prefers_live_endpoint_eids_over_env_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            l1_env = root / ".env.l1.testnet"
+            l2_env = root / ".env.l2.testnet"
+            l1_messenger = "0x1111111111111111111111111111111111111111"
+            l2_receiver = "0x2222222222222222222222222222222222222222"
+            l1_endpoint = "0x3333333333333333333333333333333333333333"
+            l2_endpoint = "0x4444444444444444444444444444444444444444"
+            self._write_env(
+                l1_env,
+                {
+                    "RPC_URL": "http://l1",
+                    "L1_MESSENGER": l1_messenger,
+                    "LZ_ENDPOINT": l1_endpoint,
+                    "L2_EID": "901",
+                },
+            )
+            self._write_env(
+                l2_env,
+                {
+                    "RPC_URL": "http://l2",
+                    "L2_RECEIVER": l2_receiver,
+                    "LZ_ENDPOINT": l2_endpoint,
+                    "L1_EID": "40161",
+                },
+            )
+
+            expected_l1_peer = preflight_checks.addr_to_bytes32(l2_receiver)
+            expected_l2_peer = preflight_checks.addr_to_bytes32(l1_messenger)
+            responses = {
+                ("http://l1", l1_endpoint, "eid()(uint32)", (), True): "40161",
+                ("http://l2", l2_endpoint, "eid()(uint32)", (), True): "40308",
+                ("http://l1", l1_messenger, "peers(uint32)(bytes32)", ("40308",), True): expected_l1_peer,
+                ("http://l2", l2_receiver, "peers(uint32)(bytes32)", ("40161",), True): expected_l2_peer,
+            }
+
+            def fake_cast_call(rpc_url: str, to: str, sig: str, *args: str, allow_fail: bool = False) -> str:
+                return responses[(rpc_url, to, sig, args, allow_fail)]
+
+            with patch("ops.py_lib.preflight_checks.cast_call", side_effect=fake_cast_call):
+                out = preflight_checks.peer_check(l1_env, l2_env)
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["l1ToL2Eid"], 40308)
+        self.assertEqual(out["l2ToL1Eid"], 40161)
+        self.assertEqual(out["issues"], [])
+
     def test_vault_recipient_check_matches_l1_vault(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
