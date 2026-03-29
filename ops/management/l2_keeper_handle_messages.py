@@ -26,7 +26,7 @@ from management.handlers.l2_rfq_trade import (  # noqa: E402
     ensure_rfq_trade_state,
     process_rfq_trade_queue,
 )
-from management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST  # noqa: E402
+from management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_MANDATE_CREATED, ACTION_RETURN_REQUEST  # noqa: E402
 from management.l2_common import assert_tsa_signer  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l2_env_path  # noqa: E402
@@ -49,6 +49,9 @@ class L2KeeperRuntime:
     withdrawal_module: str
     rfq_module: str
     wrapped_deposit_asset: str
+    loan_store_addr: str
+    option_asset: str
+    subaccount_id: int
     state_file: Path
     max_per_tick: int
     broadcast: bool
@@ -181,6 +184,34 @@ def _resolve_wrapped_deposit_asset_addr(rpc_url: str, tsa_addr: str, configured_
     return base_addrs[2]
 
 
+def _resolve_option_asset_addr(rpc_url: str, tsa_addr: str, configured_option_asset: str) -> str:
+    if configured_option_asset.strip():
+        return configured_option_asset.strip()
+
+    collar_addrs = _extract_addresses(
+        cast_call(
+            rpc_url,
+            tsa_addr,
+            "getCollarTSAAddresses()(address,address,address,address,address,address)",
+        ),
+        6,
+        "getCollarTSAAddresses",
+    )
+    return collar_addrs[5]
+
+
+def _resolve_loan_store_addr(rpc_url: str, tsa_addr: str, configured_loan_store: str) -> str:
+    if configured_loan_store.strip():
+        return configured_loan_store.strip()
+    return cast_call(rpc_url, tsa_addr, "loanStore()(address)").strip()
+
+
+def _resolve_subaccount_id(rpc_url: str, tsa_addr: str, configured_subaccount: str) -> int:
+    if configured_subaccount.strip():
+        return int(configured_subaccount.strip())
+    return int(run(["cast", "call", tsa_addr, "subAccount()(uint256)", "--rpc-url", rpc_url]).split()[0])
+
+
 def _block_number(rpc_url: str) -> int:
     return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
 
@@ -213,7 +244,7 @@ def run_keeper_tick(
         }, next_block
 
     scan_from, scan_to = scan_range
-    attempts, sent, queue_blocked = process_rfq_trade_queue(runtime, state=state, handled=handled)
+    attempts, sent = process_rfq_trade_queue(runtime, state=state, handled=handled, attempts_so_far=0)
     logs: list[dict[str, Any]] = []
 
     if not queue_blocked and attempts < runtime.max_per_tick:
@@ -247,7 +278,7 @@ def run_keeper_tick(
         attempts=attempts,
         sent=sent,
         advance_on_dry_run=False,
-        blocked=queue_blocked,
+        blocked=False,
     )
     if advanced:
         next_block = write_keeper_cursor(state, scan_to + 1)
@@ -358,6 +389,9 @@ def main(
         tsa_addr,
         (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip(),
     )
+    loan_store_addr = _resolve_loan_store_addr(rpc_url, tsa_addr, (env.get("LOAN_STORE") or "").strip())
+    option_asset = _resolve_option_asset_addr(rpc_url, tsa_addr, (env.get("OPTION_ASSET") or "").strip())
+    subaccount_id = _resolve_subaccount_id(rpc_url, tsa_addr, (env.get("SUBACCOUNT_ID") or "").strip())
 
     api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     derive_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()
@@ -417,6 +451,7 @@ def main(
         allowed_actions.add(ACTION_DEPOSIT_INTENT)
     if not no_return_requests:
         allowed_actions.add(ACTION_RETURN_REQUEST)
+    allowed_actions.add(ACTION_MANDATE_CREATED)
     if not allowed_actions:
         raise ValueError("no actions enabled; use --deposit-intents and/or --return-requests")
 
@@ -430,6 +465,9 @@ def main(
         withdrawal_module=withdrawal_module,
         rfq_module=rfq_module,
         wrapped_deposit_asset=wrapped_deposit_asset,
+        loan_store_addr=loan_store_addr,
+        option_asset=option_asset,
+        subaccount_id=subaccount_id,
         state_file=state_file,
         max_per_tick=max_per_tick,
         broadcast=broadcast,
