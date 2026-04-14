@@ -6,7 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ops.py_lib.keeper_logs import data_int, get_message_received_logs, order_logs, topic_hex, topic_int
+from ops.py_lib.keeper_logs import (
+    MAX_LOG_BLOCK_SPAN,
+    LogRangeNotReadyError,
+    data_int,
+    get_message_received_logs,
+    order_logs,
+    topic_hex,
+    topic_int,
+)
+from ops.py_lib.runtime import CmdError
 from ops.py_lib.keeper_loop import resolve_scan_range, resolve_start_block, should_advance_cursor
 from ops.py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor
 
@@ -140,3 +149,52 @@ class KeeperLogsTests(unittest.TestCase):
 
         self.assertEqual(topic_hex(logs[0], 1), "0xaaa")
         self.assertEqual(topic_hex(logs[1], 1), "0xbbb")
+
+    def test_get_message_received_logs_chunks_large_ranges(self) -> None:
+        payloads = [
+            json.dumps(
+                [
+                    {
+                        "blockNumber": "0x11",
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                        "transactionHash": "0xaa",
+                        "topics": ["0x0", "0xaaa", "0x1"],
+                        "data": "0x3",
+                    }
+                ]
+            ),
+            json.dumps(
+                [
+                    {
+                        "blockNumber": hex(MAX_LOG_BLOCK_SPAN + 3),
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                        "transactionHash": "0xbb",
+                        "topics": ["0x0", "0xbbb", "0x2"],
+                        "data": "0x5",
+                    }
+                ]
+            ),
+        ]
+
+        with patch("ops.py_lib.keeper_logs.run", side_effect=payloads) as mocked_run:
+            logs = get_message_received_logs("http://rpc", "0x1234", 1, MAX_LOG_BLOCK_SPAN + 3)
+
+        self.assertEqual(mocked_run.call_count, 2)
+        first_call = mocked_run.call_args_list[0].args[0]
+        second_call = mocked_run.call_args_list[1].args[0]
+        self.assertEqual(first_call[first_call.index("--from-block") + 1], "1")
+        self.assertEqual(first_call[first_call.index("--to-block") + 1], str(MAX_LOG_BLOCK_SPAN + 1))
+        self.assertEqual(second_call[second_call.index("--from-block") + 1], str(MAX_LOG_BLOCK_SPAN + 2))
+        self.assertEqual(second_call[second_call.index("--to-block") + 1], str(MAX_LOG_BLOCK_SPAN + 3))
+        self.assertEqual(topic_hex(logs[0], 1), "0xaaa")
+        self.assertEqual(topic_hex(logs[1], 1), "0xbbb")
+
+    def test_get_message_received_logs_raises_head_lag_on_stale_rpc_backend(self) -> None:
+        with patch(
+            "ops.py_lib.keeper_logs.run",
+            side_effect=CmdError("command failed (1): cast logs ...\nError: server returned an error response: error code -32602: block range extends beyond current head block"),
+        ):
+            with self.assertRaises(LogRangeNotReadyError):
+                get_message_received_logs("http://rpc", "0x1234", 10, 10)

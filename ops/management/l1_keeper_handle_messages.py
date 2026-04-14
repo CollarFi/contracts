@@ -16,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lz_harness.common import ROOT_DIR, cast_call, load_env, must  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l1_l2_env_paths  # noqa: E402
-from py_lib.keeper_logs import data_int, get_message_received_logs, topic_hex, topic_int  # noqa: E402
+from py_lib.keeper_logs import LogRangeNotReadyError, data_int, get_message_received_logs, topic_hex, topic_int  # noqa: E402
 from py_lib.keeper_loop import resolve_scan_range, resolve_start_block, should_advance_cursor  # noqa: E402
-from py_lib.keeper_signer import KeeperSigner  # noqa: E402
+from py_lib.keeper_signer import KeeperSigner, PendingTxTimeoutError  # noqa: E402
 from py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor  # noqa: E402
 from py_lib.runtime import run  # noqa: E402
 
@@ -48,6 +48,8 @@ def ensure_l1_keeper_state(state: dict[str, Any]) -> None:
         state["finalizedLoans"] = {}
     if "returnedDeposits" not in state or not isinstance(state.get("returnedDeposits"), dict):
         state["returnedDeposits"] = {}
+    if "pendingTxs" not in state or not isinstance(state.get("pendingTxs"), dict):
+        state["pendingTxs"] = {}
 
 
 def _block_number(rpc_url: str) -> int:
@@ -120,6 +122,56 @@ def _latest_unconsumed_pairs(logs: list[dict[str, Any]], *, rpc_url: str, vault_
     return by_loan
 
 
+def _pending_return_key(loan_id: int, guid: str) -> str:
+    return f"return:{loan_id}:{guid.lower()}"
+
+
+def _pending_finalize_key(loan_id: int, deposit_guid: str, trade_guid: str) -> str:
+    return f"finalize:{loan_id}:{deposit_guid.lower()}:{trade_guid.lower()}"
+
+
+def _reconcile_pending_txs(runtime: L1KeeperRuntime, state: dict[str, Any]) -> set[str]:
+    pending_entries = state["pendingTxs"]
+    if not pending_entries:
+        return set()
+    if runtime.signer is None:
+        return set(pending_entries.keys())
+
+    still_pending: set[str] = set()
+    changed = False
+    for key, entry in list(pending_entries.items()):
+        tx_hash = entry.get("tx")
+        if not isinstance(tx_hash, str) or not tx_hash:
+            del pending_entries[key]
+            changed = True
+            continue
+
+        receipt = runtime.signer.try_get_receipt(tx_hash)
+        if receipt is None:
+            still_pending.add(key)
+            continue
+
+        changed = True
+        if int(receipt["status"]) == 1:
+            loan_key = str(entry["loanId"])
+            record = {
+                "completedAt": int(time.time()),
+                "tx": tx_hash,
+            }
+            if entry["action"] == "finalizeDepositReturn":
+                record["collateralReturnedGuid"] = entry["collateralReturnedGuid"]
+                state["returnedDeposits"][loan_key] = record
+            else:
+                record["depositGuid"] = entry["depositGuid"]
+                record["tradeGuid"] = entry["tradeGuid"]
+                state["finalizedLoans"][loan_key] = record
+        del pending_entries[key]
+
+    if changed:
+        save_keeper_state(runtime.state_file, state)
+    return still_pending
+
+
 def run_keeper_tick(
     runtime: L1KeeperRuntime,
     *,
@@ -128,13 +180,34 @@ def run_keeper_tick(
     handled: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], int]:
     ensure_l1_keeper_state(state)
-    latest = _block_number(runtime.rpc_url)
+    pending_action_keys = _reconcile_pending_txs(runtime, state)
+    latest = _block_number(runtime.logs_url)
     scan_range = resolve_scan_range(next_block, latest)
     if scan_range is None:
-        return {"fromBlock": next_block, "toBlock": latest, "logs": 0, "attempted": 0, "sent": 0}, next_block
+        return {
+            "fromBlock": next_block,
+            "toBlock": latest,
+            "logs": 0,
+            "attempted": 0,
+            "sent": 0,
+            "pending": len(pending_action_keys),
+        }, next_block
 
     scan_from, scan_to = scan_range
-    logs = get_message_received_logs(runtime.logs_url, runtime.messenger_addr, scan_from, scan_to)
+    try:
+        logs = get_message_received_logs(runtime.logs_url, runtime.messenger_addr, scan_from, scan_to)
+    except LogRangeNotReadyError:
+        return {
+            "fromBlock": scan_from,
+            "toBlock": scan_to,
+            "logs": 0,
+            "attempted": 0,
+            "sent": 0,
+            "pending": len(pending_action_keys),
+            "headLag": True,
+            "advancedCursor": False,
+            "nextBlock": next_block,
+        }, next_block
     by_loan = _latest_unconsumed_pairs(logs, rpc_url=runtime.rpc_url, vault_addr=runtime.vault_addr)
 
     attempts = 0
@@ -151,6 +224,9 @@ def run_keeper_tick(
         return_requested = _return_requested(runtime.rpc_url, runtime.vault_addr, loan_id)
 
         if returned_guid:
+            pending_key = _pending_return_key(loan_id, returned_guid)
+            if pending_key in pending_action_keys:
+                continue
             if not has_pending or not return_requested:
                 handled.append(
                     {
@@ -194,6 +270,18 @@ def run_keeper_tick(
                         save_keeper_state(runtime.state_file, state)
                         item["status"] = "sent"
                         sent += 1
+                    except PendingTxTimeoutError as exc:
+                        item["tx"] = exc.tx_hash
+                        state["pendingTxs"][pending_key] = {
+                            "action": "finalizeDepositReturn",
+                            "loanId": str(loan_id),
+                            "collateralReturnedGuid": returned_guid,
+                            "tx": exc.tx_hash,
+                            "submittedAt": int(time.time()),
+                        }
+                        save_keeper_state(runtime.state_file, state)
+                        item["status"] = "pending-tx"
+                        sent += 1
                     except Exception as exc:
                         item["status"] = f"error: {exc}"
 
@@ -203,6 +291,8 @@ def run_keeper_tick(
             continue
 
         if not deposit_guid or not trade_guid:
+            if not has_pending:
+                continue
             handled.append(
                 {
                     "loanId": str(loan_id),
@@ -226,6 +316,10 @@ def run_keeper_tick(
                     "hasMandate": has_mandate,
                 }
             )
+            continue
+
+        pending_key = _pending_finalize_key(loan_id, deposit_guid, trade_guid)
+        if pending_key in pending_action_keys:
             continue
 
         attempts += 1
@@ -260,6 +354,19 @@ def run_keeper_tick(
                     save_keeper_state(runtime.state_file, state)
                     item["status"] = "sent"
                     sent += 1
+                except PendingTxTimeoutError as exc:
+                    item["tx"] = exc.tx_hash
+                    state["pendingTxs"][pending_key] = {
+                        "action": "finalizeLoan",
+                        "loanId": str(loan_id),
+                        "depositGuid": deposit_guid,
+                        "tradeGuid": trade_guid,
+                        "tx": exc.tx_hash,
+                        "submittedAt": int(time.time()),
+                    }
+                    save_keeper_state(runtime.state_file, state)
+                    item["status"] = "pending-tx"
+                    sent += 1
                 except Exception as exc:
                     item["status"] = f"error: {exc}"
 
@@ -283,6 +390,8 @@ def run_keeper_tick(
         "logs": len(logs),
         "attempted": attempts,
         "sent": sent,
+        "pending": len(pending_action_keys),
+        "headLag": False,
         "advancedCursor": advanced,
         "nextBlock": next_block,
     }, next_block
@@ -379,13 +488,20 @@ def main(
         f"messenger={messenger_addr} vault={vault_addr} startBlock={next_block}"
     )
     while True:
+        handled_start = len(handled)
         result = tick()
-        if result["attempted"] or result["logs"]:
+        tick_handled = handled[handled_start:]
+        if result.get("headLag"):
+            print(
+                f"[yellow]tick[/yellow] blocks {result['fromBlock']}..{result['toBlock']} "
+                f"waiting for rpc head sync; retrying"
+            )
+        elif result["attempted"] or result["logs"]:
             print(
                 f"[cyan]tick[/cyan] blocks {result['fromBlock']}..{result['toBlock']} "
                 f"logs={result['logs']} attempted={result['attempted']} sent={result['sent']}"
             )
-            for item in handled[-result["attempted"] :]:
+            for item in tick_handled:
                 if item.get("status") == "waiting-pair":
                     print(
                         f"  - loan={item['loanId']} waiting-pair "
