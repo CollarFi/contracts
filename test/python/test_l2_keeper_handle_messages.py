@@ -272,7 +272,7 @@ class L2KeeperTickTests(unittest.TestCase):
                 patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
                 patch(
                     "management.handlers.l2_pending_message.cast_call",
-                    side_effect=["true", _pending_message_raw(loan_id=11), "true", "false"],
+                    side_effect=["true", _pending_message_raw(loan_id=11), "true", "false", "false", "false"],
                 ),
                 patch("management.handlers.l2_pending_message.quote_ack_native_fee", return_value=100),
                 patch("management.handlers.l2_pending_message.submit_api_for_pending_message") as submit_api_mock,
@@ -296,6 +296,52 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(state["messageTxs"][guid]["depositConfirmedTx"], "0xack")
             submit_api_mock.assert_not_called()
             signer.send_tx.assert_called_once()
+
+    def test_already_executed_onchain_skips_deposit_confirm_after_return_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "keeper_l2_state.json"
+            signer = Mock()
+            runtime = self._runtime(state_file=state_file, signer=signer)
+            guid = "0x" + ("34" * 32)
+            logs = [_message_log(guid=guid, loan_id=12, action=ACTION_DEPOSIT_INTENT, block_number=415)]
+            state = {
+                "nextBlock": 410,
+                "apiSubmitted": {},
+                "rfqTradeQueue": [],
+                "rfqTradesCompleted": {},
+            }
+            handled: list[dict[str, object]] = []
+
+            with (
+                patch("ops.management.l2_keeper_handle_messages._block_number", return_value=415),
+                patch("ops.management.l2_keeper_handle_messages.get_message_received_logs", return_value=logs),
+                patch(
+                    "management.handlers.l2_pending_message.cast_call",
+                    side_effect=["true", _pending_message_raw(loan_id=12), "true", "false", "true"],
+                ),
+                patch("management.handlers.l2_pending_message.submit_api_for_pending_message") as submit_api_mock,
+                patch("management.handlers.l2_pending_message.quote_ack_native_fee") as quote_fee_mock,
+            ):
+                result, next_block = run_keeper_tick(
+                    runtime,
+                    state=state,
+                    next_block=410,
+                    handled=handled,
+                    rfq_trade_file=None,
+                )
+
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["sent"], 1)
+            self.assertTrue(result["advancedCursor"])
+            self.assertEqual(next_block, 416)
+            self.assertEqual(handled[-1]["status"], "sent")
+            self.assertEqual(handled[-1]["deriveApi"]["status"], "alreadyExecutedOnchain")
+            self.assertEqual(handled[-1]["depositConfirmedSkipped"], "return-completed")
+            self.assertNotIn("depositConfirmedTx", handled[-1])
+            self.assertNotIn(guid, state["messageTxs"])
+            submit_api_mock.assert_not_called()
+            quote_fee_mock.assert_not_called()
+            signer.send_tx.assert_not_called()
 
     def test_local_atomic_replay_skips_when_return_request_already_executed_onchain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

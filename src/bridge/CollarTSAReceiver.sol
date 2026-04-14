@@ -300,6 +300,12 @@ contract CollarTSAReceiver is Initializable, AccessControlUpgradeable, OAppUpgra
         if (depositConfirmed[loanId]) {
             revert CTR_DepositAlreadyConfirmed();
         }
+        if (returnCompleted[loanId]) {
+            revert CTR_ReturnAlreadyCompleted();
+        }
+        if (collateralReturnedSent[loanId]) {
+            revert CTR_CollateralAlreadySent();
+        }
         if (!tsa.depositExecuted(loanId)) {
             revert CTR_DepositNotExecuted();
         }

@@ -389,6 +389,45 @@ contract LZMessagingTest is Test {
         assertEq(uint8(storedAction), uint8(CollarLZMessages.Action.DepositConfirmed));
     }
 
+    function testSendDepositConfirmedAfterExecutionRevertsAfterCollateralReturned() public {
+        bytes32 depositSocketMessageId = bytes32(uint256(100));
+        CollarLZMessages.Message memory depositMessage =
+            _buildMessage(CollarLZMessages.Action.DepositIntent, depositSocketMessageId);
+
+        socket.setExecuted(depositSocketMessageId, true);
+        token.mint(address(receiver), depositMessage.amount);
+
+        bytes32 depositGuid = messenger.sendDepositIntentAutoFee{value: 1}(
+            depositMessage.loanId,
+            depositMessage.asset,
+            depositMessage.amount,
+            depositMessage.recipient,
+            depositMessage.subaccountId,
+            depositMessage.socketMessageId,
+            address(this)
+        );
+        _deliverToReceiver(depositGuid, depositMessage);
+        receiver.handleMessage(depositGuid);
+
+        CollarLZMessages.Message memory returnMessage = _buildMessage(CollarLZMessages.Action.ReturnRequest, bytes32(0));
+        bytes32 returnGuid = messenger.sendReturnRequestAutoFee{value: 1}(
+            returnMessage.loanId,
+            returnMessage.asset,
+            returnMessage.amount,
+            returnMessage.recipient,
+            returnMessage.subaccountId,
+            address(this)
+        );
+        _deliverToReceiver(returnGuid, returnMessage);
+        receiver.handleMessage(returnGuid);
+
+        receiver.sendCollateralReturned{value: 1}(depositMessage.loanId, address(token), 2e18, bytes32(uint256(301)));
+        tsa.setDepositExecuted(depositMessage.loanId, true);
+
+        vm.expectRevert(CollarTSAReceiver.CTR_ReturnAlreadyCompleted.selector);
+        receiver.sendDepositConfirmedAfterExecution{value: 1}(depositMessage.loanId);
+    }
+
     function testHandleDepositRevertsOnMismatchedUnderlyingAsset() public {
         bytes32 socketMessageId = bytes32(uint256(300));
         CollarLZMessages.Message memory message = _buildMessage(CollarLZMessages.Action.DepositIntent, socketMessageId);

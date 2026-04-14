@@ -252,6 +252,27 @@ def _deposit_already_confirmed(runtime: Any, *, loan_id: int) -> bool:
     return raw.strip().lower() == "true"
 
 
+def _deposit_confirm_blocked_by_return(runtime: Any, *, loan_id: int) -> bool:
+    return_completed = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "returnCompleted(uint256)(bool)",
+        str(int(loan_id)),
+        allow_fail=True,
+    )
+    if return_completed.strip().lower() == "true":
+        return True
+
+    collateral_returned_sent = cast_call(
+        runtime.rpc_url,
+        runtime.receiver_addr,
+        "collateralReturnedSent(uint256)(bool)",
+        str(int(loan_id)),
+        allow_fail=True,
+    )
+    return collateral_returned_sent.strip().lower() == "true"
+
+
 def _load_pending_message(runtime: Any, guid: str) -> tuple[str, dict[str, Any]]:
     pending_raw = cast_call(
         runtime.rpc_url,
@@ -307,14 +328,17 @@ def _submit_follow_up(
             unlocked=runtime.unlocked,
         )
         if action_type == ACTION_DEPOSIT_INTENT:
-            fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
-            fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-            ack_hash = _send_deposit_confirmed_after_execution(
-                runtime,
-                loan_id=loan_id,
-                value_wei=int(fee_with_buffer),
-            )
-            item_updates["depositConfirmedTx"] = ack_hash
+            if _deposit_confirm_blocked_by_return(runtime, loan_id=loan_id):
+                item_updates["depositConfirmedSkipped"] = "return-completed"
+            else:
+                fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
+                fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
+                ack_hash = _send_deposit_confirmed_after_execution(
+                    runtime,
+                    loan_id=loan_id,
+                    value_wei=int(fee_with_buffer),
+                )
+                item_updates["depositConfirmedTx"] = ack_hash
         elif action_type == ACTION_RETURN_REQUEST and not _collateral_return_already_sent(runtime, loan_id=loan_id):
             fee_with_buffer = _quote_collateral_return_native_fee(runtime, loan_id=loan_id, pending_message=pending_message)
             bridge_hash = _bridge_pending_return_and_notify(
@@ -333,14 +357,17 @@ def _submit_follow_up(
                 "loanId": str(loan_id),
             }
             if action_type == ACTION_DEPOSIT_INTENT and not _deposit_already_confirmed(runtime, loan_id=loan_id):
-                fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
-                fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
-                ack_hash = _send_deposit_confirmed_after_execution(
-                    runtime,
-                    loan_id=loan_id,
-                    value_wei=int(fee_with_buffer),
-                )
-                item_updates["depositConfirmedTx"] = ack_hash
+                if _deposit_confirm_blocked_by_return(runtime, loan_id=loan_id):
+                    item_updates["depositConfirmedSkipped"] = "return-completed"
+                else:
+                    fee = quote_ack_native_fee(runtime.rpc_url, runtime.receiver_addr, pending_raw)
+                    fee_with_buffer = fee + (fee * runtime.lz_fee_buffer_bps) // 10_000
+                    ack_hash = _send_deposit_confirmed_after_execution(
+                        runtime,
+                        loan_id=loan_id,
+                        value_wei=int(fee_with_buffer),
+                    )
+                    item_updates["depositConfirmedTx"] = ack_hash
             elif action_type == ACTION_RETURN_REQUEST and not _collateral_return_already_sent(runtime, loan_id=loan_id):
                 fee_with_buffer = _quote_collateral_return_native_fee(runtime, loan_id=loan_id, pending_message=pending_message)
                 bridge_hash = _bridge_pending_return_and_notify(
