@@ -247,7 +247,7 @@ def run_keeper_tick(
     attempts, sent = process_rfq_trade_queue(runtime, state=state, handled=handled, attempts_so_far=0)
     logs: list[dict[str, Any]] = []
 
-    if not queue_blocked and attempts < runtime.max_per_tick:
+    if attempts < runtime.max_per_tick:
         try:
             logs = get_message_received_logs(runtime.rpc_url, runtime.receiver_addr, scan_from, scan_to)
         except LogRangeNotReadyError:
