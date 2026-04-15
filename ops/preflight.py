@@ -9,7 +9,14 @@ from rich import print
 
 from lz_harness.common import ROOT_DIR, load_env
 from py_lib.envs import resolve_l1_l2_env_paths
-from py_lib.preflight_checks import asset_mapping_check, l2_message_preflight, peer_check, recipient_check, uln_route_check
+from py_lib.preflight_checks import (
+    asset_mapping_check,
+    l2_message_preflight,
+    peer_check,
+    recipient_check,
+    uln_route_check,
+    vault_recipient_check,
+)
 
 app = typer.Typer(add_completion=False, help="Unified preflight router")
 
@@ -57,8 +64,10 @@ def all_checks(
     effective_env_profile = env_profile or "testnet"
     l1_env_file, l2_env_file = resolve_l1_l2_env_paths(effective_env_profile, l1_env_file, l2_env_file)
     l1 = load_env(l1_env_file)
+    l2 = load_env(l2_env_file)
 
     recipient = recipient_check(l1_env_file, l2_env_file, env_profile=effective_env_profile)
+    vault_recipient = vault_recipient_check(l1_env_file, l2_env_file, env_profile=effective_env_profile)
     peer = peer_check(l1_env_file, l2_env_file, env_profile=effective_env_profile)
 
     uln = None
@@ -79,13 +88,25 @@ def all_checks(
         messages_ok = all(bool(r.get("ok")) for r in messages_out.get("results", []))
 
     uln_ok = True if uln is None else bool(uln.get("ok", False))
-    ok = bool(recipient.get("ok")) and bool(peer.get("ok")) and uln_ok and bool(assets_out.get("ok")) and messages_ok
+    ok = (
+        bool(recipient.get("ok"))
+        and bool(vault_recipient.get("ok"))
+        and bool(peer.get("ok"))
+        and uln_ok
+        and bool(assets_out.get("ok"))
+        and messages_ok
+    )
 
     env_name = effective_env_profile
     recommendations: list[str] = []
     if not recipient.get("ok"):
         recommendations.append(
             f"cast send {recipient['vault']} 'setL2Recipient(address)' {recipient['l2Receiver']} --rpc-url {l1['RPC_URL']} --account {l1.get('ACCOUNT', '<ACCOUNT>')}"
+        )
+    if not vault_recipient.get("ok"):
+        recommendations.append(
+            f"cast send {vault_recipient['receiver']} 'setVaultRecipient(address)' {vault_recipient['expectedVaultRecipient']} "
+            f"--rpc-url {l2['RPC_URL']} --account {l2.get('ACCOUNT', '<ACCOUNT>')}"
         )
     if not peer.get("ok"):
         recommendations.append(f"uv run python ops/ensure_lz_route.py --env {env_name} --broadcast")
@@ -106,6 +127,7 @@ def all_checks(
         "ok": ok,
         "checks": {
             "recipient": recipient,
+            "vaultRecipient": vault_recipient,
             "peer": peer,
             "uln": uln,
             "assetMapping": assets_out,
@@ -120,6 +142,10 @@ def all_checks(
 
     print(f"[bold]Unified preflight[/bold] {'[green]OK[/green]' if ok else '[red]FAIL[/red]'}")
     print(f"  recipient: {'OK' if recipient['ok'] else 'MISMATCH'} ({recipient['l1Recipient']} vs {recipient['l2Receiver']})")
+    print(
+        f"  vault recipient: {'OK' if vault_recipient['ok'] else 'MISMATCH'} "
+        f"({vault_recipient['actualVaultRecipient']} vs {vault_recipient['expectedVaultRecipient']})"
+    )
     print(f"  peers: {'OK' if peer.get('ok') else 'FAIL'}")
     if uln is not None:
         print(f"  ULN/route: {'OK' if uln.get('ok', False) else 'FAIL'}")

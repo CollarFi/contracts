@@ -7,9 +7,21 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
+from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from .deploy_engine import ArtifactLoader
 from .signers import ResolvedSigner, SignerInput, resolve_signer
+
+
+class PendingTxTimeoutError(RuntimeError):
+    def __init__(self, *, label: str, tx_hash: str, nonce: int, timeout_seconds: int) -> None:
+        self.label = label
+        self.tx_hash = tx_hash
+        self.nonce = int(nonce)
+        self.timeout_seconds = int(timeout_seconds)
+        super().__init__(
+            f"{label} pending after {self.timeout_seconds}s: tx={self.tx_hash} nonce={self.nonce}"
+        )
 
 
 @dataclass
@@ -27,6 +39,8 @@ class KeeperSigner:
 
     w3: Web3
     signer: ResolvedSigner
+    receipt_timeout_seconds: int = 120
+    receipt_poll_seconds: float = 1.0
     _private_key_hex: str | None = None
     _nonce_cache: int | None = None
 
@@ -79,10 +93,27 @@ class KeeperSigner:
 
     def _next_nonce(self) -> int:
         if self._nonce_cache is None:
-            self._nonce_cache = int(self.w3.eth.get_transaction_count(self.address))
+            self._nonce_cache = int(self.w3.eth.get_transaction_count(self.address, block_identifier="pending"))
         nonce = self._nonce_cache
         self._nonce_cache += 1
         return nonce
+
+    def _fee_params(self) -> dict[str, int]:
+        latest_block = self.w3.eth.get_block("latest")
+        base_fee = latest_block.get("baseFeePerGas")
+        suggested_gas_price = int(self.w3.eth.gas_price)
+        if base_fee is None:
+            return {"gasPrice": suggested_gas_price}
+
+        try:
+            priority_fee = int(self.w3.eth.max_priority_fee)
+        except Exception:
+            priority_fee = max(1, suggested_gas_price - int(base_fee))
+        max_fee = max((int(base_fee) * 2) + priority_fee, suggested_gas_price)
+        return {
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority_fee,
+        }
 
     @staticmethod
     def _signed_raw_tx(signed: Any) -> bytes:
@@ -98,6 +129,31 @@ class KeeperSigner:
         if raw is None:
             raise AttributeError("signed transaction has neither raw_transaction nor rawTransaction")
         return bytes(raw)
+
+    def _wait_for_receipt(self, tx_hash: HexBytes | bytes | str, *, label: str, nonce: int) -> dict[str, Any]:
+        tx_hash_hex = HexBytes(tx_hash).hex()
+        try:
+            receipt = self.w3.eth.wait_for_transaction_receipt(
+                tx_hash,
+                timeout=self.receipt_timeout_seconds,
+                poll_latency=self.receipt_poll_seconds,
+            )
+        except TimeExhausted as exc:
+            raise PendingTxTimeoutError(
+                label=label,
+                tx_hash=tx_hash_hex,
+                nonce=nonce,
+                timeout_seconds=self.receipt_timeout_seconds,
+            ) from exc
+        if int(receipt["status"]) != 1:
+            raise RuntimeError(f"{label} reverted: {tx_hash_hex}")
+        return receipt
+
+    def try_get_receipt(self, tx_hash: str) -> dict[str, Any] | None:
+        try:
+            return self.w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None
 
     def send_tx(self, *, to: str, data: bytes, value_wei: int = 0, label: str) -> str:
         """Sign and send a raw transaction.
@@ -116,7 +172,7 @@ class KeeperSigner:
             "chainId": int(self.w3.eth.chain_id),
             "nonce": self._next_nonce(),
         }
-        tx["gasPrice"] = int(self.w3.eth.gas_price)
+        tx.update(self._fee_params())
 
         # Gas estimation
         estimated = int(self.w3.eth.estimate_gas(tx))
@@ -129,9 +185,7 @@ class KeeperSigner:
             signed = self.w3.eth.account.sign_transaction(tx, pk)
             tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-        if int(receipt["status"]) != 1:
-            raise RuntimeError(f"{label} reverted: {HexBytes(tx_hash).hex()}")
+        self._wait_for_receipt(tx_hash, label=label, nonce=int(tx["nonce"]))
         return HexBytes(tx_hash).hex()
 
     def send_contract_tx(
@@ -162,8 +216,8 @@ class KeeperSigner:
                 "from": self.address,
                 "chainId": int(self.w3.eth.chain_id),
                 "nonce": self._next_nonce(),
-                "gasPrice": int(self.w3.eth.gas_price),
                 "value": int(value_wei or 0),
+                **self._fee_params(),
             }
         )
 
@@ -177,9 +231,7 @@ class KeeperSigner:
             signed = self.w3.eth.account.sign_transaction(tx, pk)
             tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-        if int(receipt["status"]) != 1:
-            raise RuntimeError(f"{label} reverted: {HexBytes(tx_hash).hex()}")
+        self._wait_for_receipt(tx_hash, label=label, nonce=int(tx["nonce"]))
         return HexBytes(tx_hash).hex()
 
     def sign_hash(self, digest_hex: str, *, label: str) -> str:

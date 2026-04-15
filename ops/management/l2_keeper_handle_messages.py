@@ -30,7 +30,7 @@ from management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_RET
 from management.l2_common import assert_tsa_signer  # noqa: E402
 from py_lib.deployments import resolve_addr  # noqa: E402
 from py_lib.envs import resolve_l2_env_path  # noqa: E402
-from py_lib.keeper_logs import get_message_received_logs  # noqa: E402
+from py_lib.keeper_logs import LogRangeNotReadyError, get_message_received_logs  # noqa: E402
 from py_lib.keeper_loop import resolve_scan_range, should_advance_cursor  # noqa: E402
 from py_lib.keeper_signer import KeeperSigner  # noqa: E402
 from py_lib.keeper_state import load_keeper_state, read_keeper_cursor, save_keeper_state, write_keeper_cursor  # noqa: E402
@@ -177,6 +177,8 @@ def run_keeper_tick(
     handled: list[dict[str, Any]],
     rfq_trade_file: Path | None,
 ) -> tuple[dict[str, Any], int]:
+    ensure_api_state(state)
+    ensure_rfq_trade_state(state)
     enqueue_summary = enqueue_rfq_trades_from_file(state, rfq_trade_file)
     if enqueue_summary["added"]:
         save_keeper_state(runtime.state_file, state)
@@ -199,7 +201,21 @@ def run_keeper_tick(
     logs: list[dict[str, Any]] = []
 
     if not queue_blocked and attempts < runtime.max_per_tick:
-        logs = get_message_received_logs(runtime.rpc_url, runtime.receiver_addr, scan_from, scan_to)
+        try:
+            logs = get_message_received_logs(runtime.rpc_url, runtime.receiver_addr, scan_from, scan_to)
+        except LogRangeNotReadyError:
+            return {
+                "fromBlock": scan_from,
+                "toBlock": scan_to,
+                "logs": 0,
+                "attempted": attempts,
+                "sent": sent,
+                "rfqTradeQueueAdded": enqueue_summary["added"],
+                "rfqTradeQueueSkipped": enqueue_summary["skipped"],
+                "headLag": True,
+                "advancedCursor": False,
+                "nextBlock": next_block,
+            }, next_block
         log_attempts, log_sent = process_message_logs(
             runtime,
             state=state,
@@ -229,6 +245,7 @@ def run_keeper_tick(
         "sent": sent,
         "rfqTradeQueueAdded": enqueue_summary["added"],
         "rfqTradeQueueSkipped": enqueue_summary["skipped"],
+        "headLag": False,
         "advancedCursor": advanced,
         "nextBlock": next_block,
     }, next_block
@@ -449,16 +466,34 @@ def main(
     while True:
         try:
             result = tick()
-            if result["attempted"]:
+            if result.get("headLag"):
+                print(
+                    f"[yellow][tick][/yellow] blocks {result['fromBlock']}..{result['toBlock']} "
+                    f"waiting for rpc head sync; retrying"
+                )
+            elif result["attempted"]:
                 print(
                     f"[cyan][tick][/cyan] blocks {result['fromBlock']}..{result['toBlock']} "
                     f"logs={result['logs']} attempted={result['attempted']} sent={result['sent']} "
                     f"advanced={result.get('advancedCursor', False)}"
                 )
                 for item in handled[-result["attempted"] :]:
+                    tx_parts = []
+                    if item.get("tx"):
+                        tx_parts.append(f"handleTx={item['tx']}")
+                    derive_api = item.get("deriveApi")
+                    if isinstance(derive_api, dict) and derive_api.get("matchingTx"):
+                        tx_parts.append(f"matchTx={derive_api['matchingTx']}")
+                    if item.get("depositConfirmedTx"):
+                        tx_parts.append(f"ackTx={item['depositConfirmedTx']}")
+                    if item.get("collateralReturnedTx"):
+                        tx_parts.append(f"returnTx={item['collateralReturnedTx']}")
+                    if item.get("tradeConfirmedTx"):
+                        tx_parts.append(f"tradeTx={item['tradeConfirmedTx']}")
+                    tx_text = (" " + " ".join(tx_parts)) if tx_parts else ""
                     print(
                         f"  - {item['action']} loan={item['loanId']} guid={item.get('guid', item.get('queueKey', '?'))} "
-                        f"block={item.get('eventBlock', '?')} -> {item['status']}"
+                        f"block={item.get('eventBlock', '?')}{tx_text} -> {item['status']}"
                     )
         except Exception as exc:
             print(f"[red][error][/red] {exc}")

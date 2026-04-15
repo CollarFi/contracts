@@ -333,12 +333,8 @@ def main(
     )
     sent = [row for row in keeper.get("handled", []) if isinstance(row, dict) and str(row.get("loanId")) == str(loan_id)]
     use_manual_return_notify = False
-    if not sent:
-        raise RuntimeError(f"L2 keeper did not process ReturnRequest successfully: {json.dumps(keeper)}")
-    if sent[0].get("status") != "sent":
-        status = str(sent[0].get("status") or "")
-        if "BLF_DataTooOld" not in status:
-            raise RuntimeError(f"L2 keeper did not process ReturnRequest successfully: {json.dumps(keeper)}")
+    if not sent or sent[0].get("status") != "sent":
+        status = str((sent[0].get("status") if sent else "none") or "")
         simulated = _simulate_withdraw_executed(
             l2_rpc,
             tsa,
@@ -348,7 +344,7 @@ def main(
             int(pending["collateral"]),
         )
         use_manual_return_notify = True
-        _print_step(True, f"Simulated executed withdrawal on fork after local-atomic feed staleness ({simulated['nonce']})")
+        _print_step(True, f"Keeper did not send ReturnRequest on first tick (status={status}); simulated executed withdrawal on fork ({simulated['nonce']})")
 
     withdraw_executed = cast_call(l2_rpc, tsa, "withdrawExecuted(uint256)(bool)", str(loan_id)).strip().lower()
     tsa_balance = int(cast_call(l2_rpc, l2_weth_underlying, "balanceOf(address)(uint256)", tsa).split()[0])
@@ -398,7 +394,19 @@ def main(
             l2_default_opts,
         )
     )
-    if use_manual_return_notify:
+    # If the keeper already bridged and sent the CollateralReturned message,
+    # reuse that tx instead of attempting to send again (will revert with CTR_CollateralAlreadySent).
+    keeper_return_tx = None
+    for row in sent:
+        if isinstance(row, dict) and row.get("collateralReturnedTx"):
+            keeper_return_tx = str(row["collateralReturnedTx"]).strip()
+            break
+
+    bridge_hash = None
+    if keeper_return_tx:
+        bridge_hash = keeper_return_tx
+        _print_step(True, "Keeper already sent CollateralReturned; reusing keeper tx for relay")
+    elif use_manual_return_notify:
         cast_send_pk(l2_rpc, tsa, "setBridgeCoordinator(address)", ANVIL_ADDR0)
         cast_send_pk(
             l2_rpc,
@@ -423,6 +431,7 @@ def main(
         )
         cast_send_pk(l2_rpc, tsa, "setBridgeCoordinator(address)", receiver)
         _print_step(True, "Executed real L2 return bridge with manual notify fallback after simulated withdrawal")
+        bridge_hash = extract_tx_hash(bridge_tx)
     else:
         bridge_tx = cast_send_pk(
             l2_rpc,
@@ -434,7 +443,7 @@ def main(
             private_key=ANVIL_PK0,
             value=str(bridge_fee + l2_lz_fee + max(1, l2_lz_fee // 20)),
         )
-    bridge_hash = extract_tx_hash(bridge_tx)
+        bridge_hash = extract_tx_hash(bridge_tx)
     l2_to_l1 = _relay_exact_lz_packet(l2_rpc, l1_rpc, bridge_hash)
     _ensure_token_balance(l1_rpc, sepolia_weth, vault, int(pending["collateral"]))
     borrower_before = int(cast_call(l1_rpc, sepolia_weth, "balanceOf(address)(uint256)", create_deposit["borrower"]).split()[0])

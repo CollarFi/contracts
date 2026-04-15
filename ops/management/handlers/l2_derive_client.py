@@ -21,6 +21,7 @@ from management.handlers.l2_tsa_actions import (  # noqa: E402
 )
 
 T = TypeVar("T")
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 def to_decimal_str(amount: int, decimals: int) -> str:
@@ -80,6 +81,7 @@ def build_pending_message_debug_payload(
     tsa_addr: str,
     fallback_asset_name: str,
     rpc_url: str,
+    metadata_asset_addr: str | None = None,
     nonce: int | None = None,
     signature_expiry_sec: int | None = None,
 ) -> dict[str, Any]:
@@ -92,9 +94,11 @@ def build_pending_message_debug_payload(
         if resolved_expiry is None:
             resolved_expiry = fresh_expiry
 
+    amount_asset = metadata_asset_addr or str(pending_message["asset"])
+
     return {
-        "amount": to_decimal_str(int(pending_message["amount"]), _erc20_decimals(rpc_url, pending_message["asset"])),
-        "asset_name": resolve_asset_name(fallback_asset_name, pending_message["asset"], rpc_url),
+        "amount": to_decimal_str(int(pending_message["amount"]), _erc20_decimals(rpc_url, amount_asset)),
+        "asset_name": resolve_asset_name(fallback_asset_name, amount_asset, rpc_url),
         "is_atomic_signing": True,
         "nonce": int(resolved_nonce),
         "signature_expiry_sec": int(resolved_expiry),
@@ -216,15 +220,20 @@ def submit_api_for_pending_message(
     fallback_asset_name: str,
     rpc_url: str,
 ) -> dict[str, Any]:
+    action_config = resolve_tsa_action_config(rpc_url, tsa_addr)
+    metadata_asset_addr = None
+    if action_type == ACTION_RETURN_REQUEST:
+        metadata_asset_addr = _metadata_asset(rpc_url, action_config["wrappedDepositAsset"])
+
     debug_payload = build_pending_message_debug_payload(
         pending_message=pending_message,
         tsa_addr=tsa_addr,
         fallback_asset_name=fallback_asset_name,
         rpc_url=rpc_url,
+        metadata_asset_addr=metadata_asset_addr,
     )
     nonce = int(debug_payload["nonce"])
     expiry = int(debug_payload["signature_expiry_sec"])
-    action_config = resolve_tsa_action_config(rpc_url, tsa_addr)
     local_action = build_action(
         action_type=action_type,
         pending_message=pending_message,

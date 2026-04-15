@@ -116,7 +116,16 @@ def _ensure_tsa_signer(l2_rpc: str, tsa: str, receiver: str) -> None:
         cast_send_pk(l2_rpc, tsa, "setSigner(address,bool)", ANVIL_ADDR0, "true")
 
 
-def _inject_return_request(l2_rpc: str, receiver: str, guid: str, loan_id: int, asset: str, recipient: str, subaccount_id: int) -> str:
+def _inject_return_request(
+    l2_rpc: str,
+    receiver: str,
+    guid: str,
+    loan_id: int,
+    asset: str,
+    recipient: str,
+    subaccount_id: int,
+    amount: int,
+) -> str:
     endpoint = cast_call(l2_rpc, receiver, "endpoint()(address)").splitlines()[0].strip()
     _set_eth_balance(l2_rpc, endpoint)
 
@@ -127,7 +136,7 @@ def _inject_return_request(l2_rpc: str, receiver: str, guid: str, loan_id: int, 
 
     message_payload = _abi_encode(
         "f((uint8,uint256,address,uint256,address,uint256,bytes32,uint256,bytes32,uint256,bytes))",
-        f"(1,{loan_id},{asset},0,{recipient},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)",
+        f"(1,{loan_id},{asset},{amount},{recipient},{subaccount_id},0x{'00'*32},0,0x{'00'*32},0,0x)",
     )
     tx_raw = cast_send_from(
         l2_rpc,
@@ -187,18 +196,35 @@ def main(
     subaccount_id = int(cast_call(l2_rpc, tsa, "subAccount()(uint256)").split()[0])
     block_now = int(run(["cast", "block-number", "--rpc-url", l2_rpc]).split()[0])
     loan_id = 900_000 + (block_now % 90_000)
+    collateral_amount = 10**18
     request_guid = "0x" + format(90_000_000 + loan_id, "064x")
 
-    relay_tx = _inject_return_request(l2_rpc, receiver, request_guid, loan_id, sepolia_weth, vault, subaccount_id)
+    relay_tx = _inject_return_request(
+        l2_rpc,
+        receiver,
+        request_guid,
+        loan_id,
+        sepolia_weth,
+        vault,
+        subaccount_id,
+        collateral_amount,
+    )
     l2_start_block = _tx_block(l2_rpc, relay_tx)
     _print_step(True, f"Injected ReturnRequest message on L2 receiver (loanId={loan_id})")
 
     tmpdir = Path(tempfile.mkdtemp(prefix="l2-keeper-return-request-"))
     l2_env = tmpdir / ".env.l2.fork"
+    # Keep this synthetic-message test on the plain handleMessage path. Using a
+    # loopback alias avoids the keeper's local-atomic mode, which expects a
+    # real executable withdrawal flow and is covered by strict_l2_bridge_e2e.
+    keeper_l2_rpc = re.sub(r"://(?:127\.0\.0\.1|localhost)(?=[:/])", "://127.1", l2_rpc, count=1)
     _write_env_with_updates(
         ROOT / ".env.l2.testnet",
         l2_env,
-        _resolve_l2_runtime_env(l2_rpc, l2, receiver),
+        {
+            **_resolve_l2_runtime_env(l2_rpc, l2, receiver),
+            "RPC_URL": keeper_l2_rpc,
+        },
     )
 
     dry_state = tmpdir / "keeper_l2_dry_state.json"
@@ -240,6 +266,7 @@ def main(
         str(l2_start_block),
         "--once",
         "--broadcast",
+        "--no-submit-withdraw-api",
         "--private-key",
         ANVIL_PK0,
         "--json",
@@ -273,6 +300,7 @@ def main(
         str(l2_start_block),
         "--once",
         "--broadcast",
+        "--no-submit-withdraw-api",
         "--private-key",
         ANVIL_PK0,
         "--json",
