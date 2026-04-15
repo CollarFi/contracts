@@ -165,6 +165,22 @@ def _resolve_rfq_module_addr(rpc_url: str, tsa_addr: str, configured_rfq_module:
     return collar_addrs[4]
 
 
+def _resolve_wrapped_deposit_asset_addr(rpc_url: str, tsa_addr: str, configured_wrapped_asset: str) -> str:
+    if configured_wrapped_asset.strip():
+        return configured_wrapped_asset.strip()
+
+    base_addrs = _extract_addresses(
+        cast_call(
+            rpc_url,
+            tsa_addr,
+            "getBaseTSAAddresses()(address,address,address,address,address,address,address)",
+        ),
+        7,
+        "getBaseTSAAddresses",
+    )
+    return base_addrs[2]
+
+
 def _block_number(rpc_url: str) -> int:
     return int(run(["cast", "block-number", "--rpc-url", rpc_url]))
 
@@ -337,7 +353,11 @@ def main(
     deposit_module = (env.get("DEPOSIT_MODULE") or "").strip()
     withdrawal_module = (env.get("WITHDRAWAL_MODULE") or "").strip()
     rfq_module = _resolve_rfq_module_addr(rpc_url, tsa_addr, (env.get("RFQ_MODULE") or "").strip())
-    wrapped_deposit_asset = (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip()
+    wrapped_deposit_asset = _resolve_wrapped_deposit_asset_addr(
+        rpc_url,
+        tsa_addr,
+        (env.get("WRAPPED_DEPOSIT_ASSET") or "").strip(),
+    )
 
     api_url = (derive_api_url or env.get("DERIVE_API_URL") or "https://api-demo.lyra.finance").strip()
     derive_asset_name = (derive_asset_name or env.get("DERIVE_ASSET_NAME") or "ETH").strip()

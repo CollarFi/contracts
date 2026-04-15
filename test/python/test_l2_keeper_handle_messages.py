@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from ops.management.handlers.l2_tsa_actions import ACTION_DEPOSIT_INTENT, ACTION_RETURN_REQUEST
-from ops.management.l2_keeper_handle_messages import L2KeeperRuntime, run_keeper_tick
+from ops.management.handlers.l2_pending_message import _quote_collateral_return_native_fee
+from ops.management.l2_keeper_handle_messages import (
+    L2KeeperRuntime,
+    _resolve_wrapped_deposit_asset_addr,
+    run_keeper_tick,
+)
 
 
 def _message_log(*, guid: str, loan_id: int, action: int, block_number: int, log_index: int = 0) -> dict[str, object]:
@@ -469,6 +474,52 @@ class L2KeeperTickTests(unittest.TestCase):
             self.assertEqual(state["messageTxs"][guid]["collateralReturnedTx"], "0xreturn")
             submit_api_mock.assert_not_called()
             signer.send_tx.assert_called_once()
+
+    def test_resolve_wrapped_deposit_asset_from_tsa_when_env_missing(self) -> None:
+        base_raw = "\n".join(
+            [
+                "0x1111111111111111111111111111111111111111",
+                "0x2222222222222222222222222222222222222222",
+                "0x3333333333333333333333333333333333333333",
+                "0x4444444444444444444444444444444444444444",
+                "0x5555555555555555555555555555555555555555",
+                "0x6666666666666666666666666666666666666666",
+                "0x7777777777777777777777777777777777777777",
+            ]
+        )
+
+        with patch("ops.management.l2_keeper_handle_messages.cast_call", return_value=base_raw):
+            wrapped = _resolve_wrapped_deposit_asset_addr("http://l2", "0xtsa", "")
+
+        self.assertEqual(wrapped, "0x3333333333333333333333333333333333333333")
+
+    def test_quote_collateral_return_fee_uses_wrapped_underlying(self) -> None:
+        runtime = Mock()
+        runtime.rpc_url = "http://l2"
+        runtime.receiver_addr = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        runtime.tsa_addr = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        runtime.wrapped_deposit_asset = "0x9999999999999999999999999999999999999999"
+        runtime.lz_fee_buffer_bps = 500
+        pending_message = {
+            "loanId": 3,
+            "asset": "0x1111111111111111111111111111111111111111",
+            "amount": 50,
+        }
+
+        with patch(
+            "ops.management.handlers.l2_pending_message.cast_call",
+            side_effect=[
+                "0x2222222222222222222222222222222222222222",  # vaultRecipient
+                "0x3333333333333333333333333333333333333333",  # wrappedAsset()
+                "100",  # bridge fee with wrapped underlying
+                "0x",  # defaultOptions
+                "7",  # subAccount
+                "(200,0)",  # quoteMessage result
+            ],
+        ):
+            total_fee = _quote_collateral_return_native_fee(runtime, loan_id=3, pending_message=pending_message)
+
+        self.assertEqual(total_fee, 310)
 
 
 if __name__ == "__main__":

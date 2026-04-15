@@ -94,9 +94,10 @@ class KeeperSigner:
     def _next_nonce(self) -> int:
         if self._nonce_cache is None:
             self._nonce_cache = int(self.w3.eth.get_transaction_count(self.address, block_identifier="pending"))
-        nonce = self._nonce_cache
-        self._nonce_cache += 1
-        return nonce
+        return int(self._nonce_cache)
+
+    def _mark_nonce_used(self, nonce: int) -> None:
+        self._nonce_cache = int(nonce) + 1
 
     def _fee_params(self) -> dict[str, int]:
         latest_block = self.w3.eth.get_block("latest")
@@ -185,6 +186,7 @@ class KeeperSigner:
             signed = self.w3.eth.account.sign_transaction(tx, pk)
             tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
+        self._mark_nonce_used(int(tx["nonce"]))
         self._wait_for_receipt(tx_hash, label=label, nonce=int(tx["nonce"]))
         return HexBytes(tx_hash).hex()
 
@@ -231,6 +233,7 @@ class KeeperSigner:
             signed = self.w3.eth.account.sign_transaction(tx, pk)
             tx_hash = self.w3.eth.send_raw_transaction(self._signed_raw_tx(signed))
 
+        self._mark_nonce_used(int(tx["nonce"]))
         self._wait_for_receipt(tx_hash, label=label, nonce=int(tx["nonce"]))
         return HexBytes(tx_hash).hex()
 
