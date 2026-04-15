@@ -155,12 +155,19 @@ def _collateral_return_already_sent(runtime: Any, *, loan_id: int) -> bool:
 
 def _quote_collateral_return_native_fee(runtime: Any, *, loan_id: int, pending_message: dict[str, Any]) -> int:
     vault_recipient = cast_call(runtime.rpc_url, runtime.receiver_addr, "vaultRecipient()(address)").strip()
-    wrapped_underlying = cast_call(
+    wrapped_asset = getattr(runtime, "wrapped_deposit_asset", "").strip()
+    if not wrapped_asset:
+        raise RuntimeError("missing wrapped deposit asset for collateral return fee quote")
+
+    wrapped_raw = cast_call(
         runtime.rpc_url,
-        runtime.wrapped_deposit_asset,
+        wrapped_asset,
         "wrappedAsset()(address)",
         allow_fail=True,
-    ).strip().split()[0]
+    ).strip()
+    if not wrapped_raw or wrapped_raw == "N/A":
+        raise RuntimeError(f"failed to resolve wrappedAsset() for wrapped deposit asset {wrapped_asset}")
+    wrapped_underlying = wrapped_raw.split()[0]
     bridge_fee = int(
         parse_uint(cast_call(
             runtime.rpc_url,
