@@ -124,9 +124,14 @@ contract CollarVaultFinalizeModule is ICollarVaultFinalizeModule {
         }
         if (
             rfq.collateralAsset != pending.collateralAsset || rfq.collateralAmount != pending.collateralAmount
-                || rfq.maturity != uint64(pending.maturity) || rfq.putStrike != pending.putStrike
-                || rfq.borrowAmount != pending.borrowAmount
+                || rfq.maturity != uint64(pending.maturity) || rfq.borrowAmount != pending.borrowAmount
         ) {
+            revert CV_InvalidMessage();
+        }
+        // Origination fixes the pending deposit's requested put strike, but post-expiry external mandate refreshes
+        // may relax the put bound to reflect a fresh market quote. Atomic create paths stay strict and must still
+        // bind the RFQ put strike to the deposit request because the loanId is assigned in-transaction.
+        if (isInternal && rfq.putStrike != pending.putStrike) {
             revert CV_InvalidMessage();
         }
         if (rfq.callStrike == 0) {

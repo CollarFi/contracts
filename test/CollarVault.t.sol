@@ -393,7 +393,7 @@ contract CollarVaultTest is Test {
             collateralAsset: address(wbtc),
             collateralAmount: params.collateralAmount,
             maturity: uint64(params.maturity),
-            putStrike: params.putStrike,
+            putStrike: 21_000e6,
             callStrike: 26_000e6,
             borrowAmount: params.borrowAmount,
             minNetInterest: 0,
@@ -408,6 +408,24 @@ contract CollarVaultTest is Test {
 
         vm.prank(borrower);
         vault.acceptMandate{value: 0}(loanId, rfq2, rfq2Sig, secondDeadline);
+
+        (
+            address refreshedBorrower,
+            ,
+            ,
+            ,
+            uint64 refreshedDeadline,
+            ,
+            uint256 refreshedMinCallStrike,
+            uint256 refreshedMaxPutStrike,
+            ,
+            bool sentToL2
+        ) = vault.mandates(loanId);
+        assertEq(refreshedBorrower, borrower);
+        assertEq(refreshedDeadline, secondDeadline);
+        assertEq(refreshedMinCallStrike, 26_000e6);
+        assertEq(refreshedMaxPutStrike, 21_000e6);
+        assertTrue(sentToL2);
 
         vm.prank(borrower);
         vm.expectRevert(CollarVault.CV_InvalidState.selector);
