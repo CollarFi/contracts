@@ -371,6 +371,348 @@ def _select_best_quote(job: dict[str, Any], polled_quotes: list[dict[str, Any]])
     return best_quote, quote_records
 
 
+def _append_reconcile_error(handled: list[dict[str, Any]], *, loan_id: int, loan_key: str, exc: Exception) -> None:
+    handled.append(
+        {
+            "action": "RfqReconcile",
+            "loanId": str(loan_id),
+            "guid": loan_key,
+            "status": f"error: {exc}",
+        }
+    )
+
+
+def _close_terminal_job(runtime: Any, state: dict[str, Any], *, loan: dict[str, Any], job: dict[str, Any], now_ts: int) -> bool:
+    if not (loan["tradeExecuted"] or loan["returnRequested"] or loan["borrower"].lower() == ZERO_ADDRESS.lower()):
+        return False
+
+    try:
+        _cancel_open_rfq(runtime, job)
+    except Exception as exc:
+        job["error"] = str(exc)
+    job["status"] = "completed" if loan["tradeExecuted"] else "cancelled"
+    job["updatedAt"] = now_ts
+    save_keeper_state(runtime.state_file, state)
+    return True
+
+
+def _prepare_rfq_job(
+    runtime: Any,
+    state: dict[str, Any],
+    *,
+    loan_id: int,
+    loan: dict[str, Any],
+    mandate: dict[str, Any] | None,
+    job: dict[str, Any] | None,
+    now_ts: int,
+) -> dict[str, Any] | None:
+    if isinstance(job, dict) and _close_terminal_job(runtime, state, loan=loan, job=job, now_ts=now_ts):
+        return None
+
+    if mandate is None:
+        return None
+
+    next_key = _mandate_key(mandate)
+    if isinstance(job, dict) and job.get("mandateKey") != next_key:
+        try:
+            _cancel_open_rfq(runtime, job)
+        except Exception as exc:
+            job["error"] = str(exc)
+        _reset_job_for_new_mandate(job, mandate, next_key, runtime.subaccount_id)
+        save_keeper_state(runtime.state_file, state)
+
+    job = _ensure_rfq_job(state, loan_id, mandate, runtime.subaccount_id)
+    job["optionAsset"] = runtime.option_asset
+
+    if mandate["deadline"] <= now_ts:
+        try:
+            _cancel_open_rfq(runtime, job)
+        except Exception as exc:
+            job["error"] = str(exc)
+        job["status"] = "expired"
+        job["updatedAt"] = now_ts
+        save_keeper_state(runtime.state_file, state)
+        return None
+
+    if not _is_job_ready(loan, mandate):
+        job["status"] = "waiting_state"
+        job["updatedAt"] = now_ts
+        return None
+
+    return job
+
+
+def _process_rfq_send(
+    runtime: Any,
+    state: dict[str, Any],
+    handled: list[dict[str, Any]],
+    *,
+    loan_id: int,
+    loan_key: str,
+    mandate: dict[str, Any],
+    job: dict[str, Any],
+    now_ts: int,
+) -> tuple[int, int]:
+    item = {"action": "RfqSend", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
+    sent = 0
+    try:
+        request = _requested_rfq_payload(runtime, mandate, loan_id=loan_id, mandate_key=str(job["mandateKey"]))
+        job["rfq"] = {
+            "request": {
+                "direction": request["direction"],
+                "maxFee": request["maxFee"],
+                "label": request["label"],
+                "legs": request["legs"],
+            }
+        }
+        if runtime.broadcast:
+            resp = send_rfq(
+                api_url=runtime.api_url,
+                x_lyra_wallet=runtime.derive_wallet,
+                account=runtime.account,
+                private_key=runtime.private_key,
+                subaccount_id=int(job["subaccountId"]),
+                direction=request["direction"],
+                max_fee=request["maxFee"],
+                label=request["label"],
+                legs=request["legs"],
+            )
+            result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
+            job["rfq"].update(
+                {
+                    "rfqId": str(result.get("rfq_id") or result.get("rfqId") or resp.get("id") or ""),
+                    "submittedAt": now_ts,
+                    "apiId": resp.get("id"),
+                }
+            )
+            item["status"] = "sent"
+            item["rfqId"] = job["rfq"].get("rfqId")
+            sent = 1
+        job["status"] = "polling"
+        job["attempts"]["sendRfq"] = int(job["attempts"].get("sendRfq", 0)) + 1
+        job["updatedAt"] = now_ts
+        job["error"] = None
+        save_keeper_state(runtime.state_file, state)
+    except Exception as exc:
+        job["status"] = "ready_to_send"
+        job["updatedAt"] = now_ts
+        job["error"] = str(exc)
+        save_keeper_state(runtime.state_file, state)
+        item["status"] = f"error: {exc}"
+    handled.append(item)
+    return 1, sent
+
+
+def _process_rfq_poll(
+    runtime: Any,
+    state: dict[str, Any],
+    handled: list[dict[str, Any]],
+    *,
+    loan_id: int,
+    loan_key: str,
+    job: dict[str, Any],
+    now_ts: int,
+) -> tuple[int, int]:
+    item = {"action": "RfqPoll", "loanId": str(loan_id), "guid": loan_key, "status": "no-quotes"}
+    sent = 0
+    try:
+        polled = [] if not runtime.broadcast else poll_quotes(
+            api_url=runtime.api_url,
+            x_lyra_wallet=runtime.derive_wallet,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            subaccount_id=int(job["subaccountId"]),
+        )
+        best_quote, quote_records = _select_best_quote(job, polled)
+        if quote_records:
+            existing = job.get("quotes")
+            if not isinstance(existing, dict):
+                existing = {}
+            existing.update(quote_records)
+            job["quotes"] = existing
+        job["attempts"]["poll"] = int(job["attempts"].get("poll", 0)) + 1
+        if best_quote is not None:
+            qid = quote_id(best_quote["rawQuote"])
+            job["selectedQuoteId"] = qid
+            job["selectedQuote"] = best_quote
+            job["status"] = "quote_selected"
+            item["status"] = "selected"
+            item["quoteId"] = qid
+            item["expectedTotal"] = str(best_quote["expectedTotal"])
+            sent = 1
+        job["updatedAt"] = now_ts
+        job["error"] = None
+        save_keeper_state(runtime.state_file, state)
+    except Exception as exc:
+        job["status"] = "polling"
+        job["updatedAt"] = now_ts
+        job["error"] = str(exc)
+        save_keeper_state(runtime.state_file, state)
+        item["status"] = f"error: {exc}"
+    handled.append(item)
+    return 1, sent
+
+
+def _build_execute_trade(job: dict[str, Any], selected: dict[str, Any], mandate: dict[str, Any], *, loan_id: int, now_ts: int) -> dict[str, Any]:
+    execute_quote = dict(selected["executeQuote"])
+    execute_quote["rfqId"] = rfq_id(selected["rawQuote"]) or str(job.get("rfq", {}).get("rfqId", ""))
+    execute_quote["quoteId"] = quote_id(selected["rawQuote"])
+    execute_quote["maxFee"] = normalize_decimal_str(execute_quote["maxFee"])
+    execute_quote["label"] = str(job.get("rfq", {}).get("request", {}).get("label", ""))
+    return {
+        "loanId": loan_id,
+        "takerNonce": int(job["rfq"].get("submittedAt", now_ts) * 1_000_000 + loan_id % 1_000_000),
+        "callStrike": int(mandate["minCallStrike"]),
+        "putStrike": int(mandate["maxPutStrike"]),
+        "expiry": int(mandate["maturity"]),
+        "asset": ZERO_ADDRESS,
+        "amount": 0,
+        "socketMessageId": "0x" + ("00" * 32),
+        "quoteHash": quote_hash(selected["rawQuote"]) or "0x" + ("00" * 32),
+        "realizedC": int(selected["expectedC"]),
+        "executeQuote": execute_quote,
+    }
+
+
+def _process_rfq_execute(
+    runtime: Any,
+    state: dict[str, Any],
+    handled: list[dict[str, Any]],
+    *,
+    loan_id: int,
+    loan_key: str,
+    mandate: dict[str, Any],
+    job: dict[str, Any],
+    now_ts: int,
+) -> tuple[int, int]:
+    item = {"action": "RfqExecute", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
+    sent = 0
+    try:
+        selected = job.get("selectedQuote")
+        if not isinstance(selected, dict):
+            raise RuntimeError("selected quote missing from RFQ job")
+        trade = _build_execute_trade(job, selected, mandate, loan_id=loan_id, now_ts=now_ts)
+        execute_meta = sign_and_submit_rfq_execute_quote(
+            rpc_url=runtime.rpc_url,
+            tsa_addr=runtime.tsa_addr,
+            rfq_module=runtime.rfq_module,
+            trade=trade,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            api_url=runtime.api_url,
+            x_lyra_wallet=runtime.derive_wallet,
+            broadcast=runtime.broadcast,
+        )
+        job["execution"] = {
+            "completedAt": now_ts,
+            "trade": trade,
+            "deriveApi": execute_meta,
+        }
+        job["status"] = "executed"
+        job["attempts"]["execute"] = int(job["attempts"].get("execute", 0)) + 1
+        job["updatedAt"] = now_ts
+        job["error"] = None
+        save_keeper_state(runtime.state_file, state)
+        item["status"] = "sent"
+        item["deriveApi"] = execute_meta
+        sent = 1
+    except Exception as exc:
+        job["status"] = "quote_selected"
+        job["updatedAt"] = now_ts
+        job["error"] = str(exc)
+        save_keeper_state(runtime.state_file, state)
+        item["status"] = f"error: {exc}"
+    handled.append(item)
+    return 1, sent
+
+
+def _process_rfq_confirm(
+    runtime: Any,
+    state: dict[str, Any],
+    handled: list[dict[str, Any]],
+    *,
+    loan_id: int,
+    loan_key: str,
+    job: dict[str, Any],
+    now_ts: int,
+) -> tuple[int, int]:
+    item = {"action": "RfqConfirm", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
+    sent = 0
+    try:
+        execution = job.get("execution")
+        if not isinstance(execution, dict) or not isinstance(execution.get("trade"), dict):
+            raise RuntimeError("RFQ execution state missing trade payload")
+        trade_result = submit_rfq_trade_confirmation(
+            rpc_url=runtime.rpc_url,
+            receiver_addr=runtime.receiver_addr,
+            trade=execution["trade"],
+            lz_fee_buffer_bps=runtime.lz_fee_buffer_bps,
+            broadcast=runtime.broadcast,
+            account=runtime.account,
+            private_key=runtime.private_key,
+            from_addr=runtime.sender,
+            unlocked=runtime.unlocked,
+        )
+        job["confirmation"] = trade_result
+        job["status"] = "completed"
+        job["attempts"]["confirm"] = int(job["attempts"].get("confirm", 0)) + 1
+        job["updatedAt"] = now_ts
+        job["error"] = None
+        state["rfqTradesCompleted"][f"{loan_id}:{execution['trade']['takerNonce']}"] = {
+            "completedAt": now_ts,
+            "loanId": int(loan_id),
+            "takerNonce": int(execution["trade"]["takerNonce"]),
+            "tradeConfirmedTx": trade_result.get("tradeConfirmedTx"),
+            "rfqJob": True,
+        }
+        save_keeper_state(runtime.state_file, state)
+        item.update(trade_result)
+        item["status"] = "sent"
+        sent = 1
+    except Exception as exc:
+        job["status"] = "executed"
+        job["updatedAt"] = now_ts
+        job["error"] = str(exc)
+        save_keeper_state(runtime.state_file, state)
+        item["status"] = f"error: {exc}"
+    handled.append(item)
+    return 1, sent
+
+
+def _process_single_rfq_job(
+    runtime: Any,
+    state: dict[str, Any],
+    handled: list[dict[str, Any]],
+    *,
+    loan_id: int,
+    loan_key: str,
+    loan: dict[str, Any],
+    now_ts: int,
+) -> tuple[int, int]:
+    mandate = _active_mandate_snapshot(loan)
+    job = _prepare_rfq_job(
+        runtime,
+        state,
+        loan_id=loan_id,
+        loan=loan,
+        mandate=mandate,
+        job=state["rfqJobs"].get(loan_key),
+        now_ts=now_ts,
+    )
+    if mandate is None or job is None:
+        return 0, 0
+
+    if job["status"] in {"ready_to_send", "waiting_state"}:
+        return _process_rfq_send(runtime, state, handled, loan_id=loan_id, loan_key=loan_key, mandate=mandate, job=job, now_ts=now_ts)
+    if job["status"] == "polling":
+        return _process_rfq_poll(runtime, state, handled, loan_id=loan_id, loan_key=loan_key, job=job, now_ts=now_ts)
+    if job["status"] == "quote_selected":
+        return _process_rfq_execute(runtime, state, handled, loan_id=loan_id, loan_key=loan_key, mandate=mandate, job=job, now_ts=now_ts)
+    if job["status"] == "executed":
+        return _process_rfq_confirm(runtime, state, handled, loan_id=loan_id, loan_key=loan_key, job=job, now_ts=now_ts)
+    return 0, 0
+
+
 def process_rfq_jobs(runtime: Any, *, state: dict[str, Any], handled: list[dict[str, Any]], attempts_so_far: int) -> tuple[int, int]:
     attempts = 0
     sent = 0
@@ -385,248 +727,20 @@ def process_rfq_jobs(runtime: Any, *, state: dict[str, Any], handled: list[dict[
         try:
             loan = _load_l2_loan(runtime, loan_id)
         except Exception as exc:
-            handled.append(
-                {
-                    "action": "RfqReconcile",
-                    "loanId": str(loan_id),
-                    "guid": loan_key,
-                    "status": f"error: {exc}",
-                }
-            )
+            _append_reconcile_error(handled, loan_id=loan_id, loan_key=loan_key, exc=exc)
             attempts += 1
             continue
 
-        mandate = _active_mandate_snapshot(loan)
-        job = state["rfqJobs"].get(loan_key)
-
-        if job is not None and (loan["tradeExecuted"] or loan["returnRequested"] or loan["borrower"].lower() == ZERO_ADDRESS.lower()):
-            try:
-                _cancel_open_rfq(runtime, job)
-            except Exception as exc:
-                job["error"] = str(exc)
-            job["status"] = "completed" if loan["tradeExecuted"] else "cancelled"
-            job["updatedAt"] = now_ts
-            save_keeper_state(runtime.state_file, state)
-            continue
-
-        if mandate is None:
-            continue
-
-        next_key = _mandate_key(mandate)
-        if isinstance(job, dict) and job.get("mandateKey") != next_key:
-            try:
-                _cancel_open_rfq(runtime, job)
-            except Exception as exc:
-                job["error"] = str(exc)
-            _reset_job_for_new_mandate(job, mandate, next_key, runtime.subaccount_id)
-            save_keeper_state(runtime.state_file, state)
-
-        job = _ensure_rfq_job(state, loan_id, mandate, runtime.subaccount_id)
-        job["optionAsset"] = runtime.option_asset
-
-        if mandate["deadline"] <= now_ts:
-            try:
-                _cancel_open_rfq(runtime, job)
-            except Exception as exc:
-                job["error"] = str(exc)
-            job["status"] = "expired"
-            job["updatedAt"] = now_ts
-            save_keeper_state(runtime.state_file, state)
-            continue
-
-        if not _is_job_ready(loan, mandate):
-            job["status"] = "waiting_state"
-            job["updatedAt"] = now_ts
-            continue
-
-        if job["status"] in {"ready_to_send", "waiting_state"}:
-            item = {"action": "RfqSend", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
-            attempts += 1
-            try:
-                request = _requested_rfq_payload(runtime, mandate, loan_id=loan_id, mandate_key=str(job["mandateKey"]))
-                job["rfq"] = {
-                    "request": {
-                        "direction": request["direction"],
-                        "maxFee": request["maxFee"],
-                        "label": request["label"],
-                        "legs": request["legs"],
-                    }
-                }
-                if runtime.broadcast:
-                    resp = send_rfq(
-                        api_url=runtime.api_url,
-                        x_lyra_wallet=runtime.derive_wallet,
-                        account=runtime.account,
-                        private_key=runtime.private_key,
-                        subaccount_id=int(job["subaccountId"]),
-                        direction=request["direction"],
-                        max_fee=request["maxFee"],
-                        label=request["label"],
-                        legs=request["legs"],
-                    )
-                    result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
-                    job["rfq"].update(
-                        {
-                            "rfqId": str(result.get("rfq_id") or result.get("rfqId") or resp.get("id") or ""),
-                            "submittedAt": now_ts,
-                            "apiId": resp.get("id"),
-                        }
-                    )
-                    item["status"] = "sent"
-                    item["rfqId"] = job["rfq"].get("rfqId")
-                    sent += 1
-                job["status"] = "polling"
-                job["attempts"]["sendRfq"] = int(job["attempts"].get("sendRfq", 0)) + 1
-                job["updatedAt"] = now_ts
-                job["error"] = None
-                save_keeper_state(runtime.state_file, state)
-            except Exception as exc:
-                job["status"] = "ready_to_send"
-                job["updatedAt"] = now_ts
-                job["error"] = str(exc)
-                save_keeper_state(runtime.state_file, state)
-                item["status"] = f"error: {exc}"
-            handled.append(item)
-            continue
-
-        if job["status"] == "polling":
-            item = {"action": "RfqPoll", "loanId": str(loan_id), "guid": loan_key, "status": "no-quotes"}
-            attempts += 1
-            try:
-                polled = [] if not runtime.broadcast else poll_quotes(
-                    api_url=runtime.api_url,
-                    x_lyra_wallet=runtime.derive_wallet,
-                    account=runtime.account,
-                    private_key=runtime.private_key,
-                    subaccount_id=int(job["subaccountId"]),
-                )
-                best_quote, quote_records = _select_best_quote(job, polled)
-                if quote_records:
-                    existing = job.get("quotes")
-                    if not isinstance(existing, dict):
-                        existing = {}
-                    existing.update(quote_records)
-                    job["quotes"] = existing
-                job["attempts"]["poll"] = int(job["attempts"].get("poll", 0)) + 1
-                if best_quote is not None:
-                    qid = quote_id(best_quote["rawQuote"])
-                    job["selectedQuoteId"] = qid
-                    job["selectedQuote"] = best_quote
-                    job["status"] = "quote_selected"
-                    item["status"] = "selected"
-                    item["quoteId"] = qid
-                    item["expectedTotal"] = str(best_quote["expectedTotal"])
-                    sent += 1
-                job["updatedAt"] = now_ts
-                job["error"] = None
-                save_keeper_state(runtime.state_file, state)
-            except Exception as exc:
-                job["status"] = "polling"
-                job["updatedAt"] = now_ts
-                job["error"] = str(exc)
-                save_keeper_state(runtime.state_file, state)
-                item["status"] = f"error: {exc}"
-            handled.append(item)
-            continue
-
-        if job["status"] == "quote_selected":
-            item = {"action": "RfqExecute", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
-            attempts += 1
-            try:
-                selected = job.get("selectedQuote")
-                if not isinstance(selected, dict):
-                    raise RuntimeError("selected quote missing from RFQ job")
-                execute_quote = dict(selected["executeQuote"])
-                execute_quote["rfqId"] = rfq_id(selected["rawQuote"]) or str(job.get("rfq", {}).get("rfqId", ""))
-                execute_quote["quoteId"] = quote_id(selected["rawQuote"])
-                execute_quote["maxFee"] = normalize_decimal_str(execute_quote["maxFee"])
-                execute_quote["label"] = str(job.get("rfq", {}).get("request", {}).get("label", ""))
-                trade = {
-                    "loanId": loan_id,
-                    "takerNonce": int(job["rfq"].get("submittedAt", now_ts) * 1_000_000 + loan_id % 1_000_000),
-                    "callStrike": int(mandate["minCallStrike"]),
-                    "putStrike": int(mandate["maxPutStrike"]),
-                    "expiry": int(mandate["maturity"]),
-                    "asset": ZERO_ADDRESS,
-                    "amount": 0,
-                    "socketMessageId": "0x" + ("00" * 32),
-                    "quoteHash": quote_hash(selected["rawQuote"]) or "0x" + ("00" * 32),
-                    "realizedC": int(selected["expectedC"]),
-                    "executeQuote": execute_quote,
-                }
-                execute_meta = sign_and_submit_rfq_execute_quote(
-                    rpc_url=runtime.rpc_url,
-                    tsa_addr=runtime.tsa_addr,
-                    rfq_module=runtime.rfq_module,
-                    trade=trade,
-                    account=runtime.account,
-                    private_key=runtime.private_key,
-                    api_url=runtime.api_url,
-                    x_lyra_wallet=runtime.derive_wallet,
-                    broadcast=runtime.broadcast,
-                )
-                job["execution"] = {
-                    "completedAt": now_ts,
-                    "trade": trade,
-                    "deriveApi": execute_meta,
-                }
-                job["status"] = "executed"
-                job["attempts"]["execute"] = int(job["attempts"].get("execute", 0)) + 1
-                job["updatedAt"] = now_ts
-                job["error"] = None
-                save_keeper_state(runtime.state_file, state)
-                item["status"] = "sent"
-                item["deriveApi"] = execute_meta
-                sent += 1
-            except Exception as exc:
-                job["status"] = "quote_selected"
-                job["updatedAt"] = now_ts
-                job["error"] = str(exc)
-                save_keeper_state(runtime.state_file, state)
-                item["status"] = f"error: {exc}"
-            handled.append(item)
-            continue
-
-        if job["status"] == "executed":
-            item = {"action": "RfqConfirm", "loanId": str(loan_id), "guid": loan_key, "status": "dry-run"}
-            attempts += 1
-            try:
-                execution = job.get("execution")
-                if not isinstance(execution, dict) or not isinstance(execution.get("trade"), dict):
-                    raise RuntimeError("RFQ execution state missing trade payload")
-                trade_result = submit_rfq_trade_confirmation(
-                    rpc_url=runtime.rpc_url,
-                    receiver_addr=runtime.receiver_addr,
-                    trade=execution["trade"],
-                    lz_fee_buffer_bps=runtime.lz_fee_buffer_bps,
-                    broadcast=runtime.broadcast,
-                    account=runtime.account,
-                    private_key=runtime.private_key,
-                    from_addr=runtime.sender,
-                    unlocked=runtime.unlocked,
-                )
-                job["confirmation"] = trade_result
-                job["status"] = "completed"
-                job["attempts"]["confirm"] = int(job["attempts"].get("confirm", 0)) + 1
-                job["updatedAt"] = now_ts
-                job["error"] = None
-                state["rfqTradesCompleted"][f"{loan_id}:{execution['trade']['takerNonce']}"] = {
-                    "completedAt": now_ts,
-                    "loanId": int(loan_id),
-                    "takerNonce": int(execution["trade"]["takerNonce"]),
-                    "tradeConfirmedTx": trade_result.get("tradeConfirmedTx"),
-                    "rfqJob": True,
-                }
-                save_keeper_state(runtime.state_file, state)
-                item.update(trade_result)
-                item["status"] = "sent"
-                sent += 1
-            except Exception as exc:
-                job["status"] = "executed"
-                job["updatedAt"] = now_ts
-                job["error"] = str(exc)
-                save_keeper_state(runtime.state_file, state)
-                item["status"] = f"error: {exc}"
-            handled.append(item)
+        job_attempts, job_sent = _process_single_rfq_job(
+            runtime,
+            state,
+            handled,
+            loan_id=loan_id,
+            loan_key=loan_key,
+            loan=loan,
+            now_ts=now_ts,
+        )
+        attempts += job_attempts
+        sent += job_sent
 
     return attempts, sent
