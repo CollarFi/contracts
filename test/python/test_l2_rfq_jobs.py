@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +10,77 @@ from unittest.mock import patch
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ops"))
-from ops.management.handlers.l2_rfq_jobs import _select_best_quote, process_rfq_jobs
+from ops.management.handlers.l2_rfq_jobs import _load_l2_loan, _parse_l2_loan, _select_best_quote, process_rfq_jobs
+from ops.management.handlers.loan_store_compat import LOAN_STORE_GET_LOAN_CALL_SIGNATURE, LOAN_STORE_LOAN_FIELDS
+
+
+def _compiled_get_loan_components() -> list[dict[str, str]]:
+    proc = subprocess.run(
+        ["forge", "inspect", "src/interfaces/ICollarLoanStore.sol:ICollarLoanStore", "abi", "--json"],
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+    abi = json.loads(proc.stdout)
+    get_loan = next(
+        entry for entry in abi if entry.get("type") == "function" and entry.get("name") == "getLoan"
+    )
+    return list(get_loan["outputs"][0]["components"])
+
+
+class LoanStoreCompatibilityTests(unittest.TestCase):
+    def test_keeper_get_loan_signature_matches_compiled_abi(self) -> None:
+        components = _compiled_get_loan_components()
+
+        self.assertEqual(
+            [(component["name"], component["type"]) for component in components],
+            list(LOAN_STORE_LOAN_FIELDS),
+        )
+        expected_signature = f"getLoan(uint256)(({','.join(component['type'] for component in components)}))"
+        self.assertEqual(LOAN_STORE_GET_LOAN_CALL_SIGNATURE, expected_signature)
+
+    def test_parse_l2_loan_handles_trailing_consumed_bool(self) -> None:
+        raw = (
+            "(0x1111111111111111111111111111111111111111, 1, 2, 3, 4, 5, 6, 7, 8, 9, "
+            "0x2222222222222222222222222222222222222222, 10, true, false, true, false, "
+            "0x3333333333333333333333333333333333333333333333333333333333333333, 11, 12, 13, 14, 15, 16, 17, 18, true)"
+        )
+
+        loan = _parse_l2_loan(raw)
+
+        self.assertEqual(loan["borrower"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(loan["collateralAsset"], "0x2222222222222222222222222222222222222222")
+        self.assertEqual(loan["rolloverDeadline"], 18)
+        self.assertTrue(loan["depositExecuted"])
+        self.assertFalse(loan["tradeExecuted"])
+        self.assertTrue(loan["returnRequested"])
+        self.assertFalse(loan["rolloverPending"])
+        self.assertTrue(loan["consumed"])
+
+    def test_load_l2_loan_uses_shared_signature(self) -> None:
+        runtime = SimpleNamespace(
+            rpc_url="http://l2",
+            loan_store_addr="0x4444444444444444444444444444444444444444",
+        )
+        raw = (
+            "(0x1111111111111111111111111111111111111111, 1, 2, 3, 4, 5, 6, 7, 8, 9, "
+            "0x2222222222222222222222222222222222222222, 10, true, false, true, false, "
+            "0x3333333333333333333333333333333333333333333333333333333333333333, 11, 12, 13, 14, 15, 16, 17, 18, false)"
+        )
+
+        with patch("ops.management.handlers.l2_rfq_jobs.cast_call", return_value=raw) as mock_cast_call:
+            loan = _load_l2_loan(runtime, 123)
+
+        mock_cast_call.assert_called_once_with(
+            runtime.rpc_url,
+            runtime.loan_store_addr,
+            LOAN_STORE_GET_LOAN_CALL_SIGNATURE,
+            "123",
+            allow_fail=True,
+        )
+        self.assertFalse(loan["consumed"])
 
 
 class RfqQuoteSelectionTests(unittest.TestCase):

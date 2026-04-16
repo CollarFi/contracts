@@ -8,6 +8,7 @@ from typing import Any
 
 from lz_harness.common import cast_call
 from management.handlers.l2_derive_client import normalize_decimal_str, resolve_asset_name
+from management.handlers.loan_store_compat import LOAN_STORE_GET_LOAN_CALL_SIGNATURE, parse_loan_store_loan
 from management.handlers.l2_rfq_api import (
     amount_to_decimal_str,
     build_instrument_lookup,
@@ -35,53 +36,15 @@ from py_lib.keeper_state import save_keeper_state
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
-def _strip_units(value: str) -> str:
-    return value.strip().split()[0]
-
-
 def _parse_l2_loan(raw: str) -> dict[str, Any]:
-    cleaned = raw.strip()
-    if cleaned.startswith("(") and cleaned.endswith(")"):
-        cleaned = cleaned[1:-1]
-    cleaned = cleaned.replace("[", " [")
-    parts = [segment.strip() for segment in cleaned.split(",")]
-    values = [_strip_units(part) for part in parts if part.strip()]
-    if len(values) != 25:
-        raise RuntimeError(f"unexpected loan tuple output: {raw}")
-    return {
-        "borrower": values[0],
-        "borrowAmount": int(values[1]),
-        "minCallStrike": int(values[2]),
-        "maxPutStrike": int(values[3]),
-        "minNetInterest": int(values[4]),
-        "fixedInterest": int(values[5]),
-        "maxRollLtv": int(values[6]),
-        "strikeScale": int(values[7]),
-        "maturity": int(values[8]),
-        "deadline": int(values[9]),
-        "collateralAsset": values[10],
-        "collateralAmount": int(values[11]),
-        "depositExecuted": values[12].lower() == "true",
-        "tradeExecuted": values[13].lower() == "true",
-        "returnRequested": values[14].lower() == "true",
-        "rolloverPending": values[15].lower() == "true",
-        "rolloverMandateHash": values[16],
-        "rolloverMinCallStrike": int(values[17]),
-        "rolloverMaxPutStrike": int(values[18]),
-        "rolloverMinNetInterest": int(values[19]),
-        "rolloverFixedInterest": int(values[20]),
-        "rolloverMaxRollLtv": int(values[21]),
-        "rolloverStrikeScale": int(values[22]),
-        "rolloverMaturity": int(values[23]),
-        "rolloverDeadline": int(values[24]),
-    }
+    return parse_loan_store_loan(raw)
 
 
 def _load_l2_loan(runtime: Any, loan_id: int) -> dict[str, Any]:
     raw = cast_call(
         runtime.rpc_url,
         runtime.loan_store_addr,
-        "getLoan(uint256)((address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,address,uint256,bool,bool,bool,bool,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,bool))",
+        LOAN_STORE_GET_LOAN_CALL_SIGNATURE,
         str(int(loan_id)),
         allow_fail=True,
     )
