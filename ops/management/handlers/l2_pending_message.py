@@ -13,6 +13,7 @@ from management.l2_common import extract_tx_hash, wallet_address, wallet_sign  #
 from management.handlers.l2_derive_client import submit_api_for_pending_message, submit_with_retries  # noqa: E402
 from management.handlers.l2_tsa_actions import (  # noqa: E402
     ACTION_DEPOSIT_INTENT,
+    ACTION_MANDATE_CREATED,
     ACTION_RETURN_REQUEST,
     action_name,
     abi_encode,
@@ -31,6 +32,8 @@ def ensure_api_state(state: dict[str, Any]) -> None:
         state["apiSubmitted"] = {}
     if "messageTxs" not in state or not isinstance(state.get("messageTxs"), dict):
         state["messageTxs"] = {}
+    if "rfqTrackedLoans" not in state or not isinstance(state.get("rfqTrackedLoans"), dict):
+        state["rfqTrackedLoans"] = {}
 
 
 def is_local_rpc(rpc_url: str) -> bool:
@@ -238,6 +241,18 @@ def _requires_follow_up(runtime: Any, action_type: int) -> bool:
     return _should_submit_api(action_type, runtime.submit_deposit_api, runtime.submit_withdraw_api)
 
 
+def _track_rfq_loan(state: dict[str, Any], *, loan_id: int, guid: str, action: int, block_no: int) -> None:
+    if action != ACTION_MANDATE_CREATED:
+        return
+    state["rfqTrackedLoans"][str(int(loan_id))] = {
+        "loanId": int(loan_id),
+        "lastGuid": guid,
+        "lastAction": action_name(action),
+        "lastSeenBlock": int(block_no),
+        "updatedAt": int(time.time()),
+    }
+
+
 def _action_already_executed(runtime: Any, *, action_type: int, loan_id: int) -> bool:
     if action_type == ACTION_DEPOSIT_INTENT:
         raw = cast_call(runtime.rpc_url, runtime.tsa_addr, "depositExecuted(uint256)(bool)", str(int(loan_id)), allow_fail=True)
@@ -440,6 +455,8 @@ def process_message_logs(
 
         if guid is None or loan_id is None or action not in runtime.allowed_actions:
             continue
+
+        _track_rfq_loan(state, loan_id=loan_id, guid=guid, action=action, block_no=block_no)
 
         already_handled_raw = cast_call(
             runtime.rpc_url,

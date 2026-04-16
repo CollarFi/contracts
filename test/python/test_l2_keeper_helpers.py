@@ -56,6 +56,14 @@ class PendingMessageParsingTests(unittest.TestCase):
 
 
 class RfqTradeQueueTests(unittest.TestCase):
+    def test_ensure_rfq_trade_state_initializes_job_maps(self) -> None:
+        state: dict[str, object] = {}
+        ensure_rfq_trade_state(state)
+        self.assertEqual(state["rfqTradeQueue"], [])
+        self.assertEqual(state["rfqTradesCompleted"], {})
+        self.assertEqual(state["rfqJobs"], {})
+        self.assertEqual(state["rfqTrackedLoans"], {})
+
     def test_enqueue_rfq_trades_normalizes_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = {"rfqTradeQueue": [{"loanId": 10, "takerNonce": 2}], "rfqTradesCompleted": {"11:3": {}}}
