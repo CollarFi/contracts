@@ -745,6 +745,130 @@ contract LZMessagingTest is Test {
         assertEq(loan.rolloverMandateHash, mandateHash);
     }
 
+    function testHandleMandateCreatedRejectsRefreshBeforeDeadline() public {
+        uint64 firstDeadline = uint64(block.timestamp + 1 days);
+        CollarLZMessages.Message memory first = _buildMandateCreatedMessage(
+            1,
+            address(0xB0B),
+            1e18,
+            25_000e6,
+            20_000e6,
+            0,
+            0,
+            0.8e18,
+            1e18,
+            uint64(block.timestamp + 30 days),
+            firstDeadline
+        );
+
+        bytes32 firstGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
+            first.loanId,
+            first.asset,
+            first.amount,
+            first.recipient,
+            first.subaccountId,
+            first.data,
+            address(this)
+        );
+        _deliverToReceiver(firstGuid, first);
+        receiver.handleMessage(firstGuid);
+
+        CollarLZMessages.Message memory refresh = _buildMandateCreatedMessage(
+            1,
+            address(0xB0B),
+            1e18,
+            26_000e6,
+            20_000e6,
+            0,
+            0,
+            0.8e18,
+            1e18,
+            uint64(block.timestamp + 30 days),
+            uint64(firstDeadline + 1 hours)
+        );
+
+        bytes32 refreshGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
+            refresh.loanId,
+            refresh.asset,
+            refresh.amount,
+            refresh.recipient,
+            refresh.subaccountId,
+            refresh.data,
+            address(this)
+        );
+        _deliverToReceiver(refreshGuid, refresh);
+
+        vm.expectRevert(CollarLoanStore.CLS_Mismatch.selector);
+        receiver.handleMessage(refreshGuid);
+    }
+
+    function testHandleMandateCreatedAllowsRefreshAfterDeadline() public {
+        uint64 firstDeadline = uint64(block.timestamp + 1 days);
+        uint64 maturity = uint64(block.timestamp + 30 days);
+        CollarLZMessages.Message memory first = _buildMandateCreatedMessage(
+            1,
+            address(0xB0B),
+            1e18,
+            25_000e6,
+            20_000e6,
+            0,
+            0,
+            0.8e18,
+            1e18,
+            maturity,
+            firstDeadline
+        );
+
+        bytes32 firstGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
+            first.loanId,
+            first.asset,
+            first.amount,
+            first.recipient,
+            first.subaccountId,
+            first.data,
+            address(this)
+        );
+        _deliverToReceiver(firstGuid, first);
+        receiver.handleMessage(firstGuid);
+
+        vm.warp(firstDeadline + 1);
+
+        uint64 refreshedDeadline = uint64(block.timestamp + 1 days);
+        CollarLZMessages.Message memory refresh = _buildMandateCreatedMessage(
+            1,
+            address(0xB0B),
+            1e18,
+            26_000e6,
+            20_000e6,
+            0.2e18,
+            0,
+            0.75e18,
+            1e18,
+            maturity,
+            refreshedDeadline
+        );
+
+        bytes32 refreshGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
+            refresh.loanId,
+            refresh.asset,
+            refresh.amount,
+            refresh.recipient,
+            refresh.subaccountId,
+            refresh.data,
+            address(this)
+        );
+        _deliverToReceiver(refreshGuid, refresh);
+        receiver.handleMessage(refreshGuid);
+
+        ICollarLoanStore.Loan memory loan = loanStore.getLoan(1);
+        assertEq(loan.minCallStrike, 26_000e6);
+        assertEq(loan.maxPutStrike, 20_000e6);
+        assertEq(loan.minNetInterest, 0.2e18);
+        assertEq(loan.maxRollLtv, 0.75e18);
+        assertEq(loan.deadline, refreshedDeadline);
+        assertTrue(receiver.handledMessages(refreshGuid));
+    }
+
     function testSendTradeConfirmedStoresOnL1() public {
         bytes32 quoteHash = keccak256("quote");
         uint256 takerNonce = 42;
@@ -1124,6 +1248,44 @@ contract LZMessagingTest is Test {
             quoteHash: bytes32(0),
             takerNonce: 0,
             data: bytes("")
+        });
+    }
+
+    function _buildMandateCreatedMessage(
+        uint256 loanId,
+        address borrower,
+        uint256 borrowAmount,
+        uint256 minCallStrike,
+        uint256 maxPutStrike,
+        uint256 minNetInterest,
+        uint256 fixedInterest,
+        uint256 maxRollLtv,
+        uint256 strikeScale,
+        uint64 maturity,
+        uint64 deadline
+    ) internal view returns (CollarLZMessages.Message memory) {
+        return CollarLZMessages.Message({
+            action: CollarLZMessages.Action.MandateCreated,
+            loanId: loanId,
+            asset: address(token),
+            amount: borrowAmount,
+            recipient: address(this),
+            subaccountId: tsa.subAccount(),
+            socketMessageId: bytes32(0),
+            secondaryAmount: 0,
+            quoteHash: bytes32(0),
+            takerNonce: 0,
+            data: abi.encode(
+                borrower,
+                minCallStrike,
+                maxPutStrike,
+                minNetInterest,
+                fixedInterest,
+                maxRollLtv,
+                strikeScale,
+                maturity,
+                deadline
+            )
         });
     }
 
