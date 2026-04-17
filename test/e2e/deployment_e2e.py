@@ -135,6 +135,8 @@ def _peer_bytes32(addr: str) -> str:
 def _assert_upgrade_addresses(initial_l1: dict, initial_l2: dict, final_l1: dict, final_l2: dict) -> None:
     if final_l1.get("l1Vault") != initial_l1.get("l1Vault"):
         raise RuntimeError("upgrade mode changed l1Vault runtime address")
+    if final_l2.get("l2LoanStore") != initial_l2.get("l2LoanStore"):
+        raise RuntimeError("upgrade mode changed l2LoanStore runtime address")
     if final_l2.get("l2Tsa") != initial_l2.get("l2Tsa"):
         raise RuntimeError("upgrade mode changed l2Tsa runtime address")
     if final_l1.get("l1Messenger") != initial_l1.get("l1Messenger"):
@@ -144,6 +146,8 @@ def _assert_upgrade_addresses(initial_l1: dict, initial_l2: dict, final_l1: dict
 
     if final_l1.get("l1VaultImplementation") == initial_l1.get("l1VaultImplementation"):
         raise RuntimeError("upgrade mode did not upgrade l1Vault implementation")
+    if final_l2.get("l2LoanStoreImplementation") == initial_l2.get("l2LoanStoreImplementation"):
+        raise RuntimeError("upgrade mode did not upgrade l2LoanStore implementation")
     if final_l2.get("l2TsaImplementation") == initial_l2.get("l2TsaImplementation"):
         raise RuntimeError("upgrade mode did not upgrade l2Tsa implementation")
     if final_l1.get("l1MessengerImplementation") == initial_l1.get("l1MessengerImplementation"):
