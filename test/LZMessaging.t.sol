@@ -762,13 +762,7 @@ contract LZMessagingTest is Test {
         );
 
         bytes32 firstGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
-            first.loanId,
-            first.asset,
-            first.amount,
-            first.recipient,
-            first.subaccountId,
-            first.data,
-            address(this)
+            first.loanId, first.asset, first.amount, first.recipient, first.subaccountId, first.data, address(this)
         );
         _deliverToReceiver(firstGuid, first);
         receiver.handleMessage(firstGuid);
@@ -806,27 +800,11 @@ contract LZMessagingTest is Test {
         uint64 firstDeadline = uint64(block.timestamp + 1 days);
         uint64 maturity = uint64(block.timestamp + 30 days);
         CollarLZMessages.Message memory first = _buildMandateCreatedMessage(
-            1,
-            address(0xB0B),
-            1e18,
-            25_000e6,
-            20_000e6,
-            0,
-            0,
-            0.8e18,
-            1e18,
-            maturity,
-            firstDeadline
+            1, address(0xB0B), 1e18, 25_000e6, 20_000e6, 0, 0, 0.8e18, 1e18, maturity, firstDeadline
         );
 
         bytes32 firstGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
-            first.loanId,
-            first.asset,
-            first.amount,
-            first.recipient,
-            first.subaccountId,
-            first.data,
-            address(this)
+            first.loanId, first.asset, first.amount, first.recipient, first.subaccountId, first.data, address(this)
         );
         _deliverToReceiver(firstGuid, first);
         receiver.handleMessage(firstGuid);
@@ -835,17 +813,7 @@ contract LZMessagingTest is Test {
 
         uint64 refreshedDeadline = uint64(block.timestamp + 1 days);
         CollarLZMessages.Message memory refresh = _buildMandateCreatedMessage(
-            1,
-            address(0xB0B),
-            1e18,
-            26_000e6,
-            20_000e6,
-            0.2e18,
-            0,
-            0.75e18,
-            1e18,
-            maturity,
-            refreshedDeadline
+            1, address(0xB0B), 1e18, 26_000e6, 20_000e6, 0.2e18, 0, 0.75e18, 1e18, maturity, refreshedDeadline
         );
 
         bytes32 refreshGuid = messenger.sendMandateCreatedAutoFee{value: 1}(
