@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
+import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
 
 import {ICollarLoanStore} from "./interfaces/ICollarLoanStore.sol";
 
 /// @notice Canonical per-loan accounting/state on L2.
 /// @dev Written by CollarTSAReceiver (from LZ messages) and read by CollarTSA (during RFQ validation).
-contract CollarLoanStore is AccessControl, ICollarLoanStore {
+contract CollarLoanStore is Initializable, AccessControlUpgradeable, ICollarLoanStore {
     bytes32 public constant WRITER_ROLE = keccak256("WRITER_ROLE");
 
     mapping(uint256 => Loan) internal _loans;
@@ -25,11 +26,18 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
     error CLS_AlreadyConsumed();
     error CLS_Mismatch();
 
-    constructor(address admin) {
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Initializes the loan store roles for a proxied deployment.
+    function initialize(address admin) external initializer {
+        __AccessControl_init();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(WRITER_ROLE, admin);
     }
 
+    /// @notice Returns the canonical L2 state for a loan id.
     function getLoan(uint256 loanId) external view returns (Loan memory loan) {
         return _loans[loanId];
     }

@@ -238,6 +238,7 @@ contract LZMessagingTest is Test {
     MockEndpointV2 internal endpointL1;
     MockEndpointV2 internal endpointL2;
     address internal vaultRecipient;
+    CollarLoanStore internal loanStoreImplementation;
 
     uint32 internal constant L1_EID = 1;
     uint32 internal constant L2_EID = 2;
@@ -253,7 +254,16 @@ contract LZMessagingTest is Test {
         socket = new MockSocketMessageTracker();
         rfqModule = new MockRfqModule();
         tsa = new MockCollarTSA(address(wrappedDepositAsset), address(wrappedCashAsset), address(rfqModule));
-        loanStore = new CollarLoanStore(address(this));
+        loanStoreImplementation = new CollarLoanStore();
+        loanStore = CollarLoanStore(
+            address(
+                new TransparentUpgradeableProxy(
+                    address(loanStoreImplementation),
+                    address(this),
+                    abi.encodeCall(CollarLoanStore.initialize, (address(this)))
+                )
+            )
+        );
 
         messengerImplementation = new CollarVaultMessenger(address(endpointL1));
         receiverImplementation = new CollarTSAReceiver(address(endpointL2));
@@ -299,6 +309,11 @@ contract LZMessagingTest is Test {
         receiverImplementation.initialize(address(this), address(endpointL2), socket, tsa, loanStore, L1_EID);
     }
 
+    function testLoanStoreImplementationInitializeDisabled() public {
+        vm.expectRevert();
+        loanStoreImplementation.initialize(address(this));
+    }
+
     function testMessengerCannotInitializeTwice() public {
         vm.expectRevert();
         messenger.initialize(address(this), address(this), address(endpointL1), L2_EID);
@@ -307,6 +322,11 @@ contract LZMessagingTest is Test {
     function testReceiverCannotInitializeTwice() public {
         vm.expectRevert();
         receiver.initialize(address(this), address(endpointL2), socket, tsa, loanStore, L1_EID);
+    }
+
+    function testLoanStoreCannotInitializeTwice() public {
+        vm.expectRevert();
+        loanStore.initialize(address(this));
     }
 
     function testQuoteMessageReturnsFee() public {

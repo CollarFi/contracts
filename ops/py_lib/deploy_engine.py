@@ -569,6 +569,7 @@ class L2Config:
     lz_endpoint: str
     socket_tracker: str
     loan_store: str
+    loan_store_implementation: str
     tsa_proxy: str
     receiver_proxy: str
     tsa_implementation: str
@@ -741,6 +742,7 @@ def build_l2_config(env: dict[str, str], *, mode: DeployMode, proxy_admin_owner:
         lz_endpoint=(env.get("LZ_ENDPOINT") or "").strip(),
         socket_tracker=_normalize_addr(env["SOCKET_TRACKER"]),
         loan_store=(env.get("LOAN_STORE") or "").strip(),
+        loan_store_implementation=(env.get("LOAN_STORE_IMPLEMENTATION") or "").strip(),
         tsa_proxy=(env.get("TSA_PROXY") or "").strip(),
         receiver_proxy=(env.get("L2_RECEIVER") or "").strip(),
         tsa_implementation=(env.get("TSA_IMPLEMENTATION") or "").strip(),
@@ -1374,6 +1376,7 @@ def run_l2_deploy(
         existing_state=existing,
     )
 
+    cfg.loan_store = _resolve_existing_proxy({"LOAN_STORE": cfg.loan_store}, existing, "LOAN_STORE", "l2LoanStore")
     cfg.tsa_proxy = _resolve_existing_proxy({"TSA_PROXY": cfg.tsa_proxy}, existing, "TSA_PROXY", "l2Tsa")
     cfg.receiver_proxy = _resolve_existing_proxy({"L2_RECEIVER": cfg.receiver_proxy}, existing, "L2_RECEIVER", "l2Receiver")
     mode = _infer_mode(cfg.mode, {"TSA_PROXY": cfg.tsa_proxy, "L2_RECEIVER": cfg.receiver_proxy}, runtime)
@@ -1395,6 +1398,7 @@ def run_l2_deploy(
             if not resolved_loan_store:
                 raise ValueError("LOAN_STORE missing and could not resolve loanStore() from TSA proxy")
             cfg.loan_store = _normalize_addr(resolved_loan_store)
+        _preflight_proxy_admin(runtime, cfg.loan_store, "LOAN_STORE")
         if not _nonzero_addr(cfg.lz_endpoint):
             resolved_endpoint = runtime.call("CollarTSAReceiver", cfg.receiver_proxy, "endpoint")
             if not resolved_endpoint:
@@ -1427,28 +1431,84 @@ def run_l2_deploy(
         )
     )
 
-    def ensure_loan_store(rt: DeploymentRuntime) -> StepResult:
-        if _nonzero_addr(cfg.loan_store):
-            return StepResult(changed=False, outputs={"l2LoanStore": _normalize_addr(cfg.loan_store)})
+    def ensure_loan_store_impl(rt: DeploymentRuntime) -> StepResult:
+        if _nonzero_addr(cfg.loan_store_implementation):
+            return StepResult(
+                changed=False,
+                outputs={"l2LoanStoreImplementation": _normalize_addr(cfg.loan_store_implementation)},
+            )
         address, tx_hash = rt.deploy_contract(
             role="deployer",
             contract_name="CollarLoanStore",
-            constructor_args=[cfg.admin],
-            label="deploy L2 loan store",
+            constructor_args=[],
+            label="deploy L2 loan store implementation",
         )
-        return StepResult(changed=True, tx_hash=tx_hash, outputs={"l2LoanStore": address})
+        return StepResult(changed=True, tx_hash=tx_hash, outputs={"l2LoanStoreImplementation": address})
 
     steps.append(
         DeployStep(
             chain="l2",
-            target="loan_store",
+            target="loan_store_impl",
             action="ensure",
             signer_role="deployer",
-            precondition="upgrade resolves from existing TSA when unset",
-            postcondition="loan store address is known",
-            output_fields=["l2LoanStore"],
+            precondition="implementation is explicit or freshly deployed",
+            postcondition="loan store implementation address is known",
+            output_fields=["l2LoanStoreImplementation"],
             when=lambda _: True,
-            execute=ensure_loan_store,
+            execute=ensure_loan_store_impl,
+        )
+    )
+
+    def ensure_loan_store_proxy(rt: DeploymentRuntime) -> StepResult:
+        impl = rt.addrs["l2LoanStoreImplementation"]
+        if mode == "fresh":
+            init_data = rt.encode_call("CollarLoanStore", "initialize", cfg.admin)
+            proxy_addr, tx_hash = rt.deploy_contract(
+                role="deployer",
+                contract_name="TransparentUpgradeableProxy",
+                constructor_args=[_normalize_addr(impl), cfg.proxy_admin_owner, init_data],
+                label="deploy L2 loan store proxy",
+            )
+            return StepResult(
+                changed=True,
+                tx_hash=tx_hash,
+                outputs={
+                    "l2LoanStore": proxy_addr,
+                    "l2LoanStoreProxyAdmin": rt.proxy_admin_of(proxy_addr),
+                },
+            )
+
+        proxy_admin = rt.proxy_admin_of(cfg.loan_store)
+        proxy_admin_contract = rt.contract("ProxyAdmin", proxy_admin)
+        tx_hash = rt.send_contract_tx(
+            role="proxy_admin",
+            contract_call=proxy_admin_contract.functions.upgradeAndCall(
+                _normalize_addr(cfg.loan_store),
+                _normalize_addr(impl),
+                b"",
+            ),
+            label="upgrade L2 loan store proxy",
+        )
+        return StepResult(
+            changed=True,
+            tx_hash=tx_hash,
+            outputs={
+                "l2LoanStore": _normalize_addr(cfg.loan_store),
+                "l2LoanStoreProxyAdmin": proxy_admin,
+            },
+        )
+
+    steps.append(
+        DeployStep(
+            chain="l2",
+            target="loan_store_proxy",
+            action="deploy_or_upgrade",
+            signer_role="proxy_admin" if mode == "upgrade" else "deployer",
+            precondition="loan store implementation exists",
+            postcondition="loan store proxy address is current",
+            output_fields=["l2LoanStore", "l2LoanStoreProxyAdmin"],
+            when=lambda _: True,
+            execute=ensure_loan_store_proxy,
         )
     )
 
