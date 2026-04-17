@@ -70,6 +70,10 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maturity != 0 && loan.maturity != maturity) {
             revert CLS_Mismatch();
         }
+        // Pending-deposit terms are fixed on L1 and cannot change across mandate refreshes.
+        if (loan.maxPutStrike != 0 && loan.maxPutStrike != maxPutStrike) {
+            revert CLS_Mismatch();
+        }
 
         // While a mandate is still active, only identical replay is allowed.
         if (hadMandate && !expiredMandate) {
@@ -77,9 +81,6 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
                 revert CLS_Mismatch();
             }
             if (loan.minCallStrike != minCallStrike) {
-                revert CLS_Mismatch();
-            }
-            if (loan.maxPutStrike != maxPutStrike) {
                 revert CLS_Mismatch();
             }
             if (loan.minNetInterest != minNetInterest) {
