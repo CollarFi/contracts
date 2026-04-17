@@ -57,8 +57,11 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
             revert CLS_AlreadyConsumed();
         }
 
-        // If already set, require identical values.
-        if (loan.borrower != address(0) && loan.borrower != borrower) {
+        bool hadMandate = loan.borrower != address(0);
+        bool expiredMandate = hadMandate && block.timestamp >= loan.deadline;
+
+        // Core loan identity/bindings must remain consistent across mandate refreshes.
+        if (hadMandate && loan.borrower != borrower) {
             revert CLS_Mismatch();
         }
         if (loan.borrowAmount != 0 && loan.borrowAmount != borrowAmount) {
@@ -67,26 +70,31 @@ contract CollarLoanStore is AccessControl, ICollarLoanStore {
         if (loan.maturity != 0 && loan.maturity != maturity) {
             revert CLS_Mismatch();
         }
-        if (loan.deadline != 0 && loan.deadline != deadline) {
-            revert CLS_Mismatch();
-        }
-        if (loan.minCallStrike != 0 && loan.minCallStrike != minCallStrike) {
-            revert CLS_Mismatch();
-        }
+        // Pending-deposit terms are fixed on L1 and cannot change across mandate refreshes.
         if (loan.maxPutStrike != 0 && loan.maxPutStrike != maxPutStrike) {
             revert CLS_Mismatch();
         }
-        if (loan.minNetInterest != 0 && loan.minNetInterest != minNetInterest) {
-            revert CLS_Mismatch();
-        }
-        if (loan.fixedInterest != 0 && loan.fixedInterest != fixedInterest) {
-            revert CLS_Mismatch();
-        }
-        if (loan.maxRollLtv != 0 && loan.maxRollLtv != maxRollLtv) {
-            revert CLS_Mismatch();
-        }
-        if (loan.strikeScale != 0 && loan.strikeScale != strikeScale) {
-            revert CLS_Mismatch();
+
+        // While a mandate is still active, only identical replay is allowed.
+        if (hadMandate && !expiredMandate) {
+            if (loan.deadline != deadline) {
+                revert CLS_Mismatch();
+            }
+            if (loan.minCallStrike != minCallStrike) {
+                revert CLS_Mismatch();
+            }
+            if (loan.minNetInterest != minNetInterest) {
+                revert CLS_Mismatch();
+            }
+            if (loan.fixedInterest != fixedInterest) {
+                revert CLS_Mismatch();
+            }
+            if (loan.maxRollLtv != maxRollLtv) {
+                revert CLS_Mismatch();
+            }
+            if (loan.strikeScale != strikeScale) {
+                revert CLS_Mismatch();
+            }
         }
 
         // Collateral asset can be set either by deposit or mandate. Require consistency.
