@@ -54,7 +54,15 @@ contract CollarTSATestUtils is TSATestUtils {
 
         tsaImplementation = new CollarTSA();
 
-        loanStore = new CollarLoanStore(address(this));
+        loanStore = CollarLoanStore(
+            address(
+                new TransparentUpgradeableProxy(
+                    address(new CollarLoanStore()),
+                    address(this),
+                    abi.encodeCall(CollarLoanStore.initialize, (address(this)))
+                )
+            )
+        );
         OptionRiskVerifier optionRiskVerifier = new OptionRiskVerifier();
         RfqVerifier rfqVerifier = new RfqVerifier();
         CollarTsaRfqDelegateModule rfqDelegateModule = new CollarTsaRfqDelegateModule();
