@@ -10,6 +10,7 @@ import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVault, ILiquidityVault} from "../src/CollarVault.sol";
 import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
 import {IMarginEngine} from "../src/interfaces/IMarginEngine.sol";
+import {IMarginEngineRfqRouter} from "../src/interfaces/IMarginEngineRfqRouter.sol";
 import {VariableLoanPosition} from "../src/adapters/VariableLoanPosition.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockEulerAdapter} from "./mocks/MockEulerAdapter.sol";
@@ -24,6 +25,7 @@ contract CollarVaultTest is Test {
     address internal keeper = address(0xCAFE);
     address internal marketMaker = address(0xBEEF);
     address internal treasury = address(0xFEE1);
+    address internal rfqRouter = address(0xABCD);
 
     MockERC20 internal usdc;
     MockERC20 internal wbtc;
@@ -99,6 +101,26 @@ contract CollarVaultTest is Test {
         assertEq(loan.putBucketId, putBucketId);
         assertEq(loan.callStrike, rfq.callStrike);
         assertEq(usdc.balanceOf(borrower), rfq.borrowAmount);
+    }
+
+    function testSetMarginEngineRfqRouter() public {
+        vm.expectEmit(true, false, false, true);
+        emit CollarVault.MarginEngineRfqRouterUpdated(rfqRouter);
+
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(rfqRouter));
+
+        assertEq(address(vault.marginEngineRfqRouter()), rfqRouter);
+    }
+
+    function testSetMarginEngineRfqRouterRevertsOnZeroAddress() public {
+        vm.expectRevert(CollarVault.CV_InvalidConfig.selector);
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(0)));
+    }
+
+    function testSetMarginEngineRfqRouterRevertsWithoutParameterRole() public {
+        vm.prank(borrower);
+        vm.expectRevert();
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(rfqRouter));
     }
 
     function testAcceptMandateRevertsOnInvalidSignature() public {

@@ -16,6 +16,7 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {ILendingAdapter} from "./interfaces/ILendingAdapter.sol";
 import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
 import {IMarginEngine} from "./interfaces/IMarginEngine.sol";
+import {IMarginEngineRfqRouter} from "./interfaces/IMarginEngineRfqRouter.sol";
 import {IVariableLoanPosition} from "./interfaces/IVariableLoanPosition.sol";
 
 contract CollarVault is
@@ -168,6 +169,7 @@ contract CollarVault is
         address indexed asset, bool allowed, uint256 strikeScale, address indexed engineAsset
     );
     event MarginEngineUpdated(address indexed marginEngine);
+    event MarginEngineRfqRouterUpdated(address indexed marginEngineRfqRouter);
     event LendingAdapterUpdated(address indexed adapter);
     event VariableLoanPositionImplementationUpdated(address indexed implementation);
     event MandateAccepted(
@@ -201,6 +203,7 @@ contract CollarVault is
     IERC20 private _usdc;
     IAllowanceTransfer private _permit2;
     IMarginEngine private _marginEngine;
+    IMarginEngineRfqRouter private _marginEngineRfqRouter;
     ILendingAdapter private _lendingAdapter;
     address private _variableLoanPositionImplementation;
     address private _treasury;
@@ -287,6 +290,11 @@ contract CollarVault is
     /// @notice Return the same-network margin engine.
     function marginEngine() external view returns (IMarginEngine) {
         return _marginEngine;
+    }
+
+    /// @notice Return the same-network margin-engine RFQ router.
+    function marginEngineRfqRouter() external view returns (IMarginEngineRfqRouter) {
+        return _marginEngineRfqRouter;
     }
 
     /// @notice Return the lending adapter.
@@ -446,6 +454,13 @@ contract CollarVault is
         if (address(marginEngine_) == address(0)) revert CV_InvalidConfig();
         _marginEngine = marginEngine_;
         emit MarginEngineUpdated(address(marginEngine_));
+    }
+
+    /// @notice Set the same-network margin-engine RFQ router.
+    function setMarginEngineRfqRouter(IMarginEngineRfqRouter marginEngineRfqRouter_) external onlyRole(PARAMETER_ROLE) {
+        if (address(marginEngineRfqRouter_) == address(0)) revert CV_InvalidConfig();
+        _marginEngineRfqRouter = marginEngineRfqRouter_;
+        emit MarginEngineRfqRouterUpdated(address(marginEngineRfqRouter_));
     }
 
     /// @notice Legacy no-op retained for ABI compatibility.
