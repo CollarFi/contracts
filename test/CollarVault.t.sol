@@ -356,6 +356,87 @@ contract CollarVaultTest is Test {
         assertEq(newPutOutstanding, oldLoan.collateralAmount);
     }
 
+    function testExecuteRolloverSupportsInventoryBackedNewPutTransfer() public {
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
+        marginEngineRfqRouter.setProtocolFeeConfig(100, feeRecipient);
+
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        CollarVault.Loan memory oldLoan = vault.getLoan(loanId);
+
+        vm.warp(block.timestamp + 5 days);
+
+        uint64 newMaturity = uint64(block.timestamp + 40 days);
+        uint256 newPutStrike = 22_000e6;
+        uint256 newCallStrike = 28_000e6;
+        bytes32 newPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), newMaturity, newPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 newCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(newPutInstrumentId, 0, 0, newPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 newPutBucketId = marginEngine.createPutBucket(newPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(newPutBucketId, 1_000_000e6);
+        marginEngine.issuePut(newPutBucketId, oldLoan.collateralAmount * 2, marketMaker);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 newCallBucketId) = vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+
+        (address oldLongCallToken,) = marginEngine.getBucketTokens(oldLoan.callBucketId);
+        (address newLongPutToken,) = marginEngine.getBucketTokens(newPutBucketId);
+        vm.startPrank(marketMaker);
+        IERC20(oldLongCallToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+        IERC20(newLongPutToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+        vm.stopPrank();
+
+        CollarVault.RolloverMandate memory mandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: newMaturity,
+            minCallStrike: newCallStrike,
+            maxPutStrike: newPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 78
+        });
+
+        IMarginEngineRfqRouter.Action[] memory actions = _rolloverActions(
+            oldLoan, marketMaker, newPutBucketId, newPutInstrumentId, newCallBucketId, newCallInstrumentId
+        );
+        actions[3].fulfillmentType = IMarginEngineRfqRouter.FulfillmentType.Transfer;
+        actions[3].longSource = marketMaker;
+
+        IMarginEngineRfqRouter.Quote memory quote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 111,
+            salt: 212,
+            actions: actions
+        });
+
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures = new IMarginEngineRfqRouter.SignerSignature[](1);
+        signatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+
+        bytes32 mandateDigest = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateDigest);
+
+        vm.prank(keeper);
+        vault.executeRollover(loanId, mandate, abi.encodePacked(r, s, v), quote, signatures);
+
+        CollarVault.Loan memory rolledLoan = vault.getLoan(loanId);
+        assertEq(rolledLoan.putBucketId, newPutBucketId);
+        assertEq(rolledLoan.putInstrumentId, newPutInstrumentId);
+        assertEq(IERC20(newLongPutToken).balanceOf(address(vault)), oldLoan.collateralAmount);
+        assertEq(IERC20(newLongPutToken).balanceOf(marketMaker), oldLoan.collateralAmount);
+    }
+
     function testExecuteRolloverRevertsOnInvalidQuoteShape() public {
         vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
 

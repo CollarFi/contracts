@@ -154,6 +154,7 @@ contract CollarVault is
         bytes32 newCallInstrumentId;
         uint256 newPutStrike;
         uint256 newCallStrike;
+        bool newPutFromInventoryTransfer;
     }
 
     error CV_InvalidConfig();
@@ -1178,10 +1179,12 @@ contract CollarVault is
         ) revert CV_InvalidMessage();
         if (quote.actions[3].fulfillmentType == IMarginEngineRfqRouter.FulfillmentType.Mint) {
             if (quote.actions[3].longSource != address(0)) revert CV_InvalidMessage();
+            resolution.newPutFromInventoryTransfer = false;
         } else if (quote.actions[3].fulfillmentType == IMarginEngineRfqRouter.FulfillmentType.Transfer) {
             if (quote.actions[3].longSource == address(0) || quote.actions[3].maker != quote.actions[3].longSource) {
                 revert CV_InvalidMessage();
             }
+            resolution.newPutFromInventoryTransfer = true;
         } else {
             revert CV_InvalidMessage();
         }
@@ -1192,7 +1195,12 @@ contract CollarVault is
     }
 
     function _validatePostRolloverState(Loan storage loan, RolloverQuoteResolution memory resolution) internal view {
-        _validatePutBucket(resolution.newPutBucketId, resolution.newPutInstrumentId, loan.collateralAmount);
+        _validateRolloverPutPosition(
+            resolution.newPutBucketId,
+            resolution.newPutInstrumentId,
+            loan.collateralAmount,
+            resolution.newPutFromInventoryTransfer
+        );
 
         (
             bytes32 bucketInstrumentId,
@@ -1606,6 +1614,56 @@ contract CollarVault is
         (bytes32 bucketInstrumentId,, address owner,, uint256 outstanding, address primaryToken,,,,,,,,,,) =
             _marginEngine.buckets(bucketId);
         if (owner == address(0) || bucketInstrumentId != instrumentId || outstanding != expectedQuantity) {
+            revert CV_InvalidConfig();
+        }
+        if (IERC20(primaryToken).balanceOf(address(this)) != expectedQuantity) {
+            revert CV_InvalidState();
+        }
+    }
+
+    function _validateRolloverPutPosition(
+        uint256 bucketId,
+        bytes32 instrumentId,
+        uint256 expectedQuantity,
+        bool inventoryTransfer
+    ) internal view {
+        if (!inventoryTransfer) {
+            _validatePutBucket(bucketId, instrumentId, expectedQuantity);
+            return;
+        }
+
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address primaryToken,
+            address secondaryToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(bucketId);
+        bucketType;
+        collateralBalance;
+        secondaryToken;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (
+            owner == address(0) || bucketInstrumentId != instrumentId || settled || closed
+                || outstandingQuantity < expectedQuantity
+        ) {
             revert CV_InvalidConfig();
         }
         if (IERC20(primaryToken).balanceOf(address(this)) != expectedQuantity) {
