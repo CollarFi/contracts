@@ -1,6 +1,6 @@
 # CollarFi Contracts
 
-This worktree updates CollarFi from the old Derive + bridge + cross-chain architecture to a same-network architecture built around the in-house margin engine.
+This worktree contains the same-network CollarFi architecture built around the in-house margin engine.
 
 ## Core shape
 
@@ -9,12 +9,7 @@ This worktree updates CollarFi from the old Derive + bridge + cross-chain archit
 - `src/adapters/*`: variable-rate loan adapters used for neutral-expiry conversion.
 - `docs/SPEC.md`: canonical protocol behavior.
 
-The active origination and settlement path no longer depends on:
-
-- Derive subaccounts,
-- bridge adapters,
-- LayerZero messaging,
-- L1/L2 receiver handshakes.
+Collateral origination, option lifecycle management, rollover, and settlement all execute on one network.
 
 ## Local commands
 
@@ -28,6 +23,4 @@ forge fmt
 ## Notes
 
 - `docs/SPEC.md` is the source of truth for behavior.
-- The same-network integration now supports pre-maturity rollover through `MarginEngineRfqRouter` using a validated 4-leg unwind/open package.
-- `finalizeRollover(...)` remains part of the legacy ABI only; same-network rollover executes synchronously in a single transaction.
-- Legacy bridge-oriented contracts may still exist in the tree for migration/reference, but they are not part of the active core flow.
+- The same-network integration supports pre-maturity rollover through `MarginEngineRfqRouter` using a validated 4-leg unwind/open package.

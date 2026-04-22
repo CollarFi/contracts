@@ -12,7 +12,7 @@ The protocol economics remain unchanged:
 2. **Neutral**: both options finish out of the money and the borrower keeps exposure by rolling into a variable-rate loan, or a deterministic close path is used if conversion is not completed.
 3. **Call ITM**: the call caps borrower upside, lender principal is repaid, and any residual above debt goes to the borrower.
 
-The major structural change from the previous design is that CollarFi no longer bridges collateral, no longer sends cross-chain messages, and no longer depends on Derive-specific subaccounts, receivers, or messenger acknowledgements. The vault, the margin engine, the collateral, and the settlement logic all execute on one network.
+All origination, rollover, and settlement flows execute on one network inside the same deployment boundary.
 
 ## 2. Components
 
@@ -28,17 +28,9 @@ The major structural change from the previous design is that CollarFi no longer 
 
 ## 3. Same-network architecture
 
-### 3.1 Removed assumptions
+### 3.1 Deployment assumptions
 
-The protocol no longer relies on:
-
-- Derive exchange accounts or subaccounts,
-- bridge adapters,
-- LayerZero messages,
-- L1/L2 receivers or messenger acknowledgements,
-- asynchronous bridge confirmation for origination or settlement.
-
-Legacy bridge-specific contracts may remain in the repository for migration reference, but they are not part of the active loan lifecycle.
+The active deployment consists only of same-network vault, margin-engine, and lending-adapter components. Origination, rollover, and settlement execute locally inside that one deployment.
 
 ### 3.2 Margin-engine position model
 
@@ -63,7 +55,7 @@ Borrowers originate by calling either:
 - `createDepositWithMandate`, or
 - `createDepositWithMandatePermit`.
 
-The vault pulls collateral and records a `PendingDeposit`. No ETH bridge fee is required and any non-zero `msg.value` must revert.
+The vault pulls collateral and records a `PendingDeposit`.
 
 ### 4.2 Mandate acceptance
 
@@ -120,7 +112,7 @@ For ITM settlement, the vault performs two deterministic actions:
 1. Redeems option claims from `margin-engine`.
 2. Sells the redeemed underlying directly to the settlement caller at the finalized oracle spot.
 
-This removes the previous off-chain spot-RFQ and bridge-report path while preserving the loan payoff logic.
+This removes the previous off-chain spot-RFQ path while preserving the loan payoff logic.
 
 For a loan quantity `Q` and strike scale `scale`:
 
@@ -200,7 +192,7 @@ On success the vault updates the active loan in place:
 - reset `startTime`,
 - carry forward any unaccrued prior fixed interest and add the new fixed-interest amount for the rolled tenor.
 
-No asynchronous confirmation step is used in the same-network architecture. `finalizeRollover(...)` remains ABI compatibility only and must not be part of the active rollover flow.
+Rollover is fully synchronous in the same-network architecture and completes inside `executeRollover(...)`.
 
 ## 6. Safety checks
 
@@ -244,8 +236,6 @@ The implementation must enforce the following invariants.
 
 The current same-network integration deliberately does **not** implement cross-chain functionality.
 
-`finalizeRollover(...)` is also not part of the active same-network lifecycle. It is retained only for ABI compatibility; rollover execution is synchronous and must complete inside `executeRollover(...)`.
-
 ## 9. Clarifications / TODOs
 
 - **Rollover quoting**: off-chain services must continue constructing the exact 4-leg unwind/open package expected by the vault validations.
@@ -254,4 +244,4 @@ The current same-network integration deliberately does **not** implement cross-c
 
 ## 10. Conclusion
 
-CollarFi now runs as a same-network architecture: collateral stays on one chain, the local margin-engine provides option claims and final settlement state, and the vault settles deterministically without cross-chain messaging or bridge acknowledgements. This preserves the borrower and lender payoff semantics while materially simplifying the system boundary and reducing operational risk.
+CollarFi now runs as a same-network architecture: collateral stays on one chain, the local margin-engine provides option claims and final settlement state, and the vault settles deterministically inside the same deployment boundary. This preserves the borrower and lender payoff semantics while materially simplifying the system boundary and reducing operational risk.

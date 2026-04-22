@@ -1017,7 +1017,7 @@ contract CollarVaultTest is Test {
 
         vm.startPrank(borrower);
         wbtc.approve(address(vault), collateralAmount);
-        (loanId,,,) = vault.createDepositWithMandate(params, rfq, sig, uint64(block.timestamp + 1 days));
+        loanId = vault.createDepositWithMandate(params, rfq, sig, uint64(block.timestamp + 1 days));
         vm.stopPrank();
 
         rfq.loanId = loanId;

@@ -139,7 +139,7 @@ contract SameNetworkMarginEngineFlowsTest is Test {
 
         vm.startPrank(borrower);
         wbtc.approve(address(vault), 1e8);
-        (loanId,,,) =
+        loanId =
             vault.createDepositWithMandate(params, rfq, abi.encodePacked(r, s, v), uint64(block.timestamp + 1 days));
         vm.stopPrank();
 

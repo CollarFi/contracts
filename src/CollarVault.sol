@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {AccessControlUpgradeable} from "openzeppelin-upgradeable/access/AccessControlUpgradeable.sol";
 import {Initializable} from "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
 import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EIP712Upgradeable} from "openzeppelin-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -23,7 +23,7 @@ contract CollarVault is
     Initializable,
     AccessControlUpgradeable,
     PausableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     EIP712Upgradeable
 {
     using Clones for address;
@@ -286,7 +286,6 @@ contract CollarVault is
 
         __AccessControl_init();
         __Pausable_init();
-        __ReentrancyGuard_init();
         __EIP712_init("CollarVault", "1");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -432,11 +431,6 @@ contract CollarVault is
         return _variableLoanPositions[loanId];
     }
 
-    /// @notice Estimate bridge fees for compatibility with legacy callers.
-    function estimateBridgeFees(address, address, uint256) public pure returns (uint256) {
-        return 0;
-    }
-
     /// @notice Set treasury configuration.
     function setTreasuryConfig(address treasury_, uint256 bps) external onlyRole(PARAMETER_ROLE) {
         if (treasury_ == address(0) || bps > MAX_BPS) revert CV_InvalidInput();
@@ -502,24 +496,6 @@ contract CollarVault is
         _marginEngineRfqRouter = marginEngineRfqRouter_;
         emit MarginEngineRfqRouterUpdated(address(marginEngineRfqRouter_));
     }
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setLZMessenger(address) external onlyRole(PARAMETER_ROLE) {}
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setFinalizeModule(address) external onlyRole(PARAMETER_ROLE) {}
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setSettleModule(address) external onlyRole(PARAMETER_ROLE) {}
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setRolloverModule(address) external onlyRole(PARAMETER_ROLE) {}
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setSocketVaultConfig(address, address) external onlyRole(PARAMETER_ROLE) {}
-
-    /// @notice Legacy no-op retained for ABI compatibility.
-    function setDeriveSubaccountId(uint256) external onlyRole(PARAMETER_ROLE) {}
 
     /// @notice Set the lending adapter used for READY -> variable conversion.
     function setLendingAdapter(ILendingAdapter adapter) external onlyRole(PARAMETER_ROLE) {
@@ -645,20 +621,10 @@ contract CollarVault is
         BaselineRfq calldata rfq,
         bytes calldata rfqSig,
         uint64 deadline
-    )
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (uint256 loanId, bytes32 socketMessageId, bytes32 depositGuid, bytes32 mandateGuid)
-    {
-        if (msg.value != 0) revert CV_InvalidInput();
+    ) external nonReentrant whenNotPaused returns (uint256 loanId) {
         IERC20(params.collateralAsset).safeTransferFrom(msg.sender, address(this), params.collateralAmount);
         loanId = _createPendingDeposit(msg.sender, params);
         _acceptMandate(loanId, rfq, rfqSig, deadline, true);
-        socketMessageId = bytes32(0);
-        depositGuid = bytes32(0);
-        mandateGuid = bytes32(0);
     }
 
     /// @notice Create a pending same-network loan request via Permit2 and accept a mandate atomically.
@@ -669,36 +635,22 @@ contract CollarVault is
         uint64 deadline,
         IAllowanceTransfer.PermitSingle calldata permit,
         bytes calldata permitSig
-    )
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (uint256 loanId, bytes32 socketMessageId, bytes32 depositGuid, bytes32 mandateGuid)
-    {
-        if (msg.value != 0) revert CV_InvalidInput();
+    ) external nonReentrant whenNotPaused returns (uint256 loanId) {
         _validatePermit(params.collateralAsset, params.collateralAmount, permit);
         _permit2.permit(msg.sender, permit, permitSig);
         _permit2.transferFrom(msg.sender, address(this), uint160(params.collateralAmount), params.collateralAsset);
 
         loanId = _createPendingDeposit(msg.sender, params);
         _acceptMandate(loanId, rfq, rfqSig, deadline, true);
-        socketMessageId = bytes32(0);
-        depositGuid = bytes32(0);
-        mandateGuid = bytes32(0);
     }
 
     /// @notice Accept or refresh a borrower mandate tied to a keeper-signed baseline RFQ.
     function acceptMandate(uint256 loanId, BaselineRfq calldata rfq, bytes calldata rfqSig, uint64 deadline)
         external
-        payable
         nonReentrant
         whenNotPaused
-        returns (bytes32 lzGuid)
     {
-        if (msg.value != 0) revert CV_InvalidInput();
         _acceptMandate(loanId, rfq, rfqSig, deadline, false);
-        return bytes32(0);
     }
 
     /// @notice Finalize a pending loan directly against the same-network margin engine.
@@ -783,20 +735,8 @@ contract CollarVault is
         );
     }
 
-    /// @notice Legacy finalize signature retained to fail fast on removed cross-chain flow.
-    function finalizeLoan(uint256, bytes32, bytes32) external pure returns (uint256) {
-        revert CV_InvalidInput();
-    }
-
     /// @notice Cancel a pending loan and return collateral once no live mandate remains.
-    function requestCollateralReturn(uint256 loanId)
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (bytes32 lzGuid)
-    {
-        if (msg.value != 0) revert CV_InvalidInput();
+    function requestCollateralReturn(uint256 loanId) external nonReentrant whenNotPaused {
         PendingDeposit memory pending = _pendingDeposits[loanId];
         if (pending.borrower == address(0)) revert CV_NotFound();
         if (pending.borrower != msg.sender) revert CV_Unauthorized();
@@ -815,12 +755,6 @@ contract CollarVault is
         IERC20(pending.collateralAsset).safeTransfer(pending.borrower, pending.collateralAmount);
         emit CollateralReturnRequested(loanId, msg.sender, pending.collateralAsset, pending.collateralAmount);
         emit CollateralReturned(loanId, pending.borrower, pending.collateralAsset, pending.collateralAmount);
-        return bytes32(0);
-    }
-
-    /// @notice Legacy return-finalization signature retained as a no-op.
-    function finalizeDepositReturn(uint256, bytes32) external pure {
-        revert CV_InvalidInput();
     }
 
     /// @notice Preview deterministic same-network settlement against the finalized engine oracle price.
@@ -1037,11 +971,6 @@ contract CollarVault is
             emit LoanClosed(loanId);
             closed = true;
         }
-    }
-
-    /// @notice Rollover finalization is not used in the same-network integration.
-    function finalizeRollover(uint256, bytes32) external pure {
-        revert CV_InvalidInput();
     }
 
     function _executeRollover(
