@@ -123,6 +123,68 @@ contract CollarVaultTest is Test {
         vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(rfqRouter));
     }
 
+    function testPrepareRolloverCallBucket() public {
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        uint64 newMaturity = uint64(block.timestamp + 45 days);
+        uint256 newCallStrike = 28_000e6;
+        bytes32 expectedInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+
+        vm.expectEmit(true, true, true, true);
+        emit CollarVault.RolloverCallBucketPrepared(loanId, expectedInstrumentId, 3);
+
+        vm.prank(keeper);
+        (bytes32 callInstrumentId, uint256 callBucketId) =
+            vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+
+        assertEq(callInstrumentId, expectedInstrumentId);
+        assertEq(callBucketId, 3);
+        (bytes32 bucketInstrumentId, uint8 bucketType, address owner,,,,,,,,,,,,,) = marginEngine.buckets(callBucketId);
+        assertEq(uint256(bucketType), 1);
+        assertEq(bucketInstrumentId, expectedInstrumentId);
+        assertEq(owner, address(vault));
+    }
+
+    function testPrepareRolloverCallBucketRevertsIfInstrumentMissing() public {
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidConfig.selector);
+        vault.prepareRolloverCallBucket(loanId, uint64(block.timestamp + 45 days), 28_000e6);
+    }
+
+    function testPrepareRolloverCallBucketRevertsPostMaturity() public {
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 2 days);
+        uint64 newMaturity = uint64(block.timestamp + 10 days);
+        uint256 newCallStrike = 28_000e6;
+        marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+    }
+
+    function testHashRolloverMandateRecoversBorrowerSigner() public view {
+        CollarVault.RolloverMandate memory mandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: 42,
+            newMaturity: uint64(block.timestamp + 45 days),
+            minCallStrike: 28_000e6,
+            maxPutStrike: 22_000e6,
+            minNetInterest: 10e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 7
+        });
+        bytes32 digest = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, digest);
+
+        assertEq(ecrecover(digest, v, r, s), borrower);
+    }
+
     function testAcceptMandateRevertsOnInvalidSignature() public {
         CollarVault.DepositParams memory params = _depositParams(1e8, 21_000e6, 20_000e6, 30 days);
         CollarVault.BaselineRfq memory rfq = _rfq(0, params, 26_000e6, 0);
@@ -237,17 +299,26 @@ contract CollarVaultTest is Test {
         uint256 tenor,
         uint256 finalSpot
     ) internal returns (uint256 loanId) {
-        CollarVault.BaselineRfq memory rfq;
-        (loanId, rfq) = _createPendingWithMandate(collateralAmount, putStrike, callStrike, borrowAmount, tenor);
-        uint256 putBucketId = _preparePutBucket(rfq, collateralAmount);
-
-        vm.prank(keeper);
-        vault.finalizeLoan(loanId, CollarVault.FinalizeLoanParams({putBucketId: putBucketId, callBuyer: marketMaker}));
+        (loanId,) = _createFinalizedLoan(collateralAmount, putStrike, callStrike, borrowAmount, tenor);
 
         vm.warp(block.timestamp + tenor);
         marginEngine.updateInstrumentOracle(vault.getLoan(loanId).putInstrumentId, 0, 0, finalSpot);
         marginEngine.updateInstrumentOracle(vault.getLoan(loanId).callInstrumentId, 0, 0, finalSpot);
         vm.warp(block.timestamp - tenor);
+    }
+
+    function _createFinalizedLoan(
+        uint256 collateralAmount,
+        uint256 putStrike,
+        uint256 callStrike,
+        uint256 borrowAmount,
+        uint256 tenor
+    ) internal returns (uint256 loanId, CollarVault.BaselineRfq memory rfq) {
+        (loanId, rfq) = _createPendingWithMandate(collateralAmount, putStrike, callStrike, borrowAmount, tenor);
+        uint256 putBucketId = _preparePutBucket(rfq, collateralAmount);
+
+        vm.prank(keeper);
+        vault.finalizeLoan(loanId, CollarVault.FinalizeLoanParams({putBucketId: putBucketId, callBuyer: marketMaker}));
     }
 
     function _createPendingWithMandate(

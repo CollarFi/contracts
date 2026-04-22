@@ -40,6 +40,9 @@ contract CollarVault is
     bytes32 public constant BASELINE_RFQ_TYPEHASH = keccak256(
         "BaselineRfq(uint256 loanId,address collateralAsset,uint256 collateralAmount,uint64 maturity,uint256 putStrike,uint256 callStrike,uint256 borrowAmount,uint256 minNetInterest,uint64 rfqExpiry,address borrower,uint256 nonce)"
     );
+    bytes32 public constant ROLLOVER_MANDATE_TYPEHASH = keccak256(
+        "RolloverMandate(address borrower,uint256 loanId,uint64 newMaturity,uint256 minCallStrike,uint256 maxPutStrike,uint256 minNetInterest,uint64 deadline,uint256 nonce)"
+    );
 
     enum LoanState {
         NONE,
@@ -74,6 +77,17 @@ contract CollarVault is
         uint256 minNetInterest;
         uint64 rfqExpiry;
         address borrower;
+        uint256 nonce;
+    }
+
+    struct RolloverMandate {
+        address borrower;
+        uint256 loanId;
+        uint64 newMaturity;
+        uint256 minCallStrike;
+        uint256 maxPutStrike;
+        uint256 minNetInterest;
+        uint64 deadline;
         uint256 nonce;
     }
 
@@ -198,6 +212,9 @@ contract CollarVault is
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
     event VariableCollateralWithdrawn(uint256 indexed loanId, uint256 amount);
+    event RolloverCallBucketPrepared(
+        uint256 indexed loanId, bytes32 indexed callInstrumentId, uint256 indexed callBucketId
+    );
 
     ILiquidityVault private _liquidityVault;
     IERC20 private _usdc;
@@ -525,6 +542,53 @@ contract CollarVault is
                 )
             )
         );
+    }
+
+    /// @notice Hash a rollover mandate for EIP-712 signature recovery.
+    function hashRolloverMandate(RolloverMandate calldata mandate) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    ROLLOVER_MANDATE_TYPEHASH,
+                    mandate.borrower,
+                    mandate.loanId,
+                    mandate.newMaturity,
+                    mandate.minCallStrike,
+                    mandate.maxPutStrike,
+                    mandate.minNetInterest,
+                    mandate.deadline,
+                    mandate.nonce
+                )
+            )
+        );
+    }
+
+    /// @notice Create the next covered-call bucket needed for a same-network rollover quote.
+    function prepareRolloverCallBucket(uint256 loanId, uint64 newMaturity, uint256 newCallStrike)
+        external
+        onlyKeeper
+        whenNotPaused
+        returns (bytes32 callInstrumentId, uint256 callBucketId)
+    {
+        Loan storage loan = _loans[loanId];
+        if (loan.state != LoanState.ACTIVE_ZERO_COST) revert CV_InvalidState();
+        if (block.timestamp >= loan.maturity) revert CV_InvalidState();
+        if (newCallStrike == 0 || newMaturity <= block.timestamp || newMaturity <= loan.maturity) {
+            revert CV_InvalidInput();
+        }
+
+        callInstrumentId = _marginEngine.computeInstrumentId(
+            _engineAsset[loan.collateralAsset],
+            address(_usdc),
+            _engineAsset[loan.collateralAsset],
+            newMaturity,
+            newCallStrike,
+            IMarginEngine.OptionType.Call
+        );
+        _validateInstrument(callInstrumentId, loan.collateralAsset, newMaturity, newCallStrike, false);
+
+        callBucketId = _marginEngine.createCoveredCallBucket(callInstrumentId);
+        emit RolloverCallBucketPrepared(loanId, callInstrumentId, callBucketId);
     }
 
     /// @notice Create a pending same-network loan request and accept a mandate atomically.
