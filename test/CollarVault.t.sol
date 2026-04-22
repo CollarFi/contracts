@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {DeployPermit2} from "permit2/test/utils/DeployPermit2.sol";
 
@@ -15,6 +16,7 @@ import {VariableLoanPosition} from "../src/adapters/VariableLoanPosition.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockEulerAdapter} from "./mocks/MockEulerAdapter.sol";
 import {MockMarginEngine} from "./mocks/MockMarginEngine.sol";
+import {MockMarginEngineRfqRouter} from "./mocks/MockMarginEngineRfqRouter.sol";
 
 contract CollarVaultTest is Test {
     uint256 internal borrowerKey = 0xB0B0;
@@ -25,6 +27,7 @@ contract CollarVaultTest is Test {
     address internal keeper = address(0xCAFE);
     address internal marketMaker = address(0xBEEF);
     address internal treasury = address(0xFEE1);
+    address internal feeRecipient = address(0xFEE2);
     address internal rfqRouter = address(0xABCD);
 
     MockERC20 internal usdc;
@@ -32,6 +35,7 @@ contract CollarVaultTest is Test {
     CollarLiquidityVault internal liquidityVault;
     MockEulerAdapter internal lendingAdapter;
     MockMarginEngine internal marginEngine;
+    MockMarginEngineRfqRouter internal marginEngineRfqRouter;
     IAllowanceTransfer internal permit2;
     CollarVault internal vault;
     VariableLoanPosition internal positionImpl;
@@ -45,6 +49,7 @@ contract CollarVaultTest is Test {
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         lendingAdapter = new MockEulerAdapter(address(wbtc), address(usdc));
         marginEngine = new MockMarginEngine(address(usdc), address(this));
+        marginEngineRfqRouter = new MockMarginEngineRfqRouter(marginEngine, feeRecipient);
         permit2 = IAllowanceTransfer(new DeployPermit2().deployPermit2());
         positionImpl = new VariableLoanPosition();
 
@@ -85,6 +90,8 @@ contract CollarVaultTest is Test {
         lendingAdapter.setLiquidity(1_000_000e6);
 
         usdc.mint(marketMaker, 1_000_000e6);
+        vm.prank(marketMaker);
+        usdc.approve(address(marginEngineRfqRouter), type(uint256).max);
         wbtc.mint(borrower, 20e8);
     }
 
@@ -183,6 +190,484 @@ contract CollarVaultTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, digest);
 
         assertEq(ecrecover(digest, v, r, s), borrower);
+    }
+
+    function testExecuteRolloverThroughMarginEngineRfqRouter() public {
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
+        marginEngineRfqRouter.setProtocolFeeConfig(100, feeRecipient);
+
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        CollarVault.Loan memory oldLoan = vault.getLoan(loanId);
+
+        vm.warp(block.timestamp + 5 days);
+
+        uint64 newMaturity = uint64(block.timestamp + 40 days);
+        uint256 newPutStrike = 22_000e6;
+        uint256 newCallStrike = 28_000e6;
+        bytes32 newPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), newMaturity, newPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 newCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(newPutInstrumentId, 0, 0, newPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 newPutBucketId = marginEngine.createPutBucket(newPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(newPutBucketId, 1_000_000e6);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 newCallBucketId) = vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+
+        (address oldLongCallToken,) = marginEngine.getBucketTokens(oldLoan.callBucketId);
+        vm.prank(marketMaker);
+        IERC20(oldLongCallToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+
+        CollarVault.RolloverMandate memory mandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: newMaturity,
+            minCallStrike: newCallStrike,
+            maxPutStrike: newPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 77
+        });
+
+        IMarginEngineRfqRouter.Action[] memory actions = new IMarginEngineRfqRouter.Action[](4);
+        actions[0] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Transfer,
+            bucketId: oldLoan.putBucketId,
+            instrumentId: oldLoan.putInstrumentId,
+            quantity: oldLoan.collateralAmount,
+            quoteAmount: 50e6,
+            maker: marketMaker,
+            longRecipient: marketMaker,
+            longSource: address(vault),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[1] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Buy,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Call,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Burn,
+            bucketId: oldLoan.callBucketId,
+            instrumentId: oldLoan.callInstrumentId,
+            quantity: oldLoan.collateralAmount,
+            quoteAmount: 20e6,
+            maker: marketMaker,
+            longRecipient: address(0),
+            longSource: marketMaker,
+            cappedRecipient: address(0),
+            cappedSource: address(vault),
+            collateralRecipient: address(vault)
+        });
+        actions[2] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Call,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newCallBucketId,
+            instrumentId: newCallInstrumentId,
+            quantity: oldLoan.collateralAmount,
+            quoteAmount: 40e6,
+            maker: marketMaker,
+            longRecipient: marketMaker,
+            longSource: address(0),
+            cappedRecipient: address(vault),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[3] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Buy,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newPutBucketId,
+            instrumentId: newPutInstrumentId,
+            quantity: oldLoan.collateralAmount,
+            quoteAmount: 30e6,
+            maker: marketMaker,
+            longRecipient: address(vault),
+            longSource: address(0),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+
+        IMarginEngineRfqRouter.Quote memory quote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 101,
+            salt: 202,
+            actions: actions
+        });
+
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures = new IMarginEngineRfqRouter.SignerSignature[](1);
+        signatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+
+        bytes32 mandateDigest = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateDigest);
+
+        uint256 liquidityUsdcBefore = usdc.balanceOf(address(liquidityVault));
+
+        vm.prank(keeper);
+        bytes32 quoteHash = vault.executeRollover(loanId, mandate, abi.encodePacked(r, s, v), quote, signatures);
+
+        CollarVault.Loan memory rolledLoan = vault.getLoan(loanId);
+        assertEq(rolledLoan.maturity, newMaturity);
+        assertEq(rolledLoan.putStrike, newPutStrike);
+        assertEq(rolledLoan.callStrike, newCallStrike);
+        assertEq(rolledLoan.putBucketId, newPutBucketId);
+        assertEq(rolledLoan.callBucketId, newCallBucketId);
+        assertEq(rolledLoan.putInstrumentId, newPutInstrumentId);
+        assertEq(rolledLoan.callInstrumentId, newCallInstrumentId);
+        assertEq(rolledLoan.startTime, block.timestamp);
+        assertEq(quoteHash, marginEngineRfqRouter.lastQuoteHash());
+
+        uint256 oldAccruedInterest =
+            _quoteInterest(oldLoan.principal, oldLoan.interestApr, oldLoan.startTime, block.timestamp);
+        uint256 remainingOldInterest = oldLoan.interestOwed - oldAccruedInterest;
+        uint256 newInterest = _quoteInterest(oldLoan.principal, 0.1e18, block.timestamp, newMaturity);
+        assertEq(rolledLoan.interestOwed, remainingOldInterest + newInterest);
+
+        (address oldLongPutToken,) = marginEngine.getBucketTokens(oldLoan.putBucketId);
+        (, address oldCappedToken) = marginEngine.getBucketTokens(oldLoan.callBucketId);
+        (, address newCappedToken) = marginEngine.getBucketTokens(newCallBucketId);
+        (address newLongPutToken,) = marginEngine.getBucketTokens(newPutBucketId);
+        assertEq(IERC20(oldLongPutToken).balanceOf(address(vault)), 0);
+        assertEq(IERC20(oldCappedToken).balanceOf(address(vault)), 0);
+        assertEq(IERC20(newCappedToken).balanceOf(address(vault)), oldLoan.collateralAmount);
+        assertEq(IERC20(newLongPutToken).balanceOf(address(vault)), oldLoan.collateralAmount);
+        assertEq(usdc.balanceOf(address(vault)), 0);
+        assertEq(usdc.balanceOf(address(liquidityVault)) - liquidityUsdcBefore, 38_600_000);
+
+        uint256 oldCallOutstanding = _bucketOutstanding(oldLoan.callBucketId);
+        uint256 newCallOutstanding = _bucketOutstanding(newCallBucketId);
+        uint256 newPutOutstanding = _bucketOutstanding(newPutBucketId);
+        assertEq(oldCallOutstanding, 0);
+        assertEq(newCallOutstanding, oldLoan.collateralAmount);
+        assertEq(newPutOutstanding, oldLoan.collateralAmount);
+    }
+
+    function testExecuteRolloverRevertsOnInvalidQuoteShape() public {
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
+
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        CollarVault.Loan memory loan = vault.getLoan(loanId);
+
+        vm.warp(block.timestamp + 5 days);
+
+        uint64 newMaturity = uint64(block.timestamp + 40 days);
+        uint256 newPutStrike = 22_000e6;
+        uint256 newCallStrike = 28_000e6;
+        bytes32 newPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), newMaturity, newPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 newCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(newPutInstrumentId, 0, 0, newPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 newPutBucketId = marginEngine.createPutBucket(newPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(newPutBucketId, 1_000_000e6);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 newCallBucketId) = vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+
+        CollarVault.RolloverMandate memory mandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: newMaturity,
+            minCallStrike: newCallStrike,
+            maxPutStrike: newPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 88
+        });
+
+        IMarginEngineRfqRouter.Action[] memory actions = new IMarginEngineRfqRouter.Action[](3);
+        actions[0] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Transfer,
+            bucketId: loan.putBucketId,
+            instrumentId: loan.putInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 50e6,
+            maker: marketMaker,
+            longRecipient: marketMaker,
+            longSource: address(vault),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[1] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Buy,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newPutBucketId,
+            instrumentId: newPutInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 30e6,
+            maker: marketMaker,
+            longRecipient: address(vault),
+            longSource: address(0),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[2] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Call,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newCallBucketId,
+            instrumentId: newCallInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 40e6,
+            maker: marketMaker,
+            longRecipient: marketMaker,
+            longSource: address(0),
+            cappedRecipient: address(vault),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+
+        IMarginEngineRfqRouter.Quote memory quote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 303,
+            salt: 404,
+            actions: actions
+        });
+
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures = new IMarginEngineRfqRouter.SignerSignature[](1);
+        signatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+
+        bytes32 mandateDigest = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateDigest);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vault.executeRollover(loanId, mandate, abi.encodePacked(r, s, v), quote, signatures);
+    }
+
+    function testExecuteRolloverRevertsWhenCarriedInterestBreaksRollLtv() public {
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
+        vault.setMaxRollLtv(0.998e18);
+
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        CollarVault.Loan memory loan = vault.getLoan(loanId);
+
+        vm.warp(block.timestamp + 20 days);
+
+        uint64 newMaturity = uint64(block.timestamp + 40 days);
+        uint256 newPutStrike = 20_300e6;
+        uint256 newCallStrike = 28_000e6;
+        bytes32 newPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), newMaturity, newPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 newCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), newMaturity, newCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(newPutInstrumentId, 0, 0, newPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 newPutBucketId = marginEngine.createPutBucket(newPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(newPutBucketId, 1_000_000e6);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 newCallBucketId) = vault.prepareRolloverCallBucket(loanId, newMaturity, newCallStrike);
+
+        (address oldLongCallToken,) = marginEngine.getBucketTokens(loan.callBucketId);
+        vm.prank(marketMaker);
+        IERC20(oldLongCallToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+
+        CollarVault.RolloverMandate memory mandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: newMaturity,
+            minCallStrike: newCallStrike,
+            maxPutStrike: newPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: 99
+        });
+
+        IMarginEngineRfqRouter.Action[] memory actions = _rolloverActions(
+            loan, marketMaker, newPutBucketId, newPutInstrumentId, newCallBucketId, newCallInstrumentId
+        );
+
+        IMarginEngineRfqRouter.Quote memory quote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 505,
+            salt: 606,
+            actions: actions
+        });
+
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures = new IMarginEngineRfqRouter.SignerSignature[](1);
+        signatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+
+        bytes32 mandateDigest = vault.hashRolloverMandate(mandate);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(borrowerKey, mandateDigest);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InsufficientValue.selector);
+        vault.executeRollover(loanId, mandate, abi.encodePacked(r, s, v), quote, signatures);
+    }
+
+    function testExecuteRolloverRejectsReusedMandateNonce() public {
+        vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(address(marginEngineRfqRouter)));
+        marginEngineRfqRouter.setProtocolFeeConfig(100, feeRecipient);
+
+        (uint256 loanId,) = _createFinalizedLoan(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        CollarVault.Loan memory firstLoan = vault.getLoan(loanId);
+
+        vm.warp(block.timestamp + 5 days);
+
+        uint64 firstMaturity = uint64(block.timestamp + 40 days);
+        uint256 firstPutStrike = 22_000e6;
+        uint256 firstCallStrike = 28_000e6;
+        bytes32 firstPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), firstMaturity, firstPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 firstCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), firstMaturity, firstCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(firstPutInstrumentId, 0, 0, firstPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 firstPutBucketId = marginEngine.createPutBucket(firstPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(firstPutBucketId, 1_000_000e6);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 firstCallBucketId) = vault.prepareRolloverCallBucket(loanId, firstMaturity, firstCallStrike);
+
+        (address firstOldLongCallToken,) = marginEngine.getBucketTokens(firstLoan.callBucketId);
+        vm.prank(marketMaker);
+        IERC20(firstOldLongCallToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+
+        uint256 reusedNonce = 777;
+        CollarVault.RolloverMandate memory firstMandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: firstMaturity,
+            minCallStrike: firstCallStrike,
+            maxPutStrike: firstPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: reusedNonce
+        });
+
+        IMarginEngineRfqRouter.Action[] memory firstActions = _rolloverActions(
+            firstLoan, marketMaker, firstPutBucketId, firstPutInstrumentId, firstCallBucketId, firstCallInstrumentId
+        );
+        IMarginEngineRfqRouter.Quote memory firstQuote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 707,
+            salt: 808,
+            actions: firstActions
+        });
+        IMarginEngineRfqRouter.SignerSignature[] memory firstSignatures =
+            new IMarginEngineRfqRouter.SignerSignature[](1);
+        firstSignatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+        bytes32 firstDigest = vault.hashRolloverMandate(firstMandate);
+        (uint8 firstV, bytes32 firstR, bytes32 firstS) = vm.sign(borrowerKey, firstDigest);
+
+        vm.prank(keeper);
+        vault.executeRollover(
+            loanId, firstMandate, abi.encodePacked(firstR, firstS, firstV), firstQuote, firstSignatures
+        );
+
+        CollarVault.Loan memory secondLoan = vault.getLoan(loanId);
+        uint64 secondMaturity = uint64(block.timestamp + 80 days);
+        uint256 secondPutStrike = 23_000e6;
+        uint256 secondCallStrike = 29_000e6;
+        bytes32 secondPutInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(usdc), secondMaturity, secondPutStrike, IMarginEngine.OptionType.Put
+        );
+        bytes32 secondCallInstrumentId = marginEngine.registerInstrument(
+            address(wbtc), address(usdc), address(wbtc), secondMaturity, secondCallStrike, IMarginEngine.OptionType.Call
+        );
+        marginEngine.updateInstrumentOracle(secondPutInstrumentId, 0, 0, secondPutStrike);
+
+        usdc.mint(marketMaker, 1_000_000e6);
+        vm.startPrank(marketMaker);
+        uint256 secondPutBucketId = marginEngine.createPutBucket(secondPutInstrumentId, marketMaker);
+        marginEngine.depositPutCollateral(secondPutBucketId, 1_000_000e6);
+        vm.stopPrank();
+        usdc.mint(marketMaker, 200e6);
+
+        vm.prank(keeper);
+        (, uint256 secondCallBucketId) = vault.prepareRolloverCallBucket(loanId, secondMaturity, secondCallStrike);
+
+        (address secondOldLongCallToken,) = marginEngine.getBucketTokens(secondLoan.callBucketId);
+        vm.prank(marketMaker);
+        IERC20(secondOldLongCallToken).approve(address(marginEngineRfqRouter), type(uint256).max);
+
+        CollarVault.RolloverMandate memory secondMandate = CollarVault.RolloverMandate({
+            borrower: borrower,
+            loanId: loanId,
+            newMaturity: secondMaturity,
+            minCallStrike: secondCallStrike,
+            maxPutStrike: secondPutStrike,
+            minNetInterest: 20e6,
+            deadline: uint64(block.timestamp + 1 days),
+            nonce: reusedNonce
+        });
+
+        IMarginEngineRfqRouter.Action[] memory secondActions = _rolloverActions(
+            secondLoan,
+            marketMaker,
+            secondPutBucketId,
+            secondPutInstrumentId,
+            secondCallBucketId,
+            secondCallInstrumentId
+        );
+        IMarginEngineRfqRouter.Quote memory secondQuote = IMarginEngineRfqRouter.Quote({
+            taker: address(vault),
+            authorizedExecutor: address(vault),
+            quoteAsset: address(usdc),
+            validUntil: uint64(block.timestamp + 1 hours),
+            nonce: 909,
+            salt: 1001,
+            actions: secondActions
+        });
+        IMarginEngineRfqRouter.SignerSignature[] memory secondSignatures =
+            new IMarginEngineRfqRouter.SignerSignature[](1);
+        secondSignatures[0] = IMarginEngineRfqRouter.SignerSignature({signer: marketMaker, signature: hex"01"});
+        bytes32 secondDigest = vault.hashRolloverMandate(secondMandate);
+        (uint8 secondV, bytes32 secondR, bytes32 secondS) = vm.sign(borrowerKey, secondDigest);
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidMessage.selector);
+        vault.executeRollover(
+            loanId, secondMandate, abi.encodePacked(secondR, secondS, secondV), secondQuote, secondSignatures
+        );
     }
 
     function testAcceptMandateRevertsOnInvalidSignature() public {
@@ -289,6 +774,123 @@ contract CollarVaultTest is Test {
         usdc.approve(address(vault), type(uint256).max);
         vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
+    }
+
+    function _quoteInterest(uint256 principal, uint256 apr, uint256 start, uint256 end)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (apr == 0 || end <= start) return 0;
+        return ((principal * apr) / 1e18) * (end - start) / 365 days;
+    }
+
+    function _bucketOutstanding(uint256 bucketId) internal view returns (uint256 outstandingQuantity) {
+        (
+            bytes32 instrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstanding,
+            address primaryToken,
+            address secondaryToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = marginEngine.buckets(bucketId);
+        instrumentId;
+        bucketType;
+        owner;
+        collateralBalance;
+        primaryToken;
+        secondaryToken;
+        settled;
+        closed;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        return outstanding;
+    }
+
+    function _rolloverActions(
+        CollarVault.Loan memory loan,
+        address maker,
+        uint256 newPutBucketId,
+        bytes32 newPutInstrumentId,
+        uint256 newCallBucketId,
+        bytes32 newCallInstrumentId
+    ) internal view returns (IMarginEngineRfqRouter.Action[] memory actions) {
+        actions = new IMarginEngineRfqRouter.Action[](4);
+        actions[0] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Transfer,
+            bucketId: loan.putBucketId,
+            instrumentId: loan.putInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 50e6,
+            maker: maker,
+            longRecipient: maker,
+            longSource: address(vault),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[1] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Buy,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Call,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Burn,
+            bucketId: loan.callBucketId,
+            instrumentId: loan.callInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 20e6,
+            maker: maker,
+            longRecipient: address(0),
+            longSource: maker,
+            cappedRecipient: address(0),
+            cappedSource: address(vault),
+            collateralRecipient: address(vault)
+        });
+        actions[2] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Sell,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Call,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newCallBucketId,
+            instrumentId: newCallInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 40e6,
+            maker: maker,
+            longRecipient: maker,
+            longSource: address(0),
+            cappedRecipient: address(vault),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
+        actions[3] = IMarginEngineRfqRouter.Action({
+            side: IMarginEngineRfqRouter.Side.Buy,
+            instrumentType: IMarginEngineRfqRouter.InstrumentType.Put,
+            fulfillmentType: IMarginEngineRfqRouter.FulfillmentType.Mint,
+            bucketId: newPutBucketId,
+            instrumentId: newPutInstrumentId,
+            quantity: loan.collateralAmount,
+            quoteAmount: 30e6,
+            maker: maker,
+            longRecipient: address(vault),
+            longSource: address(0),
+            cappedRecipient: address(0),
+            cappedSource: address(0),
+            collateralRecipient: address(0)
+        });
     }
 
     function _createFinalizeAndSettleSpot(

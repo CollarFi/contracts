@@ -362,6 +362,102 @@ contract MockMarginEngine is IMarginEngine {
         return (bucket.primaryToken, bucket.secondaryToken);
     }
 
+    function getBucketMetadata(uint256 bucketId)
+        external
+        view
+        returns (bytes32 instrumentId, uint8 bucketType, address owner, bool settled, bool closed)
+    {
+        Bucket memory bucket = buckets[bucketId];
+        if (bucket.owner == address(0)) revert InvalidBucket();
+
+        instrumentId = bucket.instrumentId;
+        bucketType = bucket.bucketType;
+        owner = bucket.owner;
+        settled = bucket.settled;
+        closed = bucket.closed;
+    }
+
+    function getInstrumentMetadata(bytes32 instrumentId)
+        external
+        view
+        returns (
+            address underlying,
+            address quoteAsset,
+            address collateralAsset,
+            uint64 expiry,
+            uint256 strike,
+            uint256 quantityScale,
+            uint8 optionType,
+            bool exists
+        )
+    {
+        Instrument memory instrument = instruments[instrumentId];
+
+        underlying = instrument.underlying;
+        quoteAsset = instrument.quoteAsset;
+        collateralAsset = instrument.collateralAsset;
+        expiry = instrument.expiry;
+        strike = instrument.strike;
+        quantityScale = instrument.quantityScale;
+        optionType = instrument.optionType;
+        exists = instrument.exists;
+    }
+
+    function issuePutFromRfq(uint256 bucketId, uint256 quantity, address recipient) external {
+        Bucket storage bucket = buckets[bucketId];
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.Put)) revert InvalidBucket();
+        if (recipient == address(0)) revert InvalidRecipient();
+        Instrument memory instrument = instruments[bucket.instrumentId];
+
+        uint256 required = Math.mulDiv(
+            bucket.outstandingQuantity + quantity, instrument.strike, instrument.quantityScale, Math.Rounding.Ceil
+        );
+        if (bucket.collateralBalance < required) revert InsufficientCollateral();
+
+        bucket.outstandingQuantity += quantity;
+        MockClaimToken(bucket.primaryToken).mint(recipient, quantity);
+    }
+
+    function issueCoveredCallFromRfq(
+        uint256 bucketId,
+        uint256 collateralAmount,
+        address collateralFrom,
+        address longCallRecipient,
+        address cappedRecipient
+    ) external {
+        Bucket storage bucket = buckets[bucketId];
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.CoveredCall)) revert InvalidBucket();
+        if (longCallRecipient == address(0) || cappedRecipient == address(0)) revert InvalidRecipient();
+
+        address collateralAsset = instruments[bucket.instrumentId].collateralAsset;
+        IERC20(collateralAsset).safeTransferFrom(collateralFrom, address(this), collateralAmount);
+        bucket.collateralBalance += collateralAmount;
+        bucket.outstandingQuantity += collateralAmount;
+        MockClaimToken(bucket.primaryToken).mint(longCallRecipient, collateralAmount);
+        MockClaimToken(bucket.secondaryToken).mint(cappedRecipient, collateralAmount);
+    }
+
+    function buyCoveredCallFromRfq(
+        uint256 bucketId,
+        uint256 quantity,
+        address burnLongCallFrom,
+        address burnCappedFrom,
+        address collateralRecipient
+    ) external returns (uint256 payout) {
+        Bucket storage bucket = buckets[bucketId];
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.CoveredCall)) revert InvalidBucket();
+        if (collateralRecipient == address(0)) revert InvalidRecipient();
+
+        MockClaimToken(bucket.primaryToken).burn(burnLongCallFrom, quantity);
+        MockClaimToken(bucket.secondaryToken).burn(burnCappedFrom, quantity);
+
+        bucket.outstandingQuantity -= quantity;
+        bucket.collateralBalance -= quantity;
+        payout = quantity;
+
+        IERC20(instruments[bucket.instrumentId].collateralAsset).safeTransfer(collateralRecipient, payout);
+    }
+
     function _redeemCoveredCall(uint256 bucketId, uint256 quantity, address to, bool longCall)
         internal
         returns (uint256 payout)

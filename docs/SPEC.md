@@ -152,6 +152,56 @@ From there:
 - anyone may call `tryConvertReadyLoan` to open the variable-rate position if liquidity is available, or
 - anyone may call `settleReadyLoanByRepay` to repay debt and deterministically distribute collateral after the grace period.
 
+### 5.5 Pre-maturity same-network rollover
+
+Borrowers may refresh an active zero-cost loan before maturity by signing an EIP-712 `RolloverMandate` that binds:
+
+- `loanId`,
+- `borrower`,
+- `newMaturity`,
+- `minCallStrike`,
+- `maxPutStrike`,
+- `minNetInterest`,
+- `deadline`,
+- borrower-scoped replay-protection nonce.
+
+The keeper first prepares the new covered-call bucket with `prepareRolloverCallBucket`. This creates the concrete new call bucket that the off-chain RFQ package references.
+
+The keeper then submits `executeRollover` with a `MarginEngineRfqRouter` quote whose taker and authorized executor are both the vault. The current same-network rollover path requires an exact 4-leg package:
+
+1. sell the old put from the vault to the maker,
+2. buy back the old call by burning the maker-held long call together with the vault-held capped token, returning underlying collateral to the vault,
+3. sell the new call by minting against the pre-created vault-owned covered-call bucket,
+4. buy the new put into the vault, either by minting from a funded put bucket or by maker inventory transfer.
+
+The vault validates:
+
+- borrower mandate signature and replay protection,
+- exact bucket / instrument / quantity alignment for the old legs,
+- the new call bucket exists, is vault-owned, and is empty before execution,
+- the new call strike is `>= minCallStrike`,
+- the new put strike is `<= maxPutStrike`,
+- `newMaturity` matches the new option expiries,
+- the roll-safe LTV bound still holds against the new put strike for the full rolled debt (`principal + carriedInterest + newInterest`).
+
+Rollover economics are checked from the vault's actual USDC balance delta across `executeRfq(...)`:
+
+- `realizedC = usdcBalanceAfter - usdcBalanceBefore`
+- require `realizedC >= 0`
+- require `newInterest + realizedC >= minNetInterest`
+- transfer realized premium cash to `CollarLiquidityVault` immediately after validation so no rollover proceeds remain stranded on the vault balance.
+
+On success the vault updates the active loan in place:
+
+- replace maturity,
+- replace call / put strikes,
+- replace call / put bucket ids,
+- replace call / put instrument ids,
+- reset `startTime`,
+- carry forward any unaccrued prior fixed interest and add the new fixed-interest amount for the rolled tenor.
+
+No asynchronous confirmation step is used in the same-network architecture. `finalizeRollover(...)` remains ABI compatibility only and must not be part of the active rollover flow.
+
 ## 6. Safety checks
 
 The implementation must enforce the following invariants.
@@ -194,11 +244,11 @@ The implementation must enforce the following invariants.
 
 The current same-network integration deliberately does **not** implement cross-chain functionality.
 
-It also does **not** implement pre-maturity rollover against the local margin engine yet. The current margin-engine branch does not expose the package-RFQ unwind/open path that CollarFi needs for production rollover semantics. Until that exists, rollover entrypoints must revert with a dedicated error rather than simulate partial behavior.
+`finalizeRollover(...)` is also not part of the active same-network lifecycle. It is retained only for ABI compatibility; rollover execution is synchronous and must complete inside `executeRollover(...)`.
 
 ## 9. Clarifications / TODOs
 
-- **Rollover**: integrate once the margin-engine exposes the atomic unwind/open RFQ primitive required by CollarFi.
+- **Rollover quoting**: off-chain services must continue constructing the exact 4-leg unwind/open package expected by the vault validations.
 - **Zero-spot covered-call edge case**: CollarFi tests cover `spot = 0`. Production integration should confirm the upstream margin-engine settlement path preserves the expected capped-underlying behavior at zero spot.
 - **Shared put buckets**: the margin-engine supports shared underwriting across many consumers, but CollarFi v1 intentionally uses one bucket per loan for simpler accounting. Shared-bucket allocation may be added later if explicitly specified.
 

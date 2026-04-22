@@ -90,6 +90,8 @@ interface IMarginEngine {
 
     function settleBucket(uint256 bucketId) external;
 
+    function getBucketTokens(uint256 bucketId) external view returns (address primaryToken, address secondaryToken);
+
     function redeemPut(uint256 bucketId, uint256 quantity, address to) external returns (uint256 payout);
 
     function redeemCappedUnderlying(uint256 bucketId, uint256 quantity, address to) external returns (uint256 payout);

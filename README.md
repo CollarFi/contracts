@@ -28,5 +28,6 @@ forge fmt
 ## Notes
 
 - `docs/SPEC.md` is the source of truth for behavior.
-- The same-network integration currently disables rollover until the margin-engine exposes the required atomic unwind/open RFQ primitive.
+- The same-network integration now supports pre-maturity rollover through `MarginEngineRfqRouter` using a validated 4-leg unwind/open package.
+- `finalizeRollover(...)` remains part of the legacy ABI only; same-network rollover executes synchronously in a single transaction.
 - Legacy bridge-oriented contracts may still exist in the tree for migration/reference, but they are not part of the active core flow.

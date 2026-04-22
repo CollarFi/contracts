@@ -147,6 +147,15 @@ contract CollarVault is
         uint256 totalSettlementValue;
     }
 
+    struct RolloverQuoteResolution {
+        uint256 newPutBucketId;
+        uint256 newCallBucketId;
+        bytes32 newPutInstrumentId;
+        bytes32 newCallInstrumentId;
+        uint256 newPutStrike;
+        uint256 newCallStrike;
+    }
+
     error CV_InvalidConfig();
     error CV_InvalidInput();
     error CV_InvalidState();
@@ -154,7 +163,6 @@ contract CollarVault is
     error CV_NotFound();
     error CV_InvalidMessage();
     error CV_InsufficientValue();
-    error CV_RolloverUnavailable();
 
     event LoanCreated(
         uint256 indexed loanId,
@@ -215,6 +223,18 @@ contract CollarVault is
     event RolloverCallBucketPrepared(
         uint256 indexed loanId, bytes32 indexed callInstrumentId, uint256 indexed callBucketId
     );
+    event LoanRolledOver(
+        uint256 indexed loanId,
+        uint256 oldMaturity,
+        uint256 newMaturity,
+        uint256 oldInterestOwed,
+        uint256 newInterestOwed,
+        uint256 oldCallStrike,
+        uint256 newCallStrike,
+        uint256 oldPutStrike,
+        uint256 newPutStrike,
+        bytes32 quoteHash
+    );
 
     ILiquidityVault private _liquidityVault;
     IERC20 private _usdc;
@@ -244,6 +264,8 @@ contract CollarVault is
     mapping(uint256 => PendingDeposit) private _pendingDeposits;
     mapping(uint256 => Mandate) private _mandates;
     mapping(bytes32 => bool) private _usedBaselineRfqs;
+    mapping(bytes32 => bool) private _usedRolloverMandates;
+    mapping(address => mapping(uint256 => bool)) private _usedRolloverMandateNonces;
 
     /// @notice Initialize the upgradeable vault.
     function initialize(
@@ -545,7 +567,7 @@ contract CollarVault is
     }
 
     /// @notice Hash a rollover mandate for EIP-712 signature recovery.
-    function hashRolloverMandate(RolloverMandate calldata mandate) public view returns (bytes32) {
+    function hashRolloverMandate(RolloverMandate memory mandate) public view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(
                 abi.encode(
@@ -589,6 +611,31 @@ contract CollarVault is
 
         callBucketId = _marginEngine.createCoveredCallBucket(callInstrumentId);
         emit RolloverCallBucketPrepared(loanId, callInstrumentId, callBucketId);
+    }
+
+    /// @notice Execute a same-network rollover using a borrower mandate and a validated margin-engine RFQ quote.
+    function executeRollover(
+        uint256 loanId,
+        RolloverMandate calldata mandate,
+        bytes calldata mandateSig,
+        IMarginEngineRfqRouter.Quote calldata quote,
+        IMarginEngineRfqRouter.SignerSignature[] calldata signatures
+    ) external nonReentrant whenNotPaused onlyKeeper returns (bytes32 quoteHash) {
+        return _executeRollover(loanId, mandate, mandateSig, quote, signatures);
+    }
+
+    /// @notice Legacy rollover entrypoint retained for ABI compatibility.
+    function rolloverLoan(uint256 loanId, bytes calldata quoteData, bytes calldata mandateData)
+        external
+        nonReentrant
+        whenNotPaused
+        onlyKeeper
+        returns (bytes32 quoteHash)
+    {
+        (IMarginEngineRfqRouter.Quote memory quote, IMarginEngineRfqRouter.SignerSignature[] memory signatures) =
+            abi.decode(quoteData, (IMarginEngineRfqRouter.Quote, IMarginEngineRfqRouter.SignerSignature[]));
+        (RolloverMandate memory mandate, bytes memory mandateSig) = abi.decode(mandateData, (RolloverMandate, bytes));
+        return _executeRollover(loanId, mandate, mandateSig, quote, signatures);
     }
 
     /// @notice Create a pending same-network loan request and accept a mandate atomically.
@@ -991,14 +1038,431 @@ contract CollarVault is
         }
     }
 
-    /// @notice Rollover is not yet supported by the same-network margin-engine integration.
-    function rolloverLoan(uint256, bytes calldata, bytes calldata) external pure returns (bytes32) {
-        revert CV_RolloverUnavailable();
+    /// @notice Rollover finalization is not used in the same-network integration.
+    function finalizeRollover(uint256, bytes32) external pure {
+        revert CV_InvalidInput();
     }
 
-    /// @notice Rollover finalization is not yet supported by the same-network margin-engine integration.
-    function finalizeRollover(uint256, bytes32) external pure {
-        revert CV_RolloverUnavailable();
+    function _executeRollover(
+        uint256 loanId,
+        RolloverMandate memory mandate,
+        bytes memory mandateSig,
+        IMarginEngineRfqRouter.Quote memory quote,
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures
+    ) internal returns (bytes32 quoteHash) {
+        IMarginEngineRfqRouter router = _marginEngineRfqRouter;
+        if (address(router) == address(0)) revert CV_InvalidConfig();
+
+        Loan storage loan = _loans[loanId];
+        if (loan.state != LoanState.ACTIVE_ZERO_COST) revert CV_InvalidState();
+        if (block.timestamp >= loan.maturity) revert CV_InvalidState();
+        if (mandate.loanId != loanId || mandate.borrower != loan.borrower) revert CV_InvalidMessage();
+        if (mandate.deadline < block.timestamp || mandate.newMaturity <= block.timestamp) revert CV_InvalidState();
+        if (mandate.newMaturity <= loan.maturity) revert CV_InvalidInput();
+
+        bytes32 mandateHash = hashRolloverMandate(mandate);
+        if (_usedRolloverMandateNonces[loan.borrower][mandate.nonce] || _usedRolloverMandates[mandateHash]) {
+            revert CV_InvalidMessage();
+        }
+        address signer = ECDSA.recover(mandateHash, mandateSig);
+        if (signer != loan.borrower) revert CV_Unauthorized();
+
+        RolloverQuoteResolution memory resolution = _validateRolloverQuote(loan, mandate, quote);
+        Loan memory oldLoan = loan;
+
+        uint256 accruedInterest =
+            _quoteInterest(oldLoan.principal, oldLoan.interestApr, oldLoan.startTime, block.timestamp);
+        uint256 remainingOldInterest =
+            oldLoan.interestOwed > accruedInterest ? oldLoan.interestOwed - accruedInterest : 0;
+        uint256 newInterest =
+            _quoteInterest(oldLoan.principal, _originationFeeApr, block.timestamp, mandate.newMaturity);
+        _enforceRollSafetyLtv(
+            oldLoan.collateralAsset,
+            oldLoan.collateralAmount,
+            resolution.newPutStrike,
+            oldLoan.principal + remainingOldInterest + newInterest,
+            _maxRollLtv
+        );
+
+        _usedRolloverMandates[mandateHash] = true;
+        _usedRolloverMandateNonces[loan.borrower][mandate.nonce] = true;
+
+        int256 realizedC;
+        (quoteHash, realizedC) = _executeRolloverQuote(router, oldLoan, quote, signatures);
+        if (realizedC < 0 || int256(newInterest) + realizedC < int256(mandate.minNetInterest)) {
+            revert CV_InsufficientValue();
+        }
+        if (realizedC > 0) {
+            _usdc.safeTransfer(address(_liquidityVault), uint256(realizedC));
+        }
+
+        _validatePostRolloverState(loan, resolution);
+        _validateOldPositionsCleared(oldLoan);
+
+        loan.maturity = mandate.newMaturity;
+        loan.putStrike = resolution.newPutStrike;
+        loan.callStrike = resolution.newCallStrike;
+        loan.startTime = block.timestamp;
+        loan.interestApr = _originationFeeApr;
+        loan.interestOwed = remainingOldInterest + newInterest;
+        loan.putBucketId = resolution.newPutBucketId;
+        loan.callBucketId = resolution.newCallBucketId;
+        loan.putInstrumentId = resolution.newPutInstrumentId;
+        loan.callInstrumentId = resolution.newCallInstrumentId;
+
+        emit LoanRolledOver(
+            loanId,
+            oldLoan.maturity,
+            mandate.newMaturity,
+            oldLoan.interestOwed,
+            loan.interestOwed,
+            oldLoan.callStrike,
+            resolution.newCallStrike,
+            oldLoan.putStrike,
+            resolution.newPutStrike,
+            quoteHash
+        );
+    }
+
+    function _executeRolloverQuote(
+        IMarginEngineRfqRouter router,
+        Loan memory loan,
+        IMarginEngineRfqRouter.Quote memory quote,
+        IMarginEngineRfqRouter.SignerSignature[] memory signatures
+    ) internal returns (bytes32 quoteHash, int256 realizedC) {
+        uint256 grossPremiumVolume;
+        for (uint256 index = 0; index < quote.actions.length; ++index) {
+            grossPremiumVolume += quote.actions[index].quoteAmount;
+        }
+
+        (address oldLongPutToken,) = _marginEngine.getBucketTokens(loan.putBucketId);
+        (, address oldCappedToken) = _marginEngine.getBucketTokens(loan.callBucketId);
+        IERC20(oldLongPutToken).safeIncreaseAllowance(address(router), loan.collateralAmount);
+        IERC20(oldCappedToken).safeIncreaseAllowance(address(router), loan.collateralAmount);
+        if (grossPremiumVolume != 0) {
+            _usdc.safeIncreaseAllowance(address(router), grossPremiumVolume * 2);
+        }
+        IERC20(loan.collateralAsset).safeIncreaseAllowance(address(_marginEngine), loan.collateralAmount);
+
+        uint256 usdcBalanceBefore = _usdc.balanceOf(address(this));
+        quoteHash = router.executeRfq(quote, signatures, IMarginEngineRfqRouter.ExecutionParams({taker: address(this)}));
+        uint256 usdcBalanceAfter = _usdc.balanceOf(address(this));
+        realizedC = int256(usdcBalanceAfter) - int256(usdcBalanceBefore);
+    }
+
+    function _validateRolloverQuote(
+        Loan storage loan,
+        RolloverMandate memory mandate,
+        IMarginEngineRfqRouter.Quote memory quote
+    ) internal view returns (RolloverQuoteResolution memory resolution) {
+        if (quote.quoteAsset != address(_usdc) || quote.validUntil < block.timestamp) revert CV_InvalidMessage();
+        if (quote.taker != address(this) || quote.authorizedExecutor != address(this)) revert CV_InvalidMessage();
+        if (quote.actions.length != 4) revert CV_InvalidMessage();
+
+        _validatePutBucket(loan.putBucketId, loan.putInstrumentId, loan.collateralAmount);
+        _validateActiveCallBucket(loan);
+
+        _validateOldPutRolloverAction(loan, quote.actions[0]);
+        _validateOldCallRolloverAction(loan, quote.actions[1]);
+
+        resolution.newCallBucketId = quote.actions[2].bucketId;
+        resolution.newCallInstrumentId = quote.actions[2].instrumentId;
+        resolution.newCallStrike = _resolveNewCallRolloverAction(loan, mandate, quote.actions[2]);
+
+        if (
+            quote.actions[3].side != IMarginEngineRfqRouter.Side.Buy
+                || quote.actions[3].instrumentType != IMarginEngineRfqRouter.InstrumentType.Put
+                || quote.actions[3].quantity != loan.collateralAmount || quote.actions[3].longRecipient != address(this)
+                || quote.actions[3].cappedRecipient != address(0) || quote.actions[3].cappedSource != address(0)
+                || quote.actions[3].collateralRecipient != address(0)
+        ) revert CV_InvalidMessage();
+        if (quote.actions[3].fulfillmentType == IMarginEngineRfqRouter.FulfillmentType.Mint) {
+            if (quote.actions[3].longSource != address(0)) revert CV_InvalidMessage();
+        } else if (quote.actions[3].fulfillmentType == IMarginEngineRfqRouter.FulfillmentType.Transfer) {
+            if (quote.actions[3].longSource == address(0) || quote.actions[3].maker != quote.actions[3].longSource) {
+                revert CV_InvalidMessage();
+            }
+        } else {
+            revert CV_InvalidMessage();
+        }
+
+        resolution.newPutBucketId = quote.actions[3].bucketId;
+        resolution.newPutInstrumentId = quote.actions[3].instrumentId;
+        resolution.newPutStrike = _resolveNewPutRolloverAction(loan, mandate, quote.actions[3]);
+    }
+
+    function _validatePostRolloverState(Loan storage loan, RolloverQuoteResolution memory resolution) internal view {
+        _validatePutBucket(resolution.newPutBucketId, resolution.newPutInstrumentId, loan.collateralAmount);
+
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address longCallToken,
+            address cappedToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(resolution.newCallBucketId);
+        bucketType;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (
+            owner != address(this) || bucketInstrumentId != resolution.newCallInstrumentId
+                || collateralBalance != loan.collateralAmount || outstandingQuantity != loan.collateralAmount || settled
+                || closed || IERC20(longCallToken).balanceOf(address(this)) != 0
+                || IERC20(cappedToken).balanceOf(address(this)) != loan.collateralAmount
+        ) {
+            revert CV_InvalidState();
+        }
+    }
+
+    function _validateActiveCallBucket(Loan storage loan) internal view {
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address longCallToken,
+            address cappedToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(loan.callBucketId);
+        bucketType;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (
+            owner != address(this) || bucketInstrumentId != loan.callInstrumentId
+                || collateralBalance != loan.collateralAmount || outstandingQuantity != loan.collateralAmount || settled
+                || closed || IERC20(longCallToken).balanceOf(address(this)) != 0
+                || IERC20(cappedToken).balanceOf(address(this)) != loan.collateralAmount
+        ) {
+            revert CV_InvalidState();
+        }
+    }
+
+    function _validateOldPositionsCleared(Loan memory loan) internal view {
+        (address oldLongPutToken,) = _marginEngine.getBucketTokens(loan.putBucketId);
+        if (IERC20(oldLongPutToken).balanceOf(address(this)) != 0) revert CV_InvalidState();
+
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address longCallToken,
+            address cappedToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(loan.callBucketId);
+        bucketType;
+        longCallToken;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (
+            owner != address(this) || bucketInstrumentId != loan.callInstrumentId || settled || closed
+                || collateralBalance != 0 || outstandingQuantity != 0
+                || IERC20(cappedToken).balanceOf(address(this)) != 0
+        ) {
+            revert CV_InvalidState();
+        }
+    }
+
+    function _validateOldPutRolloverAction(Loan storage loan, IMarginEngineRfqRouter.Action memory oldPutAction)
+        internal
+        view
+    {
+        if (
+            oldPutAction.side != IMarginEngineRfqRouter.Side.Sell
+                || oldPutAction.instrumentType != IMarginEngineRfqRouter.InstrumentType.Put
+                || oldPutAction.fulfillmentType != IMarginEngineRfqRouter.FulfillmentType.Transfer
+                || oldPutAction.bucketId != loan.putBucketId || oldPutAction.instrumentId != loan.putInstrumentId
+                || oldPutAction.quantity != loan.collateralAmount || oldPutAction.longSource != address(this)
+                || oldPutAction.longRecipient == address(0) || oldPutAction.maker != oldPutAction.longRecipient
+                || oldPutAction.cappedRecipient != address(0) || oldPutAction.cappedSource != address(0)
+                || oldPutAction.collateralRecipient != address(0)
+        ) revert CV_InvalidMessage();
+    }
+
+    function _validateOldCallRolloverAction(Loan storage loan, IMarginEngineRfqRouter.Action memory oldCallAction)
+        internal
+        view
+    {
+        if (
+            oldCallAction.side != IMarginEngineRfqRouter.Side.Buy
+                || oldCallAction.instrumentType != IMarginEngineRfqRouter.InstrumentType.Call
+                || oldCallAction.fulfillmentType != IMarginEngineRfqRouter.FulfillmentType.Burn
+                || oldCallAction.bucketId != loan.callBucketId || oldCallAction.instrumentId != loan.callInstrumentId
+                || oldCallAction.quantity != loan.collateralAmount || oldCallAction.longRecipient != address(0)
+                || oldCallAction.longSource == address(0) || oldCallAction.maker != oldCallAction.longSource
+                || oldCallAction.cappedRecipient != address(0) || oldCallAction.cappedSource != address(this)
+                || oldCallAction.collateralRecipient != address(this)
+        ) revert CV_InvalidMessage();
+    }
+
+    function _resolveNewCallRolloverAction(
+        Loan storage loan,
+        RolloverMandate memory mandate,
+        IMarginEngineRfqRouter.Action memory newCallAction
+    ) internal view returns (uint256 newCallStrike) {
+        if (
+            newCallAction.side != IMarginEngineRfqRouter.Side.Sell
+                || newCallAction.instrumentType != IMarginEngineRfqRouter.InstrumentType.Call
+                || newCallAction.fulfillmentType != IMarginEngineRfqRouter.FulfillmentType.Mint
+                || newCallAction.quantity != loan.collateralAmount || newCallAction.longRecipient == address(0)
+                || newCallAction.maker != newCallAction.longRecipient || newCallAction.longSource != address(0)
+                || newCallAction.cappedRecipient != address(this) || newCallAction.cappedSource != address(0)
+                || newCallAction.collateralRecipient != address(0)
+        ) revert CV_InvalidMessage();
+
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address longCallToken,
+            address cappedToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(newCallAction.bucketId);
+        bucketType;
+        longCallToken;
+        cappedToken;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (
+            owner != address(this) || bucketInstrumentId != newCallAction.instrumentId || collateralBalance != 0
+                || outstandingQuantity != 0 || settled || closed
+        ) revert CV_InvalidState();
+
+        (
+            address underlying,
+            address quoteAsset,
+            address collateralAsset,
+            uint64 expiry,
+            uint256 strike,
+            uint256 quantityScale,
+            uint8 optionType,
+            bool exists
+        ) = _marginEngine.instruments(newCallAction.instrumentId);
+        quantityScale;
+        if (
+            !exists || quoteAsset != address(_usdc) || expiry != mandate.newMaturity
+                || optionType != uint8(IMarginEngine.OptionType.Call)
+                || underlying != _engineAsset[loan.collateralAsset]
+                || collateralAsset != _engineAsset[loan.collateralAsset] || strike < mandate.minCallStrike
+        ) revert CV_InvalidMessage();
+        return strike;
+    }
+
+    function _resolveNewPutRolloverAction(
+        Loan storage loan,
+        RolloverMandate memory mandate,
+        IMarginEngineRfqRouter.Action memory newPutAction
+    ) internal view returns (uint256 newPutStrike) {
+        (
+            bytes32 bucketInstrumentId,
+            uint8 bucketType,
+            address owner,
+            uint256 collateralBalance,
+            uint256 outstandingQuantity,
+            address longToken,
+            address secondaryToken,
+            bool settled,
+            bool closed,
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        ) = _marginEngine.buckets(newPutAction.bucketId);
+        bucketType;
+        collateralBalance;
+        outstandingQuantity;
+        longToken;
+        secondaryToken;
+        settlementCollateral;
+        settlementTotalEntitlement;
+        settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator;
+        redeemedCollateral;
+        if (owner == address(0) || bucketInstrumentId != newPutAction.instrumentId || settled || closed) {
+            revert CV_InvalidState();
+        }
+
+        (
+            address underlying,
+            address quoteAsset,
+            address collateralAsset,
+            uint64 expiry,
+            uint256 strike,
+            uint256 quantityScale,
+            uint8 optionType,
+            bool exists
+        ) = _marginEngine.instruments(newPutAction.instrumentId);
+        quantityScale;
+        if (
+            !exists || quoteAsset != address(_usdc) || expiry != mandate.newMaturity
+                || optionType != uint8(IMarginEngine.OptionType.Put) || underlying != _engineAsset[loan.collateralAsset]
+                || collateralAsset != address(_usdc) || strike > mandate.maxPutStrike
+        ) revert CV_InvalidMessage();
+        return strike;
     }
 
     function _createPendingDeposit(address borrower, DepositParams calldata params) internal returns (uint256 loanId) {
