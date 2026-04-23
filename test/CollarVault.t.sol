@@ -794,7 +794,7 @@ contract CollarVaultTest is Test {
         uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 24_000e6);
 
         vm.warp(block.timestamp + 30 days);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral);
 
         CollarVault.Loan memory readyLoan = vault.getLoan(loanId);
         assertEq(uint256(readyLoan.state), uint256(CollarVault.LoanState.READY_FOR_VARIABLE));
@@ -812,7 +812,7 @@ contract CollarVaultTest is Test {
 
         uint256 beforeBorrowerUsdc = usdc.balanceOf(borrower);
         usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
 
         CollarVault.Loan memory loan = vault.getLoan(loanId);
         assertEq(uint256(loan.state), uint256(CollarVault.LoanState.CLOSED));
@@ -825,7 +825,7 @@ contract CollarVaultTest is Test {
 
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 vaultBefore = usdc.balanceOf(address(liquidityVault));
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM);
 
         assertGt(usdc.balanceOf(treasury), treasuryBefore);
         assertGt(usdc.balanceOf(address(liquidityVault)), vaultBefore);
@@ -834,7 +834,7 @@ contract CollarVaultTest is Test {
     function testSettleAtExactExpiryBoundary() public {
         uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 24_000e6);
         vm.warp(block.timestamp + 30 days);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.READY_FOR_VARIABLE));
     }
 
@@ -842,10 +842,10 @@ contract CollarVaultTest is Test {
         uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
         vm.warp(block.timestamp + 30 days);
         usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
 
         vm.expectRevert(CollarVault.CV_InvalidState.selector);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
     }
 
     function testSettleHugeSpotSettlementDeterministic() public {
@@ -853,7 +853,7 @@ contract CollarVaultTest is Test {
         vm.warp(block.timestamp + 30 days);
 
         usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
     }
 

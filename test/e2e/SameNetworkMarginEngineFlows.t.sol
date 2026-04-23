@@ -80,7 +80,7 @@ contract SameNetworkMarginEngineFlowsTest is Test {
         uint256 loanId = _openLoan(24_000e6);
 
         vm.warp(block.timestamp + 30 days);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.READY_FOR_VARIABLE));
 
         assertTrue(vault.tryConvertReadyLoan(loanId));
@@ -102,14 +102,14 @@ contract SameNetworkMarginEngineFlowsTest is Test {
         uint256 loanId = _openLoan(32_000e6);
         vm.warp(block.timestamp + 30 days);
         usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
     }
 
     function testE2E_PutItmSettlement() public {
         uint256 loanId = _openLoan(0);
         vm.warp(block.timestamp + 30 days);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM, bytes32(0));
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
     }
 

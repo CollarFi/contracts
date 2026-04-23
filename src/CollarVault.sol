@@ -791,11 +791,7 @@ contract CollarVault is
     }
 
     /// @notice Settle an active zero-cost loan directly against the local margin engine.
-    function settleLoan(uint256 loanId, SettlementOutcome expectedOutcome, bytes32)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function settleLoan(uint256 loanId, SettlementOutcome expectedOutcome) external nonReentrant whenNotPaused {
         Loan storage loan = _loans[loanId];
         if (loan.state != LoanState.ACTIVE_ZERO_COST) revert CV_InvalidState();
         if (block.timestamp < loan.maturity) revert CV_InvalidState();
