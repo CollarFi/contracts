@@ -1,101 +1,266 @@
 # CollarFi Protocol Technical Specification
 
-Version 2.0 - Same-network margin-engine architecture
+Version 2.0 — current same-network implementation
 
 ## 1. Overview
 
-CollarFi issues fixed-maturity USDC loans against crypto collateral such as WBTC, cbBTC, WETH, and wrapped staking assets. Each zero-cost loan is hedged with a collar opened against the in-house `margin-engine` that lives on the same network as the CollarFi vault.
+This specification describes the **current implementation** in this repository.
 
-The protocol economics remain unchanged:
+CollarFi originates fixed-maturity USDC loans against supported collateral assets. A newly finalized loan is a **zero-cost collar loan** held entirely on one network:
 
-1. **Put ITM**: the put finishes in the money, protecting the lender repayment path.
-2. **Neutral**: both options finish out of the money and the borrower keeps exposure by rolling into a variable-rate loan, or a deterministic close path is used if conversion is not completed.
-3. **Call ITM**: the call caps borrower upside, lender principal is repaid, and any residual above debt goes to the borrower.
+- the borrower posts collateral to `CollarVault`,
+- the lender side is funded by `CollarLiquidityVault`,
+- the downside hedge is a long put held by `CollarVault` in the local `margin-engine`,
+- the upside cap is a covered call written from `CollarVault` collateral in the local `margin-engine`.
 
-All origination, rollover, and settlement flows execute on one network inside the same deployment boundary.
+The active implementation has four live loan states:
 
-## 2. Components
+1. `ACTIVE_ZERO_COST`
+2. `READY_FOR_VARIABLE`
+3. `ACTIVE_VARIABLE`
+4. `CLOSED`
 
-| Component | Role |
+There is no cross-chain execution path in this implementation.
+
+## 2. Contracts, actors, and roles
+
+### 2.1 Core contracts
+
+| Component | Current responsibility |
 | --- | --- |
-| Borrower | Supplies collateral and receives USDC principal. |
-| Lender | Deposits USDC into `CollarLiquidityVault`. |
-| `CollarVault` | Core borrower-facing contract. Holds pending deposits, originates loans, owns covered-call buckets, and settles loans. |
-| `margin-engine` | Same-network options primitive. Holds put collateral in USDC and covered-call collateral in underlying units. |
-| Market maker | Whitelisted owner of per-loan put buckets. Issues long put claims to `CollarVault`. Receives long call claims from `CollarVault`. |
-| Keeper | Finalizes loans after mandate acceptance and triggers settlement at or after maturity. |
-| Lending adapter | Converts neutral expiries into variable-rate loans. |
+| `CollarVault` | Borrower-facing vault. Holds pending collateral, accepts signed baseline RFQs, finalizes zero-cost loans, settles matured loans, prepares and executes same-network rollovers, and manages variable-loan transitions. |
+| `CollarLiquidityVault` | ERC4626 lender pool for the USDC asset. Tracks idle liquidity, reserved principal, and active loan principal. Can optionally place idle assets in an external ERC4626 yield vault. |
+| `margin-engine` | Local options primitive used for put buckets, covered-call buckets, oracle finalization, and bucket redemption. |
+| `ILendingAdapter` + cloned `IVariableLoanPosition` | Variable-rate continuation path used after neutral expiry. |
 
-## 3. Same-network architecture
+### 2.2 External actors
 
-### 3.1 Deployment assumptions
+| Actor | Current responsibility |
+| --- | --- |
+| Borrower | Creates pending deposits, accepts or refreshes mandates, may cancel pending deposits when no live mandate remains, receives principal, signs rollover mandates, repays active variable debt, and withdraws variable collateral. |
+| RFQ signer | Address with `RFQ_SIGNER_ROLE` that signs baseline origination RFQs. |
+| Keeper | Address with `KEEPER_ROLE` that finalizes pending loans, prepares rollover call buckets, and executes rollovers. |
+| Settlement caller | Any caller may settle matured zero-cost loans, attempt ready-to-variable conversion, or close a ready loan by repayment. |
+| Call buyer / market maker | Receives long-call tokens on origination and participates in rollover RFQ execution. |
 
-The active deployment consists only of same-network vault, margin-engine, and lending-adapter components. Origination, rollover, and settlement execute locally inside that one deployment.
+### 2.3 Access-controlled roles
 
-### 3.2 Margin-engine position model
+`CollarVault` defines:
 
-For auditability, the CollarFi integration uses **one put bucket and one covered-call bucket per loan**.
+- `DEFAULT_ADMIN_ROLE`
+- `KEEPER_ROLE`
+- `PARAMETER_ROLE`
+- `PAUSER_ROLE`
+- `RFQ_SIGNER_ROLE`
 
-- The market maker creates and funds a put bucket for the exact instrument `(underlying, USDC, USDC, expiry, putStrike, Put)`.
-- The market maker issues `LongPutToken` for the exact loan quantity directly to `CollarVault`.
-- `CollarVault` creates a covered-call bucket for the exact instrument `(underlying, USDC, underlying, expiry, callStrike, Call)`.
-- `CollarVault` deposits the borrower collateral into that covered-call bucket.
-- The covered-call bucket issues:
-  - `LongCallToken` to the market maker,
-  - `CappedUnderlyingToken` to `CollarVault`.
+`PARAMETER_ROLE` controls current vault configuration, including:
 
-This one-loan-per-bucket design intentionally avoids shared-bucket allocation accounting inside CollarFi v1.
+- treasury address and `treasuryBps`,
+- `originationFeeApr`,
+- `maxTotalPrincipal`,
+- `maxRollLtv`,
+- `maxMandateDuration`,
+- `readyLoanCloseGracePeriod`,
+- enabled collateral assets, strike scales, and mapped engine assets,
+- the local `margin-engine`,
+- the local `MarginEngineRfqRouter`,
+- the lending adapter,
+- the variable-loan-position implementation clone target.
 
-## 4. Origination flow
+`CollarLiquidityVault` defines:
 
-### 4.1 Pending deposit creation
+- `DEFAULT_ADMIN_ROLE`
+- `VAULT_ROLE`
+- `PARAMETER_ROLE`
 
-Borrowers originate by calling either:
+## 3. Collateral, strike scale, and engine assets
 
-- `createDepositWithMandate`, or
-- `createDepositWithMandatePermit`.
+A collateral asset is usable only when `CollarVault` has current config for it:
 
-The vault pulls collateral and records a `PendingDeposit`.
+- `_collateralAllowed[asset] == true`
+- `_strikeScale[asset] != 0`
+- `_engineAsset[asset]` points to the local `margin-engine` underlying asset used for option instruments.
 
-### 4.2 Mandate acceptance
+All option pricing and settlement math uses the per-collateral strike scale stored in `CollarVault`.
 
-The borrower submits a keeper-signed `BaselineRfq` that binds:
+## 4. Margin-engine position model
 
+### 4.1 Origination positions
+
+A newly finalized zero-cost loan uses:
+
+- one exact **put bucket** already funded in `margin-engine`, and
+- one newly created **covered-call bucket** created by `CollarVault` during finalization.
+
+At finalization:
+
+- the put bucket must reference the exact put instrument for the pending deposit,
+- the put bucket must have `outstandingQuantity == collateralAmount`,
+- `CollarVault` must already hold the exact long-put quantity,
+- `CollarVault` creates the covered-call bucket for the exact call instrument,
+- `CollarVault` deposits the full collateral amount into that covered-call bucket,
+- the long-call token is issued to `FinalizeLoanParams.callBuyer`,
+- the capped-underlying token is issued to `CollarVault`.
+
+### 4.2 Rollover positions
+
+A rollover keeps the old zero-cost loan live until a synchronous RFQ execution replaces its option legs.
+
+For the rolled loan:
+
+- the **new call bucket** must always be pre-created by `prepareRolloverCallBucket(...)` and must be empty before execution,
+- the **new put leg** may arrive in one of two supported ways:
+  1. `Mint` into a bucket that underwrites exactly the rolled quantity, or
+  2. `Transfer` from maker inventory in an already-funded put bucket.
+
+Because inventory transfer is supported, the current implementation does **not** require the new put bucket to be exclusive to one loan during rollover.
+
+## 5. Origination mechanics
+
+### 5.1 Pending deposit creation
+
+The borrower starts by calling one of:
+
+- `createDepositWithMandate(...)`, or
+- `createDepositWithMandatePermit(...)`.
+
+Both paths create a `PendingDeposit` with:
+
+- borrower,
+- collateral asset,
+- collateral amount,
+- maturity,
+- requested put strike,
+- requested borrow amount.
+
+Validation at this step:
+
+- collateral asset must be enabled,
+- collateral amount must be non-zero,
+- maturity must be strictly in the future,
+- put strike must be non-zero,
+- borrow amount must be non-zero.
+
+The Permit2 path additionally validates that the permit targets the collateral asset, the vault as spender, and at least the requested amount.
+
+### 5.2 Baseline RFQ acceptance / refresh
+
+A borrower accepts a live quote by calling `acceptMandate(...)`, or does so atomically inside `createDepositWithMandate(...)` / `createDepositWithMandatePermit(...)`.
+
+The signed object is `BaselineRfq`:
+
+- `loanId`
+- `collateralAsset`
+- `collateralAmount`
+- `maturity`
+- `putStrike`
+- `callStrike`
+- `borrowAmount`
+- `minNetInterest`
+- `rfqExpiry`
+- `borrower`
+- `nonce`
+
+Current acceptance mechanics:
+
+- the borrower must be `msg.sender`,
+- the chosen mandate deadline must be in the future and within `maxMandateDuration`,
+- an existing mandate may only be replaced once its deadline has been reached or passed,
+- the RFQ must match the pending deposit terms exactly,
+- for the atomic create+accept flows, `rfq.loanId` may be `0` as a wildcard sentinel or may equal the newly created loan id,
+- for standalone `acceptMandate(...)`, `rfq.loanId` must equal the existing pending loan id,
+- `rfq.borrower` may be `address(0)` as a wildcard or may equal the pending borrower,
+- the recovered signer must have `RFQ_SIGNER_ROLE`,
+- the RFQ hash is one-time-use replay protection,
+- if this is the first accepted mandate for the pending deposit, principal is reserved in `CollarLiquidityVault`,
+- fixed interest is quoted from `originationFeeApr` over `block.timestamp -> maturity`,
+- the roll-safety LTV bound is enforced against the pending deposit collateral and put strike,
+- `fixedInterest` must be at least `rfq.minNetInterest`.
+
+The stored mandate records:
+
+- borrower,
+- collateral asset and amount,
+- maturity,
+- borrower-selected deadline,
+- borrow amount,
+- opening call strike,
+- opening put strike,
+- minimum net interest,
+- fixed interest,
+- `maxRollLtv` snapshot.
+
+### 5.3 Pending deposit cancellation
+
+The borrower may call `requestCollateralReturn(...)` to unwind a pending deposit.
+
+Current implementation permits this only when:
+
+- the pending deposit exists,
+- the caller is the borrower,
+- there is no live mandate, meaning either:
+  - no mandate exists, or
+  - the stored mandate deadline has already passed.
+
+If a committed mandate existed, the reserved principal is released from `CollarLiquidityVault` before collateral is returned to the borrower.
+
+### 5.4 Loan finalization
+
+A keeper completes origination by calling:
+
+- `finalizeLoan(uint256 loanId, FinalizeLoanParams calldata params)`
+
+where `FinalizeLoanParams` contains:
+
+- `putBucketId`
+- `callBuyer`
+
+Current finalization checks:
+
+- pending deposit exists,
+- mandate exists,
+- mandate deadline has not passed,
+- `callBuyer != address(0)` and `putBucketId != 0`,
+- computed put and call instruments match the pending deposit + mandate terms,
+- the put bucket matches the exact put instrument and exact loan quantity,
+- `CollarVault` holds the exact long-put quantity.
+
+On success:
+
+1. `CollarVault` creates the covered-call bucket for the call instrument,
+2. `CollarVault` deposits the full collateral amount into that bucket,
+3. the long call is minted to `callBuyer`,
+4. the capped-underlying token is minted to `CollarVault`,
+5. pending deposit and mandate records are deleted,
+6. the loan is stored as `ACTIVE_ZERO_COST`,
+7. reserved principal is borrowed from `CollarLiquidityVault`,
+8. principal is transferred to the borrower.
+
+The stored zero-cost loan records:
+
+- borrower,
 - collateral asset and amount,
 - maturity,
 - put strike,
 - call strike,
-- borrow amount,
-- borrower,
-- RFQ expiry,
-- replay-protection nonce.
+- principal,
+- `ACTIVE_ZERO_COST`,
+- `startTime`,
+- current `interestApr`,
+- `interestOwed`,
+- zero `variableDebt`,
+- current put / call bucket ids,
+- current put / call instrument ids.
 
-The vault verifies the EIP-712 signature against `RFQ_SIGNER_ROLE`, marks the RFQ hash consumed, computes fixed interest from `originationFeeApr`, and reserves USDC principal in `CollarLiquidityVault`.
+## 6. Maturity settlement mechanics
 
-### 4.3 Finalization
+### 6.1 Final spot source
 
-After the market maker has funded and issued the exact put claims to the vault, a keeper calls `finalizeLoan` with:
+`previewSettlement(...)` and `settleLoan(...)` use the **finalized** oracle states recorded in `margin-engine` for the loan's put and call instruments.
 
-- the per-loan put bucket id,
-- the call buyer / long-call recipient.
+The call and put instruments must both be finalized and must report the exact same final spot.
 
-`CollarVault` must verify:
-
-- the put instrument matches the pending loan terms,
-- the call instrument matches the accepted mandate,
-- the put bucket underwrites the exact loan quantity,
-- the vault holds the exact long put quantity,
-- the roll-safe LTV bound still holds.
-
-On success the vault creates the covered-call bucket, deposits collateral, borrows reserved USDC from `CollarLiquidityVault`, and transfers principal to the borrower.
-
-## 5. Settlement flow
-
-### 5.1 Oracle finalization
-
-Settlement uses the final oracle spot from `margin-engine` for both the put and call instruments. The final spot must be finalized on-chain for both instruments and must match exactly.
-
-### 5.2 Outcome rules
+### 6.2 Outcome rules
 
 For final spot `S_T`, put strike `K_p`, and call strike `K_c`:
 
@@ -103,145 +268,339 @@ For final spot `S_T`, put strike `K_p`, and call strike `K_c`:
 - `K_p <= S_T <= K_c` => `Neutral`
 - `S_T > K_c` => `CallITM`
 
-Strike equality is treated as out-of-the-money for that leg.
+Equality is out-of-the-money for that leg.
 
-### 5.3 Deterministic same-network settlement
+### 6.3 Settlement preview values
 
-For ITM settlement, the vault performs two deterministic actions:
+For a loan quantity `Q` and strike scale `scale`, the preview logic computes:
 
-1. Redeems option claims from `margin-engine`.
-2. Sells the redeemed underlying directly to the settlement caller at the finalized oracle spot.
+- `putPayout = Q * (K_p - S_T) / scale` when `S_T < K_p`, else `0`
+- `collateralToBuyer = 0` in `Neutral`
+- `collateralToBuyer = Q` in `PutITM`
+- `collateralToBuyer = Q * K_c / S_T` in `CallITM`
+- `buyerPayment = collateralToBuyer * S_T / scale` when `collateralToBuyer != 0`, else `0`
+- `totalSettlementValue = putPayout + buyerPayment`
 
-This removes the previous off-chain spot-RFQ path while preserving the loan payoff logic.
+### 6.4 `settleLoan(...)`
 
-For a loan quantity `Q` and strike scale `scale`:
+Any caller may settle a matured zero-cost loan by calling:
 
-- put payout in USDC:
-  - `Q * max(K_p - S_T, 0) / scale`
-- covered-call collateral sold to settlement caller:
-  - `Q` when `S_T <= K_c`
-  - `Q * K_c / S_T` when `S_T > K_c`
-- caller payment in USDC:
-  - `collateralSold * S_T / scale`
+- `settleLoan(uint256 loanId, SettlementOutcome expectedOutcome)`
 
-Total settlement value is:
+Current execution steps:
 
-- `putPayout + callerPayment`
+1. loan must be `ACTIVE_ZERO_COST`,
+2. current block time must be at or after maturity,
+3. the vault finalizes both instruments in `margin-engine` if needed,
+4. the vault settles both buckets if needed,
+5. the previewed outcome must equal `expectedOutcome`.
 
-The vault then:
+#### Neutral path
 
-- repays principal to `CollarLiquidityVault`,
-- transfers fixed interest to `CollarLiquidityVault`,
-- sends `PutITM` excess to treasury and lenders according to `treasuryBps`,
-- sends `CallITM` excess to the borrower.
+For `Neutral`:
 
-### 5.4 Neutral outcome
+- the vault redeems the full capped-underlying position from the call bucket,
+- the loan moves to `READY_FOR_VARIABLE`,
+- `readyLoanSince[loanId]` is set to `block.timestamp`.
 
-When both options expire out of the money, the vault redeems `CappedUnderlyingToken` back into collateral and moves the loan into `READY_FOR_VARIABLE`.
+#### ITM paths
 
-From there:
+For `PutITM` or `CallITM`:
 
-- anyone may call `tryConvertReadyLoan` to open the variable-rate position if liquidity is available, or
-- anyone may call `settleReadyLoanByRepay` to repay debt and deterministically distribute collateral after the grace period.
+- the vault always redeems capped underlying from the call bucket,
+- the vault redeems the put only when `putPayout != 0`,
+- the vault checks that redeemed balances cover the previewed collateral and put payout,
+- the settlement caller only pays / receives the collateral leg when `buyerPayment != 0`:
+  - vault pulls `buyerPayment` USDC from `msg.sender`,
+  - vault transfers `collateralToBuyer` collateral to `msg.sender`.
 
-### 5.5 Pre-maturity same-network rollover
+The loan can only close successfully when:
 
-Borrowers may refresh an active zero-cost loan before maturity by signing an EIP-712 `RolloverMandate` that binds:
+- `totalSettlementValue >= principal + interestOwed`
 
-- `loanId`,
-- `borrower`,
-- `newMaturity`,
-- `minCallStrike`,
-- `maxPutStrike`,
-- `minNetInterest`,
-- `deadline`,
-- borrower-scoped replay-protection nonce.
+Distribution on close:
 
-The keeper first prepares the new covered-call bucket with `prepareRolloverCallBucket`. This creates the concrete new call bucket that the off-chain RFQ package references.
+- principal is repaid to `CollarLiquidityVault`,
+- fixed interest is transferred to `CollarLiquidityVault`,
+- any excess on `PutITM` is split:
+  - `treasuryCut = excess * treasuryBps / 10_000`
+  - remaining excess to `CollarLiquidityVault`,
+- any excess on `CallITM` is transferred to the borrower.
 
-The keeper then submits `executeRollover` with a `MarginEngineRfqRouter` quote whose taker and authorized executor are both the vault. The current same-network rollover path requires an exact 4-leg package:
+The loan then moves to `CLOSED`.
 
-1. sell the old put from the vault to the maker,
-2. buy back the old call by burning the maker-held long call together with the vault-held capped token, returning underlying collateral to the vault,
-3. sell the new call by minting against the pre-created vault-owned covered-call bucket,
-4. buy the new put into the vault, either by minting from a funded put bucket or by maker inventory transfer.
+## 7. Ready-for-variable mechanics
 
-The vault validates:
+### 7.1 Ready state
 
-- borrower mandate signature and replay protection,
-- exact bucket / instrument / quantity alignment for the old legs,
-- the new call bucket exists, is vault-owned, and is empty before execution,
-- the new call strike is `>= minCallStrike`,
-- the new put strike is `<= maxPutStrike`,
-- `newMaturity` matches the new option expiries,
-- the roll-safe LTV bound still holds against the new put strike for the full rolled debt (`principal + carriedInterest + newInterest`).
+A loan enters `READY_FOR_VARIABLE` only through neutral settlement.
 
-Rollover economics are checked from the vault's actual USDC balance delta across `executeRfq(...)`:
+At that moment:
+
+- the full collateral amount must already have been redeemed back to the vault,
+- the loan keeps its original `principal` and `interestOwed`,
+- `readyLoanSince[loanId]` is recorded.
+
+### 7.2 Variable conversion
+
+Any caller may attempt conversion by calling:
+
+- `tryConvertReadyLoan(uint256 loanId)`
+
+Current conversion mechanics:
+
+- loan must be `READY_FOR_VARIABLE`,
+- total due is `principal + interestOwed`,
+- if no variable position clone exists yet, the vault clones the configured `variableLoanPositionImplementation` and initializes it with:
+  - vault address,
+  - lending adapter,
+  - borrower,
+  - collateral asset,
+  - USDC asset,
+- that clone is stored before the liquidity check,
+- if adapter-side available liquidity is below `totalDue`, the function returns `false`; loan state remains `READY_FOR_VARIABLE`, but the cloned position stays stored for later reuse,
+- otherwise the vault:
+  - decreases committed principal,
+  - transfers full collateral into the variable position,
+  - opens the variable position for `collateralAmount` collateral and `totalDue` debt,
+  - repays principal to `CollarLiquidityVault`,
+  - transfers fixed interest to `CollarLiquidityVault`,
+  - updates the loan to `ACTIVE_VARIABLE`,
+  - stores live variable debt and live collateral,
+  - clears `readyLoanSince[loanId]`.
+
+### 7.3 Ready-loan repay-close
+
+Any caller may close a ready loan directly by calling:
+
+- `settleReadyLoanByRepay(uint256 loanId)`
+
+Current mechanics:
+
+- loan must be `READY_FOR_VARIABLE`,
+- caller transfers `principal + interestOwed` USDC to the vault,
+- principal is repaid to `CollarLiquidityVault`,
+- fixed interest is transferred to `CollarLiquidityVault`,
+- the collateral split depends on whether the ready-loan grace period has expired.
+
+#### Before grace expiry
+
+- borrower receives all remaining collateral,
+- caller receives none.
+
+#### After grace expiry
+
+Current effective implementation gives the caller a base collateral amount:
+
+- `baseCollateral = ceil(totalDue * strikeScale / putStrike)`
+
+That amount is capped by the remaining collateral balance.
+
+With the current implementation, `readyLoanKeeperPenaltyBps` is stored internally but not externally configured, so the effective multiplier is currently `1.0x`.
+
+After distribution, the loan moves to `CLOSED` and the ready-loan timestamp is cleared.
+
+## 8. Active variable-loan mechanics
+
+### 8.1 Repayment
+
+Any caller may repay an active variable loan by calling:
+
+- `repayVariableLoan(uint256 loanId, uint256 amount)`
+
+Current behavior:
+
+- loan must be `ACTIVE_VARIABLE`,
+- repayment amount is capped at live debt,
+- any excess USDC sent beyond live debt is refunded to the caller,
+- the loan stores updated live debt and live collateral after repayment,
+- the loan closes only when both live debt and live collateral are zero.
+
+### 8.2 Collateral withdrawal
+
+Only the borrower may withdraw collateral from an active variable loan by calling:
+
+- `withdrawVariableCollateral(uint256 loanId, uint256 amount)`
+
+Current behavior:
+
+- loan must be `ACTIVE_VARIABLE`,
+- caller must equal `loan.borrower`,
+- requested amount must not exceed current collateral,
+- the vault updates stored live debt and live collateral after withdrawal,
+- the loan closes only when both live debt and live collateral are zero.
+
+## 9. Same-network rollover mechanics
+
+### 9.1 Borrower mandate
+
+The borrower authorizes rollover with an EIP-712 `RolloverMandate` containing:
+
+- `borrower`
+- `loanId`
+- `newMaturity`
+- `minCallStrike`
+- `maxPutStrike`
+- `minNetInterest`
+- `deadline`
+- `nonce`
+
+Current replay protection is both:
+
+- exact mandate-hash consumption, and
+- borrower-scoped consumed nonce tracking.
+
+### 9.2 Call-bucket preparation
+
+A keeper prepares the next call bucket by calling:
+
+- `prepareRolloverCallBucket(uint256 loanId, uint64 newMaturity, uint256 newCallStrike)`
+
+Current requirements:
+
+- loan must be `ACTIVE_ZERO_COST`,
+- current time must still be before the current maturity,
+- `newMaturity` must be strictly after both `block.timestamp` and current maturity,
+- `newCallStrike` must be non-zero,
+- the computed call instrument must exist and satisfy the requested collateral / expiry / strike bounds.
+
+The function creates the concrete covered-call bucket in `margin-engine` and returns both the instrument id and bucket id.
+
+### 9.3 RFQ quote shape
+
+A keeper executes rollover with:
+
+- `executeRollover(...)`, or
+- the ABI-compatibility wrapper `rolloverLoan(...)`.
+
+The current implementation requires a `MarginEngineRfqRouter` quote with:
+
+- `quoteAsset == USDC`
+- `validUntil >= block.timestamp`
+- `taker == address(CollarVault)`
+- `authorizedExecutor == address(CollarVault)`
+- exactly **4 actions**.
+
+The actions must be:
+
+1. old put: `Sell / Put / Transfer` from the vault's current put bucket,
+2. old call unwind: `Buy / Call / Burn` against the vault's current covered-call bucket,
+3. new call open: `Sell / Call / Mint` against the pre-created vault-owned call bucket,
+4. new put open: `Buy / Put / Mint` or `Buy / Put / Transfer` into the vault.
+
+Current validations include:
+
+- exact old bucket ids, instrument ids, and quantity alignment,
+- new call bucket must already exist, be vault-owned, and be empty before execution,
+- new call strike must be `>= mandate.minCallStrike`,
+- new put strike must be `<= mandate.maxPutStrike`,
+- new option expiries must equal `mandate.newMaturity`.
+
+### 9.4 Rollover economics and state transition
+
+Before execution, the vault computes:
+
+- remaining old fixed interest,
+- new fixed interest for `block.timestamp -> newMaturity`,
+- the roll-safe LTV bound on:
+  - `principal + remainingOldInterest + newInterest`.
+
+The vault then executes the RFQ and computes:
 
 - `realizedC = usdcBalanceAfter - usdcBalanceBefore`
-- require `realizedC >= 0`
-- require `newInterest + realizedC >= minNetInterest`
-- transfer realized premium cash to `CollarLiquidityVault` immediately after validation so no rollover proceeds remain stranded on the vault balance.
 
-On success the vault updates the active loan in place:
+Current economic checks:
 
-- replace maturity,
-- replace call / put strikes,
-- replace call / put bucket ids,
-- replace call / put instrument ids,
-- reset `startTime`,
-- carry forward any unaccrued prior fixed interest and add the new fixed-interest amount for the rolled tenor.
+- `realizedC >= 0`
+- `newInterest + realizedC >= mandate.minNetInterest`
 
-Rollover is fully synchronous in the same-network architecture and completes inside `executeRollover(...)`.
+If `realizedC > 0`, the vault transfers that premium immediately into `CollarLiquidityVault`.
 
-## 6. Safety checks
+Post-execution the vault validates:
 
-The implementation must enforce the following invariants.
+- the new put position exists and matches the resolved new instrument,
+- the new call bucket is vault-owned and holds the expected collateral and capped token balance,
+- the old long put, old capped token, and old covered-call bucket positions are fully cleared.
 
-### 6.1 Origination invariants
+On success the loan is updated in place:
 
-- Borrow amount must be non-zero.
-- Put strike must be non-zero.
-- Collateral asset must be explicitly enabled.
-- RFQ signatures must be valid and replay-protected.
-- Principal reservation must happen exactly once per pending loan.
-- Finalization must only happen once.
-- The roll-safe bound must hold:
-  - `borrowAmount + fixedInterest <= collateralAmount * putStrike / strikeScale * maxRollLtv`
+- new maturity,
+- new put strike,
+- new call strike,
+- new put bucket id,
+- new call bucket id,
+- new put instrument id,
+- new call instrument id,
+- `startTime = block.timestamp`,
+- `interestApr = originationFeeApr`,
+- `interestOwed = remainingOldInterest + newInterest`.
 
-### 6.2 Settlement invariants
+The loan remains `ACTIVE_ZERO_COST` throughout the rollover and the operation is fully synchronous.
 
-- A loan in `ACTIVE_ZERO_COST` must not settle before maturity.
-- Put and call final spots must match.
-- Settlement must not execute twice.
-- `Neutral` settlement must redeem the full collateral amount before marking `READY_FOR_VARIABLE`.
-- `PutITM` and `CallITM` must repay principal before distributing any excess.
-- The deterministic caller payment must be computed from the finalized oracle spot only.
+## 10. CollarLiquidityVault mechanics
 
-### 6.3 Variable-loan invariants
+`CollarLiquidityVault` is an ERC4626 vault over the USDC asset.
 
-- Conversion must only occur from `READY_FOR_VARIABLE`.
-- Variable collateral withdrawals must only be available to the borrower.
-- Closing flows must not leave stale debt or stale collateral accounting.
+Current balance accounting tracks:
 
-## 7. Roles
+- local idle USDC balance,
+- optional ERC4626 yield-vault balance,
+- `activeLoans`,
+- `reservedPrincipal`,
+- `reservedPrincipalByLoan[loanId]`.
 
-- `DEFAULT_ADMIN_ROLE`: role administration.
-- `PARAMETER_ROLE`: treasury, engine, collateral, and risk parameter updates.
-- `KEEPER_ROLE`: loan finalization.
-- `RFQ_SIGNER_ROLE`: authorized baseline RFQ signers.
-- `PAUSER_ROLE`: emergency pause control.
+### 10.1 Reservations and borrowing
 
-## 8. Unsupported in this integration
+`CollarVault` uses `VAULT_ROLE` functions to manage lender liquidity:
 
-The current same-network integration deliberately does **not** implement cross-chain functionality.
+- `reservePrincipal(loanId, amount)`
+- `releasePrincipal(loanId)`
+- `borrowReserved(loanId, amount)`
+- `repay(amount)`
+- `writeOff(amount)`
 
-## 9. Clarifications / TODOs
+Current semantics:
 
-- **Rollover quoting**: off-chain services must continue constructing the exact 4-leg unwind/open package expected by the vault validations.
-- **Zero-spot covered-call edge case**: CollarFi tests cover `spot = 0`. Production integration should confirm the upstream margin-engine settlement path preserves the expected capped-underlying behavior at zero spot.
-- **Shared put buckets**: the margin-engine supports shared underwriting across many consumers, but CollarFi v1 intentionally uses one bucket per loan for simpler accounting. Shared-bucket allocation may be added later if explicitly specified.
+- reserved principal is excluded from lender withdrawals and new borrowing availability,
+- `availableLiquidity()` returns gross assets minus reserved principal,
+- `totalAssets()` includes local USDC, yield-vault assets, and `activeLoans`,
+- reserve coverage is enforced so local vault balance must remain at least `reservedPrincipal`.
 
-## 10. Conclusion
+### 10.2 Optional yield vault
 
-CollarFi now runs as a same-network architecture: collateral stays on one chain, the local margin-engine provides option claims and final settlement state, and the vault settles deterministically inside the same deployment boundary. This preserves the borrower and lender payoff semantics while materially simplifying the system boundary and reducing operational risk.
+The liquidity vault may be configured with an external ERC4626 yield vault over the same USDC asset.
+
+Current parameter-role actions are:
+
+- `setYieldVault(...)`
+- `supplyToYieldVault(...)`
+- `withdrawFromYieldVault(...)`
+
+The implementation automatically pulls funds back from the yield vault when local liquidity is needed for outflows or reserve coverage.
+
+## 11. Implemented safety properties
+
+The current implementation enforces at least the following:
+
+- pending deposits require enabled collateral, non-zero borrow amount, non-zero put strike, and future maturity,
+- baseline RFQs are EIP-712 signed and one-time-use,
+- principal reservation happens once per accepted pending loan and is released on cancellation,
+- finalization is keeper-only and cannot proceed after mandate expiry,
+- zero-cost settlement cannot occur before maturity,
+- put and call final oracle spots must match exactly,
+- settlement must cover `principal + interestOwed` before excess is distributed,
+- neutral conversion requires `READY_FOR_VARIABLE` and sufficient adapter liquidity,
+- borrower-only restriction applies to variable collateral withdrawals,
+- rollover requires borrower signature, borrower nonce freshness, exact old-leg alignment, and a 4-action same-network quote shape,
+- rollover roll-safety LTV is checked against the full rolled debt,
+- `pause()` / `unpause()` gate borrower and settlement flows.
+
+## 12. Unsupported scope
+
+This specification does **not** define any of the following, because they are not present in the current implementation:
+
+- cross-chain messaging,
+- bridge fee estimation,
+- asynchronous finalization,
+- asynchronous rollover completion,
+- cross-chain settlement routing.
