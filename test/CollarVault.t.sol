@@ -3,12 +3,14 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {DeployPermit2} from "permit2/test/utils/DeployPermit2.sol";
 
 import {CollarLiquidityVault} from "../src/CollarLiquidityVault.sol";
 import {CollarVault, ILiquidityVault} from "../src/CollarVault.sol";
+import {LoanEscrow} from "../src/LoanEscrow.sol";
 import {ILendingAdapter} from "../src/interfaces/ILendingAdapter.sol";
 import {IMarginEngine} from "../src/interfaces/IMarginEngine.sol";
 import {IMarginEngineRfqRouter} from "../src/interfaces/IMarginEngineRfqRouter.sol";
@@ -17,6 +19,8 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockEulerAdapter} from "./mocks/MockEulerAdapter.sol";
 import {MockMarginEngine} from "./mocks/MockMarginEngine.sol";
 import {MockMarginEngineRfqRouter} from "./mocks/MockMarginEngineRfqRouter.sol";
+import {MockCowSettlement} from "./mocks/MockCowSettlement.sol";
+import {MockCowVaultRelayer} from "./mocks/MockCowVaultRelayer.sol";
 
 contract CollarVaultTest is Test {
     uint256 internal borrowerKey = 0xB0B0;
@@ -39,6 +43,10 @@ contract CollarVaultTest is Test {
     IAllowanceTransfer internal permit2;
     CollarVault internal vault;
     VariableLoanPosition internal positionImpl;
+    LoanEscrow internal loanEscrowImpl;
+    UpgradeableBeacon internal loanEscrowBeacon;
+    MockCowSettlement internal cowSettlement;
+    MockCowVaultRelayer internal cowVaultRelayer;
 
     function setUp() public {
         borrower = vm.addr(borrowerKey);
@@ -52,6 +60,10 @@ contract CollarVaultTest is Test {
         marginEngineRfqRouter = new MockMarginEngineRfqRouter(marginEngine, feeRecipient);
         permit2 = IAllowanceTransfer(new DeployPermit2().deployPermit2());
         positionImpl = new VariableLoanPosition();
+        loanEscrowImpl = new LoanEscrow();
+        loanEscrowBeacon = new UpgradeableBeacon(address(loanEscrowImpl), address(this));
+        cowSettlement = new MockCowSettlement();
+        cowVaultRelayer = new MockCowVaultRelayer();
 
         CollarVault impl = new CollarVault();
         bytes memory initData = abi.encodeCall(
@@ -76,6 +88,9 @@ contract CollarVaultTest is Test {
         vault.setTreasuryConfig(treasury, 2_000);
         vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));
         vault.setVariableLoanPositionImplementation(address(positionImpl));
+        vault.setLoanEscrowBeacon(address(loanEscrowBeacon));
+        vault.setCowSettlement(address(cowSettlement));
+        vault.setCowVaultRelayer(address(cowVaultRelayer));
         vault.setOriginationFeeApr(0.1e18);
         vault.setMaxRollLtv(0.999e18);
         vault.setReadyLoanCloseGracePeriod(2 days);
@@ -117,6 +132,234 @@ contract CollarVaultTest is Test {
         vault.setMarginEngineRfqRouter(IMarginEngineRfqRouter(rfqRouter));
 
         assertEq(address(vault.marginEngineRfqRouter()), rfqRouter);
+    }
+
+    function testSetLoanEscrowBeacon() public {
+        UpgradeableBeacon nextBeacon = new UpgradeableBeacon(address(new LoanEscrow()), address(this));
+
+        vm.expectEmit(true, false, false, true);
+        emit CollarVault.LoanEscrowBeaconUpdated(address(nextBeacon));
+
+        vault.setLoanEscrowBeacon(address(nextBeacon));
+
+        assertEq(vault.loanEscrowBeacon(), address(nextBeacon));
+    }
+
+    function testFinalizeLoanCreatesDedicatedEscrow() public {
+        (uint256 loanId, CollarVault.BaselineRfq memory rfq) =
+            _createPendingWithMandate(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days);
+        uint256 putBucketId = _preparePutBucket(rfq, 1e8);
+
+        vm.prank(keeper);
+        vault.finalizeLoan(loanId, CollarVault.FinalizeLoanParams({putBucketId: putBucketId, callBuyer: marketMaker}));
+
+        address escrow = vault.loanEscrow(loanId);
+        assertTrue(escrow != address(0));
+        assertEq(LoanEscrow(payable(escrow)).loanId(), loanId);
+        assertEq(LoanEscrow(payable(escrow)).vault(), address(vault));
+        assertEq(LoanEscrow(payable(escrow)).borrower(), borrower);
+        assertEq(LoanEscrow(payable(escrow)).collateralAsset(), address(wbtc));
+        assertEq(LoanEscrow(payable(escrow)).debtAsset(), address(usdc));
+    }
+
+    function testConvertReadyLoanCreatesVariablePositionOwnedByEscrow() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 24_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.Neutral);
+        assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.READY_FOR_VARIABLE));
+
+        assertTrue(vault.tryConvertReadyLoan(loanId));
+
+        address escrow = vault.loanEscrow(loanId);
+        address position = vault.variableLoanPosition(loanId);
+        assertTrue(position != address(0));
+        assertEq(VariableLoanPosition(position).vault(), escrow);
+    }
+
+    function testSettleCallItmMovesLoanIntoPendingSettlementSwap() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        CollarVault.SettlementPreview memory preview = vault.previewSettlement(loanId);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+
+        CollarVault.Loan memory loan = vault.getLoan(loanId);
+        assertEq(uint256(loan.state), uint256(CollarVault.LoanState.PENDING_SETTLEMENT_SWAP));
+
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        assertEq(uint256(pending.outcome), uint256(CollarVault.SettlementOutcome.CallITM));
+        assertEq(pending.collateralToSell, preview.collateralToBuyer);
+        assertEq(pending.minSwapUsdcOut, loan.principal + loan.interestOwed);
+        assertEq(wbtc.balanceOf(vault.loanEscrow(loanId)), preview.collateralToBuyer);
+    }
+
+    function testFinalizeSettledSaleRevertsBeforeObservedFillEvenIfEscrowHasEnoughUsdc() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        CollarVault.SettlementPreview memory preview = vault.previewSettlement(loanId);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes32 digest = keccak256("call-itm-order");
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            preview.collateralToBuyer,
+            pending.minSwapUsdcOut,
+            validTo,
+            false
+        );
+
+        uint256 totalDue = vault.getLoan(loanId).principal + vault.getLoan(loanId).interestOwed;
+        usdc.mint(escrow, totalDue);
+
+        vm.expectRevert(CollarVault.CV_InvalidState.selector);
+        vault.finalizeSettledSale(loanId);
+    }
+
+    function testFinalizeSettledSaleClosesCallItmLoanAfterObservedFill() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+        uint256 borrowerWbtcBefore = wbtc.balanceOf(borrower);
+
+        vm.warp(block.timestamp + 30 days);
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        CollarVault.SettlementPreview memory preview = vault.previewSettlement(loanId);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes32 digest = keccak256("call-itm-fill-order");
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            preview.collateralToBuyer,
+            pending.minSwapUsdcOut,
+            validTo,
+            false
+        );
+
+        usdc.mint(address(cowSettlement), pending.minSwapUsdcOut);
+        cowVaultRelayer.fillOrder(
+            address(cowSettlement),
+            address(wbtc),
+            address(usdc),
+            escrow,
+            preview.collateralToBuyer,
+            pending.minSwapUsdcOut,
+            digest,
+            orderUid
+        );
+
+        vault.finalizeSettledSale(loanId);
+
+        CollarVault.Loan memory loan = vault.getLoan(loanId);
+        assertEq(uint256(loan.state), uint256(CollarVault.LoanState.CLOSED));
+        assertEq(wbtc.balanceOf(borrower), borrowerWbtcBefore);
+    }
+
+    function testApproveSettlementOrderApprovesRelayerNotSettlement() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        CollarVault.SettlementPreview memory preview = vault.previewSettlement(loanId);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes32 digest = keccak256("call-itm-relayer-allowance");
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            preview.collateralToBuyer,
+            pending.minSwapUsdcOut,
+            validTo,
+            false
+        );
+
+        assertEq(wbtc.allowance(escrow, address(cowVaultRelayer)), pending.collateralToSell);
+        assertEq(wbtc.allowance(escrow, address(cowSettlement)), 0);
+    }
+
+    function testApproveSettlementOrderRejectsPartiallyFillableOrders() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        CollarVault.SettlementPreview memory preview = vault.previewSettlement(loanId);
+        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes32 digest = keccak256("call-itm-partial");
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vm.expectRevert(CollarVault.CV_InvalidInput.selector);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            preview.collateralToBuyer,
+            pending.minSwapUsdcOut,
+            validTo,
+            true
+        );
+    }
+
+    function testFinalizeSettledSaleUsesSettlementObserverWithSeparateRelayer() public {
+        uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 31_000e6);
+
+        vm.warp(block.timestamp + 30 days);
+        _settleItmLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        _fillPendingSettlement(loanId, keccak256("separate-relayer"), pending.minSwapUsdcOut);
+
+        vault.finalizeSettledSale(loanId);
+        assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
     }
 
     function testSetMarginEngineRfqRouterRevertsOnZeroAddress() public {
@@ -811,8 +1054,10 @@ contract CollarVaultTest is Test {
         vm.warp(block.timestamp + 30 days);
 
         uint256 beforeBorrowerUsdc = usdc.balanceOf(borrower);
-        usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        CollarVault.PendingSettlement memory pendingBefore =
+            _settleItmLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        _fillPendingSettlement(loanId, keccak256("call-itm-excess"), pendingBefore.minSwapUsdcOut + 1_000e6);
+        vault.finalizeSettledSale(loanId);
 
         CollarVault.Loan memory loan = vault.getLoan(loanId);
         assertEq(uint256(loan.state), uint256(CollarVault.LoanState.CLOSED));
@@ -825,7 +1070,9 @@ contract CollarVaultTest is Test {
 
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 vaultBefore = usdc.balanceOf(address(liquidityVault));
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM);
+        _settleItmLoan(loanId, CollarVault.SettlementOutcome.PutITM);
+        _fillPendingSettlement(loanId, keccak256("put-itm-split"), 0);
+        vault.finalizeSettledSale(loanId);
 
         assertGt(usdc.balanceOf(treasury), treasuryBefore);
         assertGt(usdc.balanceOf(address(liquidityVault)), vaultBefore);
@@ -852,9 +1099,56 @@ contract CollarVaultTest is Test {
         uint256 loanId = _createFinalizeAndSettleSpot(1e8, 21_000e6, 26_000e6, 20_000e6, 30 days, 5_000_000e6);
         vm.warp(block.timestamp + 30 days);
 
-        usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        CollarVault.PendingSettlement memory pending = _settleItmLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        _fillPendingSettlement(loanId, keccak256("huge-spot-call-itm"), pending.minSwapUsdcOut);
+        vault.finalizeSettledSale(loanId);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
+    }
+
+    function _settleItmLoan(uint256 loanId, CollarVault.SettlementOutcome outcome)
+        internal
+        returns (CollarVault.PendingSettlement memory pending)
+    {
+        CollarVault.Loan memory currentLoan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(currentLoan.callInstrumentId);
+        vault.settleLoan(loanId, outcome);
+        pending = vault.getPendingSettlement(loanId);
+    }
+
+    function _fillPendingSettlement(uint256 loanId, bytes32 digest, uint256 buyAmount) internal {
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            pending.collateralToSell,
+            pending.minSwapUsdcOut,
+            validTo,
+            false
+        );
+
+        if (buyAmount != 0) {
+            usdc.mint(address(cowSettlement), buyAmount);
+        }
+        cowVaultRelayer.fillOrder(
+            address(cowSettlement),
+            address(wbtc),
+            address(usdc),
+            escrow,
+            pending.collateralToSell,
+            buyAmount,
+            digest,
+            orderUid
+        );
     }
 
     function _quoteInterest(uint256 principal, uint256 apr, uint256 start, uint256 end)

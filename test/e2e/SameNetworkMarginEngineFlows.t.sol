@@ -3,17 +3,21 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {DeployPermit2} from "permit2/test/utils/DeployPermit2.sol";
 
 import {CollarLiquidityVault} from "../../src/CollarLiquidityVault.sol";
 import {CollarVault, ILiquidityVault} from "../../src/CollarVault.sol";
+import {LoanEscrow} from "../../src/LoanEscrow.sol";
 import {ILendingAdapter} from "../../src/interfaces/ILendingAdapter.sol";
 import {IMarginEngine} from "../../src/interfaces/IMarginEngine.sol";
 import {VariableLoanPosition} from "../../src/adapters/VariableLoanPosition.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockEulerAdapter} from "../mocks/MockEulerAdapter.sol";
 import {MockMarginEngine} from "../mocks/MockMarginEngine.sol";
+import {MockCowSettlement} from "../mocks/MockCowSettlement.sol";
+import {MockCowVaultRelayer} from "../mocks/MockCowVaultRelayer.sol";
 
 contract SameNetworkMarginEngineFlowsTest is Test {
     MockERC20 internal usdc;
@@ -22,6 +26,9 @@ contract SameNetworkMarginEngineFlowsTest is Test {
     MockEulerAdapter internal lendingAdapter;
     MockMarginEngine internal marginEngine;
     CollarVault internal vault;
+    UpgradeableBeacon internal loanEscrowBeacon;
+    MockCowSettlement internal cowSettlement;
+    MockCowVaultRelayer internal cowVaultRelayer;
 
     uint256 internal borrowerKey = 0xB0B0;
     uint256 internal signerKey = 0xA11CE;
@@ -39,6 +46,9 @@ contract SameNetworkMarginEngineFlowsTest is Test {
         liquidityVault = new CollarLiquidityVault(usdc, "Collar USDC", "cUSDC", address(this));
         lendingAdapter = new MockEulerAdapter(address(wbtc), address(usdc));
         marginEngine = new MockMarginEngine(address(usdc), address(this));
+        loanEscrowBeacon = new UpgradeableBeacon(address(new LoanEscrow()), address(this));
+        cowSettlement = new MockCowSettlement();
+        cowVaultRelayer = new MockCowVaultRelayer();
 
         CollarVault impl = new CollarVault();
         bytes memory init = abi.encodeCall(
@@ -63,6 +73,9 @@ contract SameNetworkMarginEngineFlowsTest is Test {
         vault.grantRole(vault.RFQ_SIGNER_ROLE(), signer);
         vault.setCollateralConfig(address(wbtc), true, 1e8, address(wbtc));
         vault.setVariableLoanPositionImplementation(address(new VariableLoanPosition()));
+        vault.setLoanEscrowBeacon(address(loanEscrowBeacon));
+        vault.setCowSettlement(address(cowSettlement));
+        vault.setCowVaultRelayer(address(cowVaultRelayer));
         vault.setOriginationFeeApr(0.1e18);
         vault.setMaxRollLtv(0.999e18);
 
@@ -101,16 +114,65 @@ contract SameNetworkMarginEngineFlowsTest is Test {
     function testE2E_CallItmSettlement() public {
         uint256 loanId = _openLoan(32_000e6);
         vm.warp(block.timestamp + 30 days);
-        usdc.approve(address(vault), type(uint256).max);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        _settleItmLoan(loanId, CollarVault.SettlementOutcome.CallITM);
+        _fillPendingSettlement(loanId, keccak256("e2e-call-itm"), vault.getPendingSettlement(loanId).minSwapUsdcOut);
+        vault.finalizeSettledSale(loanId);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
     }
 
     function testE2E_PutItmSettlement() public {
         uint256 loanId = _openLoan(0);
         vm.warp(block.timestamp + 30 days);
-        vault.settleLoan(loanId, CollarVault.SettlementOutcome.PutITM);
+        _settleItmLoan(loanId, CollarVault.SettlementOutcome.PutITM);
+        _fillPendingSettlement(loanId, keccak256("e2e-put-itm"), 0);
+        vault.finalizeSettledSale(loanId);
         assertEq(uint256(vault.getLoan(loanId).state), uint256(CollarVault.LoanState.CLOSED));
+    }
+
+    function _settleItmLoan(uint256 loanId, CollarVault.SettlementOutcome outcome)
+        internal
+        returns (CollarVault.PendingSettlement memory pending)
+    {
+        CollarVault.Loan memory loan = vault.getLoan(loanId);
+        marginEngine.finalizeInstrumentSettlement(loan.putInstrumentId);
+        marginEngine.finalizeInstrumentSettlement(loan.callInstrumentId);
+        vault.settleLoan(loanId, outcome);
+        pending = vault.getPendingSettlement(loanId);
+    }
+
+    function _fillPendingSettlement(uint256 loanId, bytes32 digest, uint256 buyAmount) internal {
+        CollarVault.PendingSettlement memory pending = vault.getPendingSettlement(loanId);
+        address escrow = vault.loanEscrow(loanId);
+        uint64 validTo = uint64(block.timestamp + 30 minutes);
+        bytes memory orderUid = abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo)));
+
+        vm.prank(keeper);
+        vault.approveSettlementOrder(
+            loanId,
+            digest,
+            orderUid,
+            address(wbtc),
+            address(usdc),
+            escrow,
+            pending.collateralToSell,
+            pending.minSwapUsdcOut,
+            validTo,
+            false
+        );
+
+        if (buyAmount != 0) {
+            usdc.mint(address(cowSettlement), buyAmount);
+        }
+        cowVaultRelayer.fillOrder(
+            address(cowSettlement),
+            address(wbtc),
+            address(usdc),
+            escrow,
+            pending.collateralToSell,
+            buyAmount,
+            digest,
+            orderUid
+        );
     }
 
     function _openLoan(uint256 finalSpot) internal returns (uint256 loanId) {

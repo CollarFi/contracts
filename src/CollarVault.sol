@@ -8,7 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {EIP712Upgradeable} from "openzeppelin-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
+import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
@@ -18,6 +18,8 @@ import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
 import {IMarginEngine} from "./interfaces/IMarginEngine.sol";
 import {IMarginEngineRfqRouter} from "./interfaces/IMarginEngineRfqRouter.sol";
 import {IVariableLoanPosition} from "./interfaces/IVariableLoanPosition.sol";
+import {ICowSettlement} from "./interfaces/ICowSettlement.sol";
+import {LoanEscrow} from "./LoanEscrow.sol";
 
 contract CollarVault is
     Initializable,
@@ -26,7 +28,6 @@ contract CollarVault is
     ReentrancyGuard,
     EIP712Upgradeable
 {
-    using Clones for address;
     using SafeERC20 for IERC20;
 
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
@@ -47,6 +48,7 @@ contract CollarVault is
     enum LoanState {
         NONE,
         ACTIVE_ZERO_COST,
+        PENDING_SETTLEMENT_SWAP,
         READY_FOR_VARIABLE,
         ACTIVE_VARIABLE,
         CLOSED
@@ -147,6 +149,12 @@ contract CollarVault is
         uint256 totalSettlementValue;
     }
 
+    struct PendingSettlement {
+        SettlementOutcome outcome;
+        uint256 collateralToSell;
+        uint256 minSwapUsdcOut;
+    }
+
     struct RolloverQuoteResolution {
         uint256 newPutBucketId;
         uint256 newCallBucketId;
@@ -221,6 +229,10 @@ contract CollarVault is
         uint256 indexed loanId, address indexed borrower, address indexed collateralAsset, uint256 collateralAmount
     );
     event VariableCollateralWithdrawn(uint256 indexed loanId, uint256 amount);
+    event LoanEscrowBeaconUpdated(address indexed beacon);
+    event LoanEscrowCreated(uint256 indexed loanId, address indexed escrow);
+    event CowSettlementUpdated(address indexed settlement);
+    event CowVaultRelayerUpdated(address indexed relayer);
     event RolloverCallBucketPrepared(
         uint256 indexed loanId, bytes32 indexed callInstrumentId, uint256 indexed callBucketId
     );
@@ -267,6 +279,11 @@ contract CollarVault is
     mapping(bytes32 => bool) private _usedBaselineRfqs;
     mapping(bytes32 => bool) private _usedRolloverMandates;
     mapping(address => mapping(uint256 => bool)) private _usedRolloverMandateNonces;
+    address private _loanEscrowBeacon;
+    mapping(uint256 => address) private _loanEscrows;
+    address private _cowSettlement;
+    address private _cowVaultRelayer;
+    mapping(uint256 => PendingSettlement) private _pendingSettlements;
 
     /// @notice Initialize the upgradeable vault.
     function initialize(
@@ -431,6 +448,21 @@ contract CollarVault is
         return _variableLoanPositions[loanId];
     }
 
+    /// @notice Return the dedicated per-loan escrow address, if any.
+    function loanEscrow(uint256 loanId) external view returns (address) {
+        return _loanEscrows[loanId];
+    }
+
+    /// @notice Return the escrow beacon used for per-loan escrows.
+    function loanEscrowBeacon() external view returns (address) {
+        return _loanEscrowBeacon;
+    }
+
+    /// @notice Return pending async settlement data for a loan.
+    function getPendingSettlement(uint256 loanId) external view returns (PendingSettlement memory) {
+        return _pendingSettlements[loanId];
+    }
+
     /// @notice Set treasury configuration.
     function setTreasuryConfig(address treasury_, uint256 bps) external onlyRole(PARAMETER_ROLE) {
         if (treasury_ == address(0) || bps > MAX_BPS) revert CV_InvalidInput();
@@ -509,6 +541,27 @@ contract CollarVault is
         if (implementation == address(0)) revert CV_InvalidConfig();
         _variableLoanPositionImplementation = implementation;
         emit VariableLoanPositionImplementationUpdated(implementation);
+    }
+
+    /// @notice Set the escrow beacon used to deploy per-loan escrows.
+    function setLoanEscrowBeacon(address beacon) external onlyRole(PARAMETER_ROLE) {
+        if (beacon == address(0)) revert CV_InvalidConfig();
+        _loanEscrowBeacon = beacon;
+        emit LoanEscrowBeaconUpdated(beacon);
+    }
+
+    /// @notice Set the trusted CoW settlement contract used for fill observation.
+    function setCowSettlement(address settlement) external onlyRole(PARAMETER_ROLE) {
+        if (settlement == address(0)) revert CV_InvalidConfig();
+        _cowSettlement = settlement;
+        emit CowSettlementUpdated(settlement);
+    }
+
+    /// @notice Set the trusted CoW vault relayer used for sell-token allowances.
+    function setCowVaultRelayer(address relayer) external onlyRole(PARAMETER_ROLE) {
+        if (relayer == address(0)) revert CV_InvalidConfig();
+        _cowVaultRelayer = relayer;
+        emit CowVaultRelayerUpdated(relayer);
     }
 
     /// @notice Pause borrower and settlement flows.
@@ -718,6 +771,8 @@ contract CollarVault is
             callInstrumentId: callInstrumentId
         });
 
+        _loanEscrows[loanId] = _deployLoanEscrow(loanId, mandate.borrower, pending.collateralAsset);
+
         _liquidityVault.borrowReserved(loanId, pending.borrowAmount);
         _usdc.safeTransfer(mandate.borrower, pending.borrowAmount);
 
@@ -811,28 +866,85 @@ contract CollarVault is
             return;
         }
 
-        uint256 usdcBalanceBefore = _usdc.balanceOf(address(this));
-        uint256 collateralBalanceBefore = IERC20(loan.collateralAsset).balanceOf(address(this));
+        address escrow = _loanEscrows[loanId];
+        if (escrow == address(0)) revert CV_InvalidConfig();
 
-        _marginEngine.redeemCappedUnderlying(loan.callBucketId, loan.collateralAmount, address(this));
+        _marginEngine.redeemCappedUnderlying(loan.callBucketId, loan.collateralAmount, escrow);
         if (preview.putPayout != 0) {
-            _marginEngine.redeemPut(loan.putBucketId, loan.collateralAmount, address(this));
+            _marginEngine.redeemPut(loan.putBucketId, loan.collateralAmount, escrow);
         }
 
-        uint256 collateralReceived = IERC20(loan.collateralAsset).balanceOf(address(this)) - collateralBalanceBefore;
-        uint256 usdcReceived = _usdc.balanceOf(address(this)) - usdcBalanceBefore;
-        if (collateralReceived < preview.collateralToBuyer || usdcReceived < preview.putPayout) {
-            revert CV_InvalidState();
+        uint256 totalDue = loan.principal + loan.interestOwed;
+        uint256 usdcAvailable = _usdc.balanceOf(escrow);
+        uint256 minSwapUsdcOut = totalDue > usdcAvailable ? totalDue - usdcAvailable : 0;
+        _pendingSettlements[loanId] = PendingSettlement({
+            outcome: preview.outcome, collateralToSell: preview.collateralToBuyer, minSwapUsdcOut: minSwapUsdcOut
+        });
+
+        loan.state = LoanState.PENDING_SETTLEMENT_SWAP;
+    }
+
+    function approveSettlementOrder(
+        uint256 loanId,
+        bytes32 digest,
+        bytes calldata orderUid,
+        address sellToken,
+        address buyToken,
+        address receiver,
+        uint256 sellAmount,
+        uint256 minBuyAmount,
+        uint64 validTo,
+        bool partiallyFillable
+    ) external nonReentrant whenNotPaused onlyKeeper {
+        Loan storage loan = _loans[loanId];
+        if (loan.state != LoanState.PENDING_SETTLEMENT_SWAP) revert CV_InvalidState();
+        if (digest == bytes32(0) || orderUid.length == 0) revert CV_InvalidInput();
+        if (validTo < block.timestamp || validTo > block.timestamp + 30 minutes) revert CV_InvalidInput();
+
+        address escrow = _loanEscrows[loanId];
+        if (escrow == address(0)) revert CV_InvalidConfig();
+        if (sellToken != loan.collateralAsset || buyToken != address(_usdc) || receiver != escrow || partiallyFillable)
+        {
+            revert CV_InvalidInput();
+        }
+        if (
+            orderUid.length != 56
+                || keccak256(orderUid) != keccak256(abi.encodePacked(digest, bytes20(escrow), bytes4(uint32(validTo))))
+        ) {
+            revert CV_InvalidInput();
         }
 
-        if (preview.buyerPayment != 0) {
-            _usdc.safeTransferFrom(msg.sender, address(this), preview.buyerPayment);
-            IERC20(loan.collateralAsset).safeTransfer(msg.sender, preview.collateralToBuyer);
-        }
+        PendingSettlement memory pending = _pendingSettlements[loanId];
+        if (sellAmount != pending.collateralToSell || minBuyAmount < pending.minSwapUsdcOut) revert CV_InvalidInput();
 
-        uint256 settlementAmount = preview.totalSettlementValue;
+        LoanEscrow(payable(escrow)).approveSettlementOrder(digest, orderUid, sellAmount);
+    }
+
+    function finalizeSettledSale(uint256 loanId) external nonReentrant whenNotPaused {
+        Loan storage loan = _loans[loanId];
+        if (loan.state != LoanState.PENDING_SETTLEMENT_SWAP) revert CV_InvalidState();
+
+        address escrow = _loanEscrows[loanId];
+        address settlement = escrow == address(0) ? address(0) : LoanEscrow(payable(escrow)).cowSettlement();
+        if (escrow == address(0) || settlement == address(0)) revert CV_InvalidConfig();
+
+        PendingSettlement memory pending = _pendingSettlements[loanId];
+        bytes memory orderUid = LoanEscrow(payable(escrow)).activeSettlementOrderUid();
+        if (orderUid.length == 0) revert CV_InvalidState();
+        if (ICowSettlement(settlement).filledAmount(orderUid) < pending.collateralToSell) revert CV_InvalidState();
+
+        uint256 settlementAmount = _usdc.balanceOf(escrow);
         uint256 totalDue = loan.principal + loan.interestOwed;
         if (settlementAmount < totalDue) revert CV_InsufficientValue();
+
+        uint256 collateralRemaining = IERC20(loan.collateralAsset).balanceOf(escrow);
+        if (settlementAmount != 0) {
+            LoanEscrow(payable(escrow)).transferToken(address(_usdc), address(this), settlementAmount);
+        }
+        if (collateralRemaining != 0) {
+            LoanEscrow(payable(escrow)).transferToken(loan.collateralAsset, loan.borrower, collateralRemaining);
+        }
+        LoanEscrow(payable(escrow)).clearSettlementOrder();
 
         _decreaseCommittedPrincipal(loan.principal);
 
@@ -844,7 +956,7 @@ contract CollarVault is
 
         uint256 excess = settlementAmount - totalDue;
         if (excess != 0) {
-            if (preview.outcome == SettlementOutcome.PutITM) {
+            if (pending.outcome == SettlementOutcome.PutITM) {
                 uint256 treasuryCut = Math.mulDiv(excess, _treasuryBps, MAX_BPS);
                 uint256 vaultCut = excess - treasuryCut;
                 if (treasuryCut != 0) _usdc.safeTransfer(_treasury, treasuryCut);
@@ -854,8 +966,9 @@ contract CollarVault is
             }
         }
 
+        delete _pendingSettlements[loanId];
         loan.state = LoanState.CLOSED;
-        emit LoanSettled(loanId, preview.outcome, settlementAmount);
+        emit LoanSettled(loanId, pending.outcome, settlementAmount);
         emit LoanClosed(loanId);
     }
 
@@ -915,14 +1028,16 @@ contract CollarVault is
         address position = _variableLoanPositions[loanId];
         if (position == address(0)) revert CV_InvalidState();
 
+        address escrow = _loanEscrows[loanId];
+        if (escrow == address(0)) revert CV_InvalidConfig();
+
         _usdc.safeTransferFrom(msg.sender, address(this), amount);
         uint256 debt = IVariableLoanPosition(position).currentDebt();
         repaid = amount > debt ? debt : amount;
-        _usdc.safeIncreaseAllowance(position, repaid);
-        IVariableLoanPosition(position).repay(repaid, address(this));
-
-        uint256 remainingDebt = IVariableLoanPosition(position).currentDebt();
-        uint256 remainingCollateral = IVariableLoanPosition(position).currentCollateral();
+        if (repaid != 0) {
+            _usdc.safeTransfer(escrow, repaid);
+        }
+        (uint256 remainingDebt, uint256 remainingCollateral) = LoanEscrow(payable(escrow)).repayVariableDebt(repaid);
         loan.variableDebt = remainingDebt;
         loan.collateralAmount = remainingCollateral;
         if (amount > repaid) {
@@ -950,13 +1065,15 @@ contract CollarVault is
         address position = _variableLoanPositions[loanId];
         if (position == address(0)) revert CV_InvalidState();
 
+        address escrow = _loanEscrows[loanId];
+        if (escrow == address(0)) revert CV_InvalidConfig();
+
         uint256 collateralBefore = IVariableLoanPosition(position).currentCollateral();
         if (amount > collateralBefore) revert CV_InvalidInput();
 
-        IVariableLoanPosition(position).withdraw(amount, loan.borrower);
+        (uint256 liveDebt, uint256 collateralAfter) =
+            LoanEscrow(payable(escrow)).withdrawCollateral(amount, loan.borrower);
 
-        uint256 liveDebt = IVariableLoanPosition(position).currentDebt();
-        uint256 collateralAfter = IVariableLoanPosition(position).currentCollateral();
         loan.variableDebt = liveDebt;
         loan.collateralAmount = collateralAfter;
         withdrawn = collateralBefore - collateralAfter;
@@ -1610,6 +1727,36 @@ contract CollarVault is
         }
     }
 
+    function _deployLoanEscrow(uint256 loanId, address borrower, address collateralAsset)
+        internal
+        returns (address escrow)
+    {
+        address beacon = _loanEscrowBeacon;
+        address impl = _variableLoanPositionImplementation;
+        if (
+            beacon == address(0) || impl == address(0) || _cowSettlement == address(0) || _cowVaultRelayer == address(0)
+        ) {
+            revert CV_InvalidConfig();
+        }
+
+        bytes memory initData = abi.encodeCall(
+            LoanEscrow.initialize,
+            (
+                loanId,
+                address(this),
+                borrower,
+                collateralAsset,
+                address(_usdc),
+                address(_lendingAdapter),
+                impl,
+                _cowSettlement,
+                _cowVaultRelayer
+            )
+        );
+        escrow = address(new BeaconProxy(beacon, initData));
+        emit LoanEscrowCreated(loanId, escrow);
+    }
+
     function _markReadyForVariable(uint256 loanId, uint256 collateralAmount) internal {
         Loan storage loan = _loans[loanId];
         if (collateralAmount != loan.collateralAmount) revert CV_InvalidInput();
@@ -1622,24 +1769,16 @@ contract CollarVault is
         Loan storage loan = _loans[loanId];
         uint256 totalDue = loan.principal + loan.interestOwed;
 
-        address position = _variableLoanPositions[loanId];
-        if (position == address(0)) {
-            address impl = _variableLoanPositionImplementation;
-            if (impl == address(0)) revert CV_InvalidConfig();
-            position = impl.clone();
-            IVariableLoanPosition(position)
-                .initialize(
-                    address(this), address(_lendingAdapter), loan.borrower, loan.collateralAsset, address(_usdc)
-                );
-            _variableLoanPositions[loanId] = position;
-        }
-
-        if (IVariableLoanPosition(position).availableLiquidity() < totalDue) return false;
+        address escrow = _loanEscrows[loanId];
+        if (escrow == address(0)) revert CV_InvalidConfig();
+        if (LoanEscrow(payable(escrow)).availableLiquidity() < totalDue) return false;
 
         _decreaseCommittedPrincipal(loan.principal);
 
-        IERC20(loan.collateralAsset).safeIncreaseAllowance(position, loan.collateralAmount);
-        IVariableLoanPosition(position).open(loan.collateralAmount, totalDue, address(this), address(this));
+        IERC20(loan.collateralAsset).safeTransfer(escrow, loan.collateralAmount);
+        (address position, uint256 liveDebt, uint256 liveCollateral) =
+            LoanEscrow(payable(escrow)).openVariablePosition(loan.collateralAmount, totalDue, address(this));
+        _variableLoanPositions[loanId] = position;
 
         _usdc.safeIncreaseAllowance(address(_liquidityVault), loan.principal);
         _liquidityVault.repay(loan.principal);
@@ -1647,8 +1786,6 @@ contract CollarVault is
             _usdc.safeTransfer(address(_liquidityVault), loan.interestOwed);
         }
 
-        uint256 liveDebt = IVariableLoanPosition(position).currentDebt();
-        uint256 liveCollateral = IVariableLoanPosition(position).currentCollateral();
         loan.state = LoanState.ACTIVE_VARIABLE;
         loan.variableDebt = liveDebt;
         loan.collateralAmount = liveCollateral;
