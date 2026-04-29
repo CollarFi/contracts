@@ -147,8 +147,9 @@ contract CollarVaultTest is Test {
 
         assertEq(callInstrumentId, expectedInstrumentId);
         assertEq(callBucketId, 3);
-        (bytes32 bucketInstrumentId, uint8 bucketType, address owner,,,,,,,,,,,,,) = marginEngine.buckets(callBucketId);
-        assertEq(uint256(bucketType), 1);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner,,) =
+            marginEngine.getBucketMetadata(callBucketId);
+        assertEq(uint256(bucketType), uint256(IMarginEngine.BucketType.CoveredCall));
         assertEq(bucketInstrumentId, expectedInstrumentId);
         assertEq(owner, address(vault));
     }
@@ -867,40 +868,13 @@ contract CollarVaultTest is Test {
     }
 
     function _bucketOutstanding(uint256 bucketId) internal view returns (uint256 outstandingQuantity) {
-        (
-            bytes32 instrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstanding,
-            address primaryToken,
-            address secondaryToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = marginEngine.buckets(bucketId);
-        instrumentId;
-        bucketType;
-        owner;
-        collateralBalance;
-        primaryToken;
-        secondaryToken;
-        settled;
-        closed;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
-        return outstanding;
+        (, IMarginEngine.BucketType bucketType,,,) = marginEngine.getBucketMetadata(bucketId);
+        if (bucketType == IMarginEngine.BucketType.Put) {
+            (, outstandingQuantity,) = marginEngine.getPutBucketState(bucketId);
+            return outstandingQuantity;
+        }
+
+        (, outstandingQuantity,,) = marginEngine.getCoveredCallBucketState(bucketId);
     }
 
     function _rolloverActions(
