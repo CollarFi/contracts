@@ -5,14 +5,14 @@
   "lib/euler-earn": {
     "rev": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345"
   },
+  "lib/euler-interfaces": {
+    "rev": "bafec0bb55185af2e0759a724468eed1e04c767e"
+  },
   "lib/euler-vault-kit": {
     "rev": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"
   },
   "lib/forge-std": {
     "rev": "1801b0541f4fda118a10798fd3486bb7051c5dd6"
-  },
-  "lib/lz-address-book": {
-    "rev": "7cd089aff4f20da303cd8d11a6985a0e15260371"
   },
   "lib/morpho-blue": {
     "tag": {
@@ -23,13 +23,7 @@
   "lib/openzeppelin-contracts": {
     "rev": "fcbae5394ae8ad52d8e580a3477db99814b9d565"
   },
-  "lib/socket-plugs": {
-    "rev": "59bdb748f57138ad0eff3079bf704509a5de84b6"
-  },
-  "lib/v2-aa": {
-    "rev": "290518e50229b32e6ff115017cafdbd01cb43457"
-  },
-  "lib/v2-matching": {
-    "rev": "c29d1d1ea6ab1418368efebd1b35dd5d5713ec67"
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "50088be3cd188164e83a4e5f0e0b3c27f3728eba"
   }
 }

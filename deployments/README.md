@@ -1,22 +1,8 @@
 # Deployments
 
-Deployment artifacts are organized by `chain_id`:
+This repository no longer commits legacy L1/L2 deployment JSON or cross-chain runtime artifacts, and it no longer ships the old cross-chain deployment scripts.
 
-- `deployments/<chain_id>/l1.json`
-- `deployments/<chain_id>/l2.json`
-
-## Generate from Foundry broadcast logs
-Deployment JSON is now written directly by the Python deployers:
-
-```bash
-uv run python ops/deploy_l1.py --env testnet --broadcast
-uv run python ops/deploy_l2.py --env testnet --broadcast
-```
-
-The deployers write normalized files under `deployments/<chain_id>/`.
-
-## Notes
-
-- Existing flat files (e.g. `deployments/l1-default.json`) are legacy outputs.
-- The old Solidity deploy scripts and broadcast-log exporter were removed.
-- New deploy scripts default to chain-id output paths when `OUTPUT_JSON` is not provided.
+For same-network deployments:
+- use local environment/account-driven tooling,
+- default to dry runs unless explicitly broadcasting,
+- keep generated deployment outputs and broadcast artifacts out of git.

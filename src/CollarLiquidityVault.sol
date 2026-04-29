@@ -172,7 +172,7 @@ contract CollarLiquidityVault is ERC4626, AccessControl, ReentrancyGuard {
 
     /// @notice Return total assets including outstanding loans and yield vault balance.
     function totalAssets() public view override returns (uint256) {
-        // In-flight amounts are excluded from NAV/share pricing until funds land on L1.
+        // In-flight amounts are excluded from NAV/share pricing until funds settle back into the local vault.
         return IERC20(asset()).balanceOf(address(this)) + _yieldVaultAssets() + activeLoans;
     }
 
