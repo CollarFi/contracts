@@ -762,8 +762,8 @@ contract CollarVault is
         Loan memory loan = _loans[loanId];
         if (loan.state != LoanState.ACTIVE_ZERO_COST) revert CV_InvalidState();
 
-        (,,,,, bool putFinalized, uint256 putFinalSpot,) = _marginEngine.oracleStates(loan.putInstrumentId);
-        (,,,,, bool callFinalized, uint256 callFinalSpot,) = _marginEngine.oracleStates(loan.callInstrumentId);
+        (bool putFinalized, uint256 putFinalSpot,) = _marginEngine.getInstrumentSettlementState(loan.putInstrumentId);
+        (bool callFinalized, uint256 callFinalSpot,) = _marginEngine.getInstrumentSettlementState(loan.callInstrumentId);
         if (!putFinalized || !callFinalized || putFinalSpot != callFinalSpot) revert CV_InvalidState();
 
         preview.finalSpot = putFinalSpot;
@@ -1127,32 +1127,11 @@ contract CollarVault is
             resolution.newPutFromInventoryTransfer
         );
 
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address longCallToken,
-            address cappedToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(resolution.newCallBucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(resolution.newCallBucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address longCallToken, address cappedToken) =
+            _marginEngine.getCoveredCallBucketState(resolution.newCallBucketId);
         bucketType;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (
             owner != address(this) || bucketInstrumentId != resolution.newCallInstrumentId
                 || collateralBalance != loan.collateralAmount || outstandingQuantity != loan.collateralAmount || settled
@@ -1164,32 +1143,11 @@ contract CollarVault is
     }
 
     function _validateActiveCallBucket(Loan storage loan) internal view {
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address longCallToken,
-            address cappedToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(loan.callBucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(loan.callBucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address longCallToken, address cappedToken) =
+            _marginEngine.getCoveredCallBucketState(loan.callBucketId);
         bucketType;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (
             owner != address(this) || bucketInstrumentId != loan.callInstrumentId
                 || collateralBalance != loan.collateralAmount || outstandingQuantity != loan.collateralAmount || settled
@@ -1204,33 +1162,12 @@ contract CollarVault is
         (address oldLongPutToken,) = _marginEngine.getBucketTokens(loan.putBucketId);
         if (IERC20(oldLongPutToken).balanceOf(address(this)) != 0) revert CV_InvalidState();
 
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address longCallToken,
-            address cappedToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(loan.callBucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(loan.callBucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address longCallToken, address cappedToken) =
+            _marginEngine.getCoveredCallBucketState(loan.callBucketId);
         bucketType;
         longCallToken;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (
             owner != address(this) || bucketInstrumentId != loan.callInstrumentId || settled || closed
                 || collateralBalance != 0 || outstandingQuantity != 0
@@ -1287,34 +1224,13 @@ contract CollarVault is
                 || newCallAction.collateralRecipient != address(0)
         ) revert CV_InvalidMessage();
 
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address longCallToken,
-            address cappedToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(newCallAction.bucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(newCallAction.bucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address longCallToken, address cappedToken) =
+            _marginEngine.getCoveredCallBucketState(newCallAction.bucketId);
         bucketType;
         longCallToken;
         cappedToken;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (
             owner != address(this) || bucketInstrumentId != newCallAction.instrumentId || collateralBalance != 0
                 || outstandingQuantity != 0 || settled || closed
@@ -1327,14 +1243,13 @@ contract CollarVault is
             uint64 expiry,
             uint256 strike,
             uint256 quantityScale,
-            uint8 optionType,
+            IMarginEngine.OptionType optionType,
             bool exists
-        ) = _marginEngine.instruments(newCallAction.instrumentId);
+        ) = _marginEngine.getInstrumentMetadata(newCallAction.instrumentId);
         quantityScale;
         if (
             !exists || quoteAsset != address(_usdc) || expiry != mandate.newMaturity
-                || optionType != uint8(IMarginEngine.OptionType.Call)
-                || underlying != _engineAsset[loan.collateralAsset]
+                || optionType != IMarginEngine.OptionType.Call || underlying != _engineAsset[loan.collateralAsset]
                 || collateralAsset != _engineAsset[loan.collateralAsset] || strike < mandate.minCallStrike
         ) revert CV_InvalidMessage();
         return strike;
@@ -1345,36 +1260,14 @@ contract CollarVault is
         RolloverMandate memory mandate,
         IMarginEngineRfqRouter.Action memory newPutAction
     ) internal view returns (uint256 newPutStrike) {
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address longToken,
-            address secondaryToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(newPutAction.bucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(newPutAction.bucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address longToken) =
+            _marginEngine.getPutBucketState(newPutAction.bucketId);
         bucketType;
         collateralBalance;
         outstandingQuantity;
         longToken;
-        secondaryToken;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (owner == address(0) || bucketInstrumentId != newPutAction.instrumentId || settled || closed) {
             revert CV_InvalidState();
         }
@@ -1386,13 +1279,13 @@ contract CollarVault is
             uint64 expiry,
             uint256 strike,
             uint256 quantityScale,
-            uint8 optionType,
+            IMarginEngine.OptionType optionType,
             bool exists
-        ) = _marginEngine.instruments(newPutAction.instrumentId);
+        ) = _marginEngine.getInstrumentMetadata(newPutAction.instrumentId);
         quantityScale;
         if (
             !exists || quoteAsset != address(_usdc) || expiry != mandate.newMaturity
-                || optionType != uint8(IMarginEngine.OptionType.Put) || underlying != _engineAsset[loan.collateralAsset]
+                || optionType != IMarginEngine.OptionType.Put || underlying != _engineAsset[loan.collateralAsset]
                 || collateralAsset != address(_usdc) || strike > mandate.maxPutStrike
         ) revert CV_InvalidMessage();
         return strike;
@@ -1516,9 +1409,9 @@ contract CollarVault is
             address collateral,
             uint64 expiry,
             uint256 registeredStrike,,
-            uint8 optionType,
+            IMarginEngine.OptionType optionType,
             bool exists
-        ) = _marginEngine.instruments(instrumentId);
+        ) = _marginEngine.getInstrumentMetadata(instrumentId);
 
         if (!exists || quoteAsset != address(_usdc) || expiry != maturity || registeredStrike != strike) {
             revert CV_InvalidConfig();
@@ -1527,17 +1420,17 @@ contract CollarVault is
         address expectedUnderlying = _engineAsset[collateralAsset];
         if (underlying != expectedUnderlying) revert CV_InvalidConfig();
         if (isPut) {
-            if (collateral != address(_usdc) || optionType != uint8(IMarginEngine.OptionType.Put)) {
+            if (collateral != address(_usdc) || optionType != IMarginEngine.OptionType.Put) {
                 revert CV_InvalidConfig();
             }
-        } else if (collateral != expectedUnderlying || optionType != uint8(IMarginEngine.OptionType.Call)) {
+        } else if (collateral != expectedUnderlying || optionType != IMarginEngine.OptionType.Call) {
             revert CV_InvalidConfig();
         }
     }
 
     function _validatePutBucket(uint256 bucketId, bytes32 instrumentId, uint256 expectedQuantity) internal view {
-        (bytes32 bucketInstrumentId,, address owner,, uint256 outstanding, address primaryToken,,,,,,,,,,) =
-            _marginEngine.buckets(bucketId);
+        (bytes32 bucketInstrumentId,, address owner,,) = _marginEngine.getBucketMetadata(bucketId);
+        (, uint256 outstanding, address primaryToken) = _marginEngine.getPutBucketState(bucketId);
         if (owner == address(0) || bucketInstrumentId != instrumentId || outstanding != expectedQuantity) {
             revert CV_InvalidConfig();
         }
@@ -1557,34 +1450,12 @@ contract CollarVault is
             return;
         }
 
-        (
-            bytes32 bucketInstrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address primaryToken,
-            address secondaryToken,
-            bool settled,
-            bool closed,
-            uint256 settlementCollateral,
-            uint256 settlementTotalEntitlement,
-            uint256 settlementPrimaryRateNumerator,
-            uint256 settlementPrimaryRateDenominator,
-            uint256 settlementSecondaryRateNumerator,
-            uint256 settlementSecondaryRateDenominator,
-            uint256 redeemedCollateral
-        ) = _marginEngine.buckets(bucketId);
+        (bytes32 bucketInstrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed) =
+            _marginEngine.getBucketMetadata(bucketId);
+        (uint256 collateralBalance, uint256 outstandingQuantity, address primaryToken) =
+            _marginEngine.getPutBucketState(bucketId);
         bucketType;
         collateralBalance;
-        secondaryToken;
-        settlementCollateral;
-        settlementTotalEntitlement;
-        settlementPrimaryRateNumerator;
-        settlementPrimaryRateDenominator;
-        settlementSecondaryRateNumerator;
-        settlementSecondaryRateDenominator;
-        redeemedCollateral;
         if (
             owner == address(0) || bucketInstrumentId != instrumentId || settled || closed
                 || outstandingQuantity < expectedQuantity
@@ -1597,14 +1468,14 @@ contract CollarVault is
     }
 
     function _finalizeInstrumentIfNeeded(bytes32 instrumentId) internal {
-        (,,,,, bool settlementFinalized,,) = _marginEngine.oracleStates(instrumentId);
+        (bool settlementFinalized,,) = _marginEngine.getInstrumentSettlementState(instrumentId);
         if (!settlementFinalized) {
             _marginEngine.finalizeInstrumentSettlement(instrumentId);
         }
     }
 
     function _settleBucketIfNeeded(uint256 bucketId) internal {
-        (,,,,,,, bool settled,,,,,,,,) = _marginEngine.buckets(bucketId);
+        (,,, bool settled,) = _marginEngine.getBucketMetadata(bucketId);
         if (!settled) {
             _marginEngine.settleBucket(bucketId);
         }

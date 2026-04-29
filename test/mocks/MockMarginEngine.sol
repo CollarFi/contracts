@@ -30,11 +30,6 @@ contract MockClaimToken is ERC20 {
 contract MockMarginEngine is IMarginEngine {
     using SafeERC20 for IERC20;
 
-    enum BucketType {
-        Put,
-        CoveredCall
-    }
-
     struct Instrument {
         address underlying;
         address quoteAsset;
@@ -190,7 +185,7 @@ contract MockMarginEngine is IMarginEngine {
         bucketId = nextBucketId++;
         buckets[bucketId] = Bucket({
             instrumentId: instrumentId,
-            bucketType: uint8(BucketType.Put),
+            bucketType: uint8(IMarginEngine.BucketType.Put),
             owner: owner,
             collateralBalance: 0,
             outstandingQuantity: 0,
@@ -210,14 +205,18 @@ contract MockMarginEngine is IMarginEngine {
 
     function depositPutCollateral(uint256 bucketId, uint256 amount) external {
         Bucket storage bucket = buckets[bucketId];
-        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.Put)) revert InvalidBucket();
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.Put)) {
+            revert InvalidBucket();
+        }
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), amount);
         bucket.collateralBalance += amount;
     }
 
     function issuePut(uint256 bucketId, uint256 quantity, address recipient) external {
         Bucket storage bucket = buckets[bucketId];
-        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.Put)) revert InvalidBucket();
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.Put)) {
+            revert InvalidBucket();
+        }
         if (msg.sender != bucket.owner || recipient == address(0)) revert Unauthorized();
         Instrument memory instrument = instruments[bucket.instrumentId];
 
@@ -243,7 +242,7 @@ contract MockMarginEngine is IMarginEngine {
         bucketId = nextBucketId++;
         buckets[bucketId] = Bucket({
             instrumentId: instrumentId,
-            bucketType: uint8(BucketType.CoveredCall),
+            bucketType: uint8(IMarginEngine.BucketType.CoveredCall),
             owner: protocolOwner,
             collateralBalance: 0,
             outstandingQuantity: 0,
@@ -270,7 +269,7 @@ contract MockMarginEngine is IMarginEngine {
         Bucket storage bucket = buckets[bucketId];
         if (
             msg.sender != protocolOwner || bucket.owner == address(0)
-                || bucket.bucketType != uint8(BucketType.CoveredCall)
+                || bucket.bucketType != uint8(IMarginEngine.BucketType.CoveredCall)
         ) {
             revert Unauthorized();
         }
@@ -295,7 +294,7 @@ contract MockMarginEngine is IMarginEngine {
         bucket.settled = true;
         bucket.settlementCollateral = bucket.collateralBalance;
 
-        if (bucket.bucketType == uint8(BucketType.Put)) {
+        if (bucket.bucketType == uint8(IMarginEngine.BucketType.Put)) {
             bucket.settlementPrimaryRateNumerator =
                 Math.max(instrument.strike, state.finalSpotPrice) - state.finalSpotPrice;
             bucket.settlementPrimaryRateDenominator = instrument.quantityScale;
@@ -336,7 +335,9 @@ contract MockMarginEngine is IMarginEngine {
 
     function redeemPut(uint256 bucketId, uint256 quantity, address to) external returns (uint256 payout) {
         Bucket storage bucket = buckets[bucketId];
-        if (!bucket.settled || bucket.bucketType != uint8(BucketType.Put) || to == address(0)) revert InvalidState();
+        if (!bucket.settled || bucket.bucketType != uint8(IMarginEngine.BucketType.Put) || to == address(0)) {
+            revert InvalidState();
+        }
         MockClaimToken(bucket.primaryToken).burn(msg.sender, quantity);
 
         payout = _bucketPayout(
@@ -365,13 +366,13 @@ contract MockMarginEngine is IMarginEngine {
     function getBucketMetadata(uint256 bucketId)
         external
         view
-        returns (bytes32 instrumentId, uint8 bucketType, address owner, bool settled, bool closed)
+        returns (bytes32 instrumentId, IMarginEngine.BucketType bucketType, address owner, bool settled, bool closed)
     {
         Bucket memory bucket = buckets[bucketId];
         if (bucket.owner == address(0)) revert InvalidBucket();
 
         instrumentId = bucket.instrumentId;
-        bucketType = bucket.bucketType;
+        bucketType = IMarginEngine.BucketType(bucket.bucketType);
         owner = bucket.owner;
         settled = bucket.settled;
         closed = bucket.closed;
@@ -387,7 +388,7 @@ contract MockMarginEngine is IMarginEngine {
             uint64 expiry,
             uint256 strike,
             uint256 quantityScale,
-            uint8 optionType,
+            IMarginEngine.OptionType optionType,
             bool exists
         )
     {
@@ -399,13 +400,82 @@ contract MockMarginEngine is IMarginEngine {
         expiry = instrument.expiry;
         strike = instrument.strike;
         quantityScale = instrument.quantityScale;
-        optionType = instrument.optionType;
+        optionType = IMarginEngine.OptionType(instrument.optionType);
         exists = instrument.exists;
+    }
+
+    function getInstrumentSettlementState(bytes32 instrumentId)
+        external
+        view
+        returns (bool settlementFinalized, uint256 finalSpotPrice, uint64 finalizedAt)
+    {
+        OracleState memory state = oracleStates[instrumentId];
+        settlementFinalized = state.settlementFinalized;
+        finalSpotPrice = state.finalSpotPrice;
+        finalizedAt = state.finalizedAt;
+    }
+
+    function getPutBucketState(uint256 bucketId)
+        external
+        view
+        returns (uint256 collateralBalance, uint256 outstandingQuantity, address longToken)
+    {
+        Bucket memory bucket = buckets[bucketId];
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.Put)) {
+            revert InvalidBucket();
+        }
+
+        collateralBalance = bucket.collateralBalance;
+        outstandingQuantity = bucket.outstandingQuantity;
+        longToken = bucket.primaryToken;
+    }
+
+    function getCoveredCallBucketState(uint256 bucketId)
+        external
+        view
+        returns (uint256 collateralBalance, uint256 coveredQuantity, address longCallToken, address writerResidualToken)
+    {
+        Bucket memory bucket = buckets[bucketId];
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.CoveredCall)) {
+            revert InvalidBucket();
+        }
+
+        collateralBalance = bucket.collateralBalance;
+        coveredQuantity = bucket.outstandingQuantity;
+        longCallToken = bucket.primaryToken;
+        writerResidualToken = bucket.secondaryToken;
+    }
+
+    function getBucketSettlementState(uint256 bucketId)
+        external
+        view
+        returns (
+            uint256 settlementCollateral,
+            uint256 settlementTotalEntitlement,
+            uint256 settlementPrimaryRateNumerator,
+            uint256 settlementPrimaryRateDenominator,
+            uint256 settlementSecondaryRateNumerator,
+            uint256 settlementSecondaryRateDenominator,
+            uint256 redeemedCollateral
+        )
+    {
+        Bucket memory bucket = buckets[bucketId];
+        if (bucket.owner == address(0)) revert InvalidBucket();
+
+        settlementCollateral = bucket.settlementCollateral;
+        settlementTotalEntitlement = bucket.settlementTotalEntitlement;
+        settlementPrimaryRateNumerator = bucket.settlementPrimaryRateNumerator;
+        settlementPrimaryRateDenominator = bucket.settlementPrimaryRateDenominator;
+        settlementSecondaryRateNumerator = bucket.settlementSecondaryRateNumerator;
+        settlementSecondaryRateDenominator = bucket.settlementSecondaryRateDenominator;
+        redeemedCollateral = bucket.redeemedCollateral;
     }
 
     function issuePutFromRfq(uint256 bucketId, uint256 quantity, address recipient) external {
         Bucket storage bucket = buckets[bucketId];
-        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.Put)) revert InvalidBucket();
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.Put)) {
+            revert InvalidBucket();
+        }
         if (recipient == address(0)) revert InvalidRecipient();
         Instrument memory instrument = instruments[bucket.instrumentId];
 
@@ -426,7 +496,9 @@ contract MockMarginEngine is IMarginEngine {
         address cappedRecipient
     ) external {
         Bucket storage bucket = buckets[bucketId];
-        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.CoveredCall)) revert InvalidBucket();
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.CoveredCall)) {
+            revert InvalidBucket();
+        }
         if (longCallRecipient == address(0) || cappedRecipient == address(0)) revert InvalidRecipient();
 
         address collateralAsset = instruments[bucket.instrumentId].collateralAsset;
@@ -445,7 +517,9 @@ contract MockMarginEngine is IMarginEngine {
         address collateralRecipient
     ) external returns (uint256 payout) {
         Bucket storage bucket = buckets[bucketId];
-        if (bucket.owner == address(0) || bucket.bucketType != uint8(BucketType.CoveredCall)) revert InvalidBucket();
+        if (bucket.owner == address(0) || bucket.bucketType != uint8(IMarginEngine.BucketType.CoveredCall)) {
+            revert InvalidBucket();
+        }
         if (collateralRecipient == address(0)) revert InvalidRecipient();
 
         MockClaimToken(bucket.primaryToken).burn(burnLongCallFrom, quantity);
@@ -463,7 +537,7 @@ contract MockMarginEngine is IMarginEngine {
         returns (uint256 payout)
     {
         Bucket storage bucket = buckets[bucketId];
-        if (!bucket.settled || bucket.bucketType != uint8(BucketType.CoveredCall) || to == address(0)) {
+        if (!bucket.settled || bucket.bucketType != uint8(IMarginEngine.BucketType.CoveredCall) || to == address(0)) {
             revert InvalidState();
         }
 

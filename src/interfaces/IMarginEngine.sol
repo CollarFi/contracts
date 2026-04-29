@@ -7,6 +7,11 @@ interface IMarginEngine {
         Call
     }
 
+    enum BucketType {
+        Put,
+        CoveredCall
+    }
+
     function computeInstrumentId(
         address underlying,
         address quoteAsset,
@@ -25,7 +30,7 @@ interface IMarginEngine {
         OptionType optionType
     ) external returns (bytes32 instrumentId);
 
-    function instruments(bytes32 instrumentId)
+    function getInstrumentMetadata(bytes32 instrumentId)
         external
         view
         returns (
@@ -35,37 +40,34 @@ interface IMarginEngine {
             uint64 expiry,
             uint256 strike,
             uint256 quantityScale,
-            uint8 optionType,
+            OptionType optionType,
             bool exists
         );
 
-    function oracleStates(bytes32 instrumentId)
+    function getInstrumentSettlementState(bytes32 instrumentId)
         external
         view
-        returns (
-            uint256 midMark,
-            uint256 closeoutMark,
-            uint256 spotPrice,
-            uint64 markUpdatedAt,
-            uint64 spotUpdatedAt,
-            bool settlementFinalized,
-            uint256 finalSpotPrice,
-            uint64 finalizedAt
-        );
+        returns (bool settlementFinalized, uint256 finalSpotPrice, uint64 finalizedAt);
 
-    function buckets(uint256 bucketId)
+    function getBucketMetadata(uint256 bucketId)
+        external
+        view
+        returns (bytes32 instrumentId, BucketType bucketType, address owner, bool settled, bool closed);
+
+    function getPutBucketState(uint256 bucketId)
+        external
+        view
+        returns (uint256 collateralBalance, uint256 outstandingQuantity, address longToken);
+
+    function getCoveredCallBucketState(uint256 bucketId)
+        external
+        view
+        returns (uint256 collateralBalance, uint256 coveredQuantity, address longCallToken, address writerResidualToken);
+
+    function getBucketSettlementState(uint256 bucketId)
         external
         view
         returns (
-            bytes32 instrumentId,
-            uint8 bucketType,
-            address owner,
-            uint256 collateralBalance,
-            uint256 outstandingQuantity,
-            address primaryToken,
-            address secondaryToken,
-            bool settled,
-            bool closed,
             uint256 settlementCollateral,
             uint256 settlementTotalEntitlement,
             uint256 settlementPrimaryRateNumerator,
